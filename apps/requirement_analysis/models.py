@@ -203,6 +203,8 @@ class AIModelConfig(models.Model):
         ('qwen', '通义千问'),
         ('siliconflow', '硅基流动'),
         ('zhipu', '智谱'),
+        ('anthropic', 'Anthropic (Claude)'),
+        ('openai', 'OpenAI'),
         ('other', '其他'),
     ]
 
@@ -447,7 +449,7 @@ class AIModelService:
         data = {
             'model': config.model_name,
             'messages': messages,
-            'max_tokens': actual_max_tokens,
+            'max_completion_tokens': actual_max_tokens,
             'temperature': config.temperature,
             'top_p': config.top_p,
             'stream': False
@@ -571,7 +573,7 @@ class AIModelService:
             data = {
                 'model': config.model_name,
                 'messages': current_messages,
-                'max_tokens': actual_max_tokens,
+                'max_completion_tokens': actual_max_tokens,
                 'temperature': config.temperature,
                 'top_p': config.top_p,
                 'stream': True

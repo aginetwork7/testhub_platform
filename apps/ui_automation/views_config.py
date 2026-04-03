@@ -407,18 +407,32 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         base_url = base_url.rstrip('/')
 
         try:
-            # 尝试调用 chat completions 接口 (OpenAI Compatible)
-            url = f"{base_url}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-
-            data = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1
-            }
+            # 根据 provider 选择不同的 API 格式
+            if provider == 'anthropic':
+                # Anthropic API 格式
+                url = f"{base_url}/v1/messages"
+                headers = {
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": model_name,
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "Hi"}]
+                }
+            else:
+                # OpenAI Compatible API 格式
+                url = f"{base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_completion_tokens": 1
+                }
 
             logger.info(f"AI智能模式预览 - 发送POST请求到: {url}")
             # 增加超时时间：连接超时60秒，读取超时900秒
@@ -488,17 +502,32 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         base_url = base_url.rstrip('/')
 
         try:
-            url = f"{base_url}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {config.api_key}",
-                "Content-Type": "application/json"
-            }
-
-            data = {
-                "model": config.model_name,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1
-            }
+            # 根据 provider 选择不同的 API 格式
+            if config.model_type == 'anthropic':
+                # Anthropic API 格式
+                url = f"{base_url}/v1/messages"
+                headers = {
+                    "x-api-key": config.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": config.model_name,
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "Hi"}]
+                }
+            else:
+                # OpenAI Compatible API 格式
+                url = f"{base_url}/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {config.api_key}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": config.model_name,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "max_completion_tokens": 10
+                }
 
             logger.info(f"AI智能模式 - 发送POST请求到: {url}")
             # 增加超时时间：连接超时60秒，读取超时900秒

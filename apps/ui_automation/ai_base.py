@@ -2,6 +2,19 @@ import logging
 
 logger = logging.getLogger('django')
 
+# 设置 AI 诊断日志，写入独立文件
+_ai_diag_logger = logging.getLogger('ai_diag')
+if not _ai_diag_logger.handlers:
+    import os as _os
+    _log_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))), 'logs')
+    _os.makedirs(_log_dir, exist_ok=True)
+    _fh = logging.FileHandler(_os.path.join(_log_dir, 'ai_agent_debug.log'), encoding='utf-8')
+    _fh.setLevel(logging.DEBUG)
+    _fh.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    _ai_diag_logger.addHandler(_fh)
+    _ai_diag_logger.setLevel(logging.DEBUG)
+    _ai_diag_logger.propagate = False
+
 import os
 
 # 禁用 browser-use 遥测
@@ -13,6 +26,11 @@ import json
 import re
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+
+# Anthropic 支持（延迟导入，避免未安装时报错）
+def _get_chat_anthropic():
+    from langchain_anthropic import ChatAnthropic
+    return ChatAnthropic
 
 # 加载环境变量
 load_dotenv()
@@ -215,6 +233,22 @@ try:
 except ImportError:
     if hasattr(ChatOpenAI, 'model_config'):
         ChatOpenAI.model_config['extra'] = 'allow'
+
+# Patch ChatAnthropic to allow setting attributes (same as ChatOpenAI)
+try:
+    from langchain_anthropic import ChatAnthropic as _ChatAnthropic
+    from pydantic import ConfigDict as _ConfigDict
+
+    if hasattr(_ChatAnthropic, 'model_config'):
+        if isinstance(_ChatAnthropic.model_config, dict):
+            _ChatAnthropic.model_config['extra'] = 'allow'
+        else:
+            _ChatAnthropic.model_config = _ConfigDict(extra='allow', arbitrary_types_allowed=True)
+    else:
+        _ChatAnthropic.model_config = _ConfigDict(extra='allow', arbitrary_types_allowed=True)
+    logger.info("✅ Patched ChatAnthropic.model_config to allow extra fields")
+except Exception as e:
+    logger.warning(f"⚠️ Failed to patch ChatAnthropic: {e}")
 
 # 修改 ActionModel 配置以允许额外字段
 try:
@@ -422,53 +456,98 @@ try:
         _token_service = self
 
         async def _fixed_tracked_ainvoke(messages, output_format=None, **kwargs):
-            # Sanitize message contents
-            def _content_to_str(content):
-                if isinstance(content, str): return content
-                if isinstance(content, list):
-                    parts = []
-                    for item in content:
-                        if isinstance(item, str):
-                            parts.append(item)
-                        elif isinstance(item, dict):
-                            if 'text' in item:
-                                parts.append(str(item['text']))
-                            elif 'image' in item or 'image_url' in item:
-                                parts.append("[image]")
-                        else:
-                            parts.append(str(item))
-                    return "\n".join(parts)
-                if isinstance(content, dict):
-                    if 'text' in content: return str(content['text'])
-                    if 'content' in content: return str(content['content'])
-                    if 'image' in content or 'image_url' in content: return "[image]"
-                return str(content)
+            # 诊断日志：记录每次调用的消息数量和类型
+            msg_types = [type(m).__name__ for m in messages]
+            _ai_diag_logger.info(f"[ainvoke] === NEW CALL === {len(messages)} messages, types={msg_types}")
+            for idx, m in enumerate(messages):
+                content = getattr(m, 'content', '')
+                content_str = str(content)
+                has_image = isinstance(content, list) and any(
+                    isinstance(item, dict) and ('image_url' in item or item.get('type') == 'image_url')
+                    for item in content
+                )
+                _ai_diag_logger.info(f"  msg[{idx}] {type(m).__name__}: has_image={has_image}, len={len(content_str)}")
+                _ai_diag_logger.debug(f"  msg[{idx}] content_preview: {content_str[:500]}")
+            logger.info(f"🔍 [ainvoke] Called with {len(messages)} messages: {msg_types}")
 
-            def _sanitize_message(msg):
-                msg_type_name = type(msg).__name__
-                content = getattr(msg, 'content', msg)
-                content_str = _content_to_str(content)
-                if msg_type_name == 'SystemMessage': return LangChainSystemMessage(content=content_str)
-                if msg_type_name in ('HumanMessage', 'UserMessage'): return HumanMessage(content=content_str)
-                if msg_type_name == 'AIMessage': return AIMessage(content=content_str)
-                if isinstance(msg, (HumanMessage, LangChainSystemMessage, AIMessage)): return type(msg)(
-                    content=content_str)
-                return HumanMessage(content=str(content_str))
+            # 转换 browser-use 自定义消息类型为 langchain 消息类型
+            # browser-use 使用自己的 SystemMessage/UserMessage（非 langchain 原生类），
+            # langchain-anthropic 无法识别。需要转换但保留多模态内容（图片等）。
+            def _convert_message(msg):
+                msg_cls_name = type(msg).__name__
+                content = getattr(msg, 'content', '')
 
-            sanitized_messages = [_sanitize_message(m) for m in messages]
+                # 如果已是 langchain 消息类型，直接返回
+                if isinstance(msg, (HumanMessage, LangChainSystemMessage, AIMessage)):
+                    return msg
 
+                # 转换 content：browser-use 的 ContentPartTextParam/ContentPartImageParam -> dict
+                def _convert_content(c):
+                    if isinstance(c, str):
+                        return c
+                    if isinstance(c, list):
+                        parts = []
+                        for item in c:
+                            if isinstance(item, str):
+                                parts.append({"type": "text", "text": item})
+                            elif hasattr(item, 'model_dump'):
+                                # ContentPartTextParam / ContentPartImageParam
+                                dumped = item.model_dump()
+                                parts.append(dumped)
+                            elif isinstance(item, dict):
+                                parts.append(item)
+                            else:
+                                parts.append({"type": "text", "text": str(item)})
+                        return parts
+                    if hasattr(c, 'model_dump'):
+                        return c.model_dump()
+                    return str(c)
+
+                converted_content = _convert_content(content)
+
+                if msg_cls_name == 'SystemMessage' or getattr(msg, 'role', '') == 'system':
+                    # SystemMessage content 必须是字符串
+                    if isinstance(converted_content, list):
+                        text_parts = []
+                        for p in converted_content:
+                            if isinstance(p, dict) and p.get('type') == 'text':
+                                text_parts.append(p['text'])
+                            elif isinstance(p, str):
+                                text_parts.append(p)
+                        return LangChainSystemMessage(content="\n".join(text_parts))
+                    return LangChainSystemMessage(content=str(converted_content))
+                elif msg_cls_name in ('UserMessage', 'HumanMessage') or getattr(msg, 'role', '') == 'user':
+                    return HumanMessage(content=converted_content)
+                elif msg_cls_name == 'AIMessage' or getattr(msg, 'role', '') == 'assistant':
+                    return AIMessage(content=converted_content)
+                else:
+                    _ai_diag_logger.warning(f"[ainvoke] Unknown message type: {msg_cls_name}, converting to HumanMessage")
+                    return HumanMessage(content=str(converted_content))
+
+            converted_messages = [_convert_message(m) for m in messages]
+            _ai_diag_logger.info(f"[ainvoke] Converted message types: {[type(m).__name__ for m in converted_messages]}")
+
+            # 处理 output_format / response_format
+            # Anthropic API 不支持 response_format，仅对 OpenAI 兼容 API 保留
             output_format = kwargs.pop('output_format', None)
-            if output_format:
+            is_anthropic = getattr(llm, 'provider', '') == 'anthropic'
+            if output_format and not is_anthropic:
                 kwargs['response_format'] = {"type": "json_object"}
+            elif is_anthropic:
+                kwargs.pop('response_format', None)
+            _ai_diag_logger.info(f"[ainvoke] is_anthropic={is_anthropic}, kwargs keys: {list(kwargs.keys())}")
 
             # Add retry logic for LLM invocation
             max_retries = 2  # 重试次数为2次
             last_exception = None
             for attempt in range(max_retries):
                 try:
-                    result = await _original_ainvoke(sanitized_messages, **kwargs)
+                    _ai_diag_logger.info(f"[ainvoke] Attempt {attempt + 1}/{max_retries}, calling _original_ainvoke...")
+                    result = await _original_ainvoke(converted_messages, **kwargs)
+                    _ai_diag_logger.info(f"[ainvoke] _original_ainvoke succeeded on attempt {attempt + 1}")
                     break
                 except Exception as e:
+                    _ai_diag_logger.error(f"[ainvoke] _original_ainvoke FAILED attempt {attempt + 1}: {type(e).__name__}: {e}")
                     last_exception = e
                     if "response_format" in str(e):
                         kwargs.pop('response_format', None)
@@ -479,8 +558,15 @@ try:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(0.5)  # 等待0.5秒
             else:
+                _ai_diag_logger.error(f"[ainvoke] ALL {max_retries} attempts FAILED. last_exception: {last_exception}")
                 logger.error(f"❌ LLM ainvoke failed after {max_retries} attempts.")
                 raise last_exception
+
+            # 诊断日志：记录 LLM 原始响应
+            raw_content = result.content if hasattr(result, 'content') else str(result)
+            _ai_diag_logger.info(f"[ainvoke] LLM response type={type(result).__name__}, content_len={len(str(raw_content))}")
+            _ai_diag_logger.info(f"[ainvoke] LLM response preview: {str(raw_content)[:500]}")
+            logger.info(f"🔍 [ainvoke] LLM response type: {type(result).__name__}, content_len={len(str(raw_content))}")
 
             # Enhance response parsing
             import json as json_module
@@ -609,6 +695,24 @@ try:
                 except Exception as e:
                     logger.error(f"🔧 Failed to create AgentOutput: {e}")
 
+            # 诊断日志：记录解析结果
+            if agent_output:
+                action_count = len(getattr(agent_output, 'action', []))
+                thinking_preview = str(getattr(agent_output, 'thinking', ''))[:200]
+                next_goal_preview = str(getattr(agent_output, 'next_goal', ''))[:200]
+                actions_detail = []
+                for a in getattr(agent_output, 'action', []):
+                    a_dict = a.model_dump() if hasattr(a, 'model_dump') else str(a)
+                    actions_detail.append(str(a_dict))
+                _ai_diag_logger.info(f"[ainvoke] Parsed AgentOutput: actions={action_count}")
+                _ai_diag_logger.info(f"[ainvoke]   thinking: {thinking_preview}")
+                _ai_diag_logger.info(f"[ainvoke]   next_goal: {next_goal_preview}")
+                _ai_diag_logger.info(f"[ainvoke]   actions: {actions_detail}")
+                logger.info(f"🔍 [ainvoke] Parsed: {action_count} actions, thinking={thinking_preview[:80]}")
+            else:
+                _ai_diag_logger.warning(f"[ainvoke] No AgentOutput! parsed_data={parsed_data}")
+                logger.warning(f"🔍 [ainvoke] No AgentOutput parsed. parsed_data keys: {list(parsed_data.keys()) if parsed_data else 'None'}")
+
             class _ResponseWrapper:
                 def __init__(self, orig, completion_obj):
                     self._orig = orig
@@ -630,7 +734,9 @@ try:
             wrapped = _ResponseWrapper(result, agent_output)
             if hasattr(wrapped, 'usage') and wrapped.usage:
                 try:
-                    _token_service.add_usage(llm.model, wrapped.usage)
+                    # 兼容 ChatOpenAI (model_name) 和 ChatAnthropic (model)
+                    model_id = getattr(llm, 'model', None) or getattr(llm, 'model_name', 'unknown')
+                    _token_service.add_usage(model_id, wrapped.usage)
                 except:
                     pass
 
@@ -996,23 +1102,42 @@ class BaseBrowserAgent:
                 final_temperature = 0.0
                 logger.info(f"⚙️ 使用默认 temperature={final_temperature}")
 
-        self.llm = ChatOpenAI(
-            model=self.model_name,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            temperature=final_temperature,
-            callbacks=[RawResponseLogger()]
-        )
+        # 根据 provider 类型选择不同的 LLM
+        if self.provider == 'anthropic':
+            # 使用 Anthropic API
+            ChatAnthropic = _get_chat_anthropic()
+            self.llm = ChatAnthropic(
+                model=self.model_name,
+                api_key=self.api_key,
+                temperature=final_temperature,
+                max_tokens=4096,
+                callbacks=[RawResponseLogger()]
+            )
+            logger.info(f"✅ 使用 Anthropic API: model={self.model_name}")
+        else:
+            # 使用 OpenAI Compatible API
+            self.llm = ChatOpenAI(
+                model=self.model_name,
+                api_key=self.api_key,
+                base_url=self.base_url,
+                temperature=final_temperature,
+                callbacks=[RawResponseLogger()]
+            )
+            logger.info(f"✅ 使用 OpenAI Compatible API: model={self.model_name}, base_url={self.base_url}")
 
-        # browser-use requirement
+        # browser-use requirement: 确保 llm 有 provider, model, model_name 属性
+        # ChatOpenAI 使用 model_name, ChatAnthropic 使用 model
+        # browser_use 内部访问 llm.model_name，所以两种 LLM 都需要有 model_name
         try:
             object.__setattr__(self.llm, 'provider', self.provider)
             object.__setattr__(self.llm, 'model', self.model_name)
+            object.__setattr__(self.llm, 'model_name', self.model_name)
         except:
             if not hasattr(self.llm, '__pydantic_extra__') or self.llm.__pydantic_extra__ is None:
                 self.llm.__pydantic_extra__ = {}
             self.llm.__pydantic_extra__['provider'] = self.provider
             self.llm.__pydantic_extra__['model'] = self.model_name
+            self.llm.__pydantic_extra__['model_name'] = self.model_name
 
     def _format_action(self, action):
         try:
@@ -1032,7 +1157,9 @@ class BaseBrowserAgent:
 
             descriptions = []
             for name, params in action_dict.items():
-                if not params and name not in ['scroll_down', 'scroll_up', 'done']: continue
+                # 跳过空参数的 action（除了特殊的无参数 action）
+                if not params and name not in ['scroll_down', 'scroll_up', 'done', 'wait']:
+                    continue
 
                 if name in ['go_to_url', 'navigate']:
                     url = params.get('url') if isinstance(params, dict) else params
@@ -1053,9 +1180,17 @@ class BaseBrowserAgent:
                     descriptions.append("关闭当前标签页")
                 elif name == 'done':
                     descriptions.append("任务完成")
+                elif name == 'wait':
+                    descriptions.append("等待")
+                elif name in ['scroll_down', 'scroll_up']:
+                    descriptions.append(f"{name.replace('_', ' ')}")
                 else:
-                    descriptions.append(f"{name}")
-            return " | ".join(descriptions)
+                    # 对于其他 action，显示名称和参数
+                    if params:
+                        descriptions.append(f"{name}: {params}")
+                    else:
+                        descriptions.append(f"{name}")
+            return " | ".join(descriptions) if descriptions else "（无浏览器操作，仅思考/分析）"
         except:
             return "执行操作"
 
@@ -1467,7 +1602,6 @@ class BaseBrowserAgent:
             # macOS 和 Windows 使用显示模式
             extra_args.extend([
                 '--no-sandbox',  # 兼容性
-                '--disable-gpu',
                 '--remote-debugging-port=9222',
             ])
 
@@ -1699,10 +1833,10 @@ class BaseBrowserAgent:
             llm=self.llm,
             controller=controller,
             browser_profile=browser_profile,
-            use_vision=False,
-            max_actions_per_step=10,  # 增加步进密度，减少总步骤数，降低超时风险
-            max_retries=1,  # 减少重试次数以提高速度 (从2改为1)
-            max_failures=2,  # 减少最大失败次数，避免过长等待 (从默认3改为2)
+            use_vision=True,
+            max_actions_per_step=10,  # 每步最多执行的 action 数量
+            max_retries=3,  # 每个步骤重试次数
+            max_failures=20,  # 最大连续失败次数，增加到20次避免因临时失败导致任务中断
             llm_timeout=60,  # 设置LLM调用超时为60秒（支持硅基流动等大模型API）
             step_timeout=90,  # 设置每步超时为90秒
             generate_gif=self.enable_gif,  # 根据开关决定是否生成GIF
@@ -1830,7 +1964,26 @@ class BaseBrowserAgent:
                             if has_real_action:
                                 break
 
-                        action_str = " | ".join([self._format_action(a) for a in actions])
+                        action_parts = [self._format_action(a) for a in actions]
+                        action_str = " | ".join([p for p in action_parts if p])
+                        
+                        # 获取思考内容
+                        model_output = getattr(step, 'model_output', None)
+                        thinking = getattr(model_output, 'thinking', None) if model_output else None
+                        next_goal = getattr(model_output, 'next_goal', None) if model_output else None
+                        thinking_content = thinking or next_goal or ''
+                        
+                        if not action_str or '无浏览器操作' in action_str:
+                            # 如果没有有效的浏览器操作，显示思考内容
+                            if thinking_content:
+                                action_str = f"思考: {thinking_content}"
+                            else:
+                                action_str = "（等待/分析中）"
+                        elif thinking_content:
+                            # 有浏览器操作时，也附带思考内容（简短截取）
+                            short_thinking = thinking_content[:50] + '...' if len(thinking_content) > 50 else thinking_content
+                            action_str = f"{action_str}\n   💭 {short_thinking}"
+                        
                         log_content = f"\n[Step {i + 1}]\n执行: {action_str}\n"
 
                         if callback:
