@@ -1,0 +1,25 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# 安装 node-gyp 编译依赖（tree-sitter 等原生模块需要）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 单独复制 package.json 以利用 Docker 缓存加速
+COPY frontend/package.json frontend/package-lock.json* ./
+
+# 安装前端依赖（retry 3 次防止网络抖动）
+RUN npm install --registry=https://registry.npmmirror.com --maxsockets=5 || \
+    npm install --registry=https://registry.npmmirror.com --maxsockets=5 || \
+    npm install --registry=https://registry.npmmirror.com --maxsockets=5
+
+# 复制前端源码
+COPY frontend/ .
+
+# Vite 开发服务器默认监听 3000 端口
+EXPOSE 3000
+
+# 启动开发服务器 (--host 参数用于允许外部访问容器)
+CMD ["npm", "run", "dev", "--", "--host"]

@@ -86,10 +86,3 @@ frontend/.DS_Store
 frontend/*.log
 frontend/dist/
 
-# Docker
-Dockerfile*
-docker-compose*.yml
-.dockerignore
-nginx.conf
-Makefile
-build-multiplatform.sh
