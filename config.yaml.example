@@ -1,0 +1,223 @@
+# TestHub 统一配置文件示例
+# 此文件为 config.yaml 的示例模板
+# 实际使用时，请复制 config.yaml.example 为 config.yaml 并根据需要修改
+
+# ================================
+# 服务端口配置
+# ================================
+server:
+  # 前端服务端口（开发环境）
+  frontend_port: 3000
+  # 后端服务端口（开发环境）
+  backend_port: 8000
+  # 后端服务主机地址
+  backend_host: "127.0.0.1"
+  # 前端服务URL（用于生成报告链接等）
+  frontend_url: "http://localhost:3000"
+  # 是否启用后端debug
+  debug: false
+  # 后端SECRET_KEY，可使用backend/docs/key.py生成
+  secret_key: "django-insecure-please-change-this-in-production"
+
+# ================================
+# 数据库配置
+# ================================
+database:
+  # 数据库名称
+  name: testhub
+  # 数据库用户名
+  user: root
+  # 数据库密码（生产环境请修改）
+  password: ""
+  # 数据库主机
+  host: "127.0.0.1"
+  # 数据库端口
+  port: 3306
+  # 数据库字符集
+  charset: utf8mb4
+
+# ================================
+# Redis 配置
+# ================================
+redis:
+  # Redis 连接 URL
+  url: "redis://127.0.0.1:6379/"
+  # Django任务队列
+  redis_db: 0
+  # Redis 缓存数据库编号
+  cache_db: 1
+  # Redis 会话数据库编号
+  session_db: 2
+
+# ================================
+# 缓存配置
+# ================================
+cache:
+  # 默认缓存超时时间（秒）
+  default_timeout: 300
+  # 缓存键前缀
+  key_prefix: "testhub"
+  # OCR 识别图片最大尺寸
+  ocr_max_size: 50
+
+# ================================
+# 日志配置
+# ================================
+logging:
+  # 日志目录
+  dir: "backend/logs"
+  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+  # 是否启用DEBUG日志输出
+  debug_enabled: false
+  # 日志文件最大大小（MB）
+  max_bytes: 10
+  # 日志文件备份数量
+  backup_count: 10
+  # 日志格式（统一格式：时间 - [模块-->函数:行号] - 级别 - 消息）
+  format: "{time:YYYY-MM-DD HH:mm:ss.SSS} - [{name}-->{function}:{line}] - {level} - {message}"
+
+# ================================
+# JWT 配置
+# ================================
+jwt:
+  # Access Token 有效期（分钟）
+  access_token_lifetime: 30
+  # Refresh Token 有效期（天）
+  refresh_token_lifetime: 7
+  # 是否轮换 Refresh Token
+  rotate_refresh_tokens: true
+  # 是否将旧 Refresh Token 加入黑名单
+  blacklist_after_rotation: true
+
+# ================================
+# 速率限制配置
+# ================================
+throttling:
+  # 匿名用户速率限制（请求/小时）
+  anon_rate: "100/hour"
+  # 认证用户速率限制（请求/小时）
+  user_rate: "1000/hour"
+
+# ================================
+# CORS 配置
+# ================================
+cors:
+  # 允许的跨域来源（开发环境）
+  allowed_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+    - "http://localhost:8080"
+    - "http://127.0.0.1:8080"
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
+  
+  # 是否允许携带凭证
+  allow_credentials: true
+  
+  # 允许的请求头
+  allowed_headers:
+    - "accept"
+    - "accept-encoding"
+    - "authorization"
+    - "content-type"
+    - "dnt"
+    - "origin"
+    - "user-agent"
+    - "x-csrftoken"
+    - "x-requested-with"
+    - "cache-control"
+
+# ================================
+# 邮件配置
+# ================================
+email:
+  # SMTP 服务器地址
+  host: "smtp.gmail.com"
+  # SMTP 端口
+  port: 587
+  # 是否使用 TLS
+  use_tls: true
+  # 是否使用 SSL
+  use_ssl: false
+  # 发件人邮箱
+  host_user: ""
+  # 发件人密码
+  host_password: ""
+  # 默认发件人
+  default_from_email: "webmaster@localhost"
+  # 邮件超时时间（秒）
+  timeout: 30
+
+# ================================
+# Allure 配置
+# ================================
+allure:
+  # Allure 命令行工具路径（不包含可执行文件名）
+  bin_path: "expand/allure/bin"
+  # Allure 静态资源目录
+  static_dir: "allure-static"
+  # Allure 报告输出目录
+  reports_dir: "allure-reports"
+  # Allure 测试结果目录
+  results_dir: "allure-results"
+  # Allure AI 录制目录
+  ai_recording: "ai_recording"
+  # Allure API 测试目录
+  api_testing: "api_testing"
+  # Allure app自动化测试目录
+  app_automation: "app_automation"
+
+# ================================
+# 路径配置
+# ================================
+paths:
+  # Media 文件根目录（相对于项目根目录）
+  media_root: "expand/media"
+  # APP 自动化模板目录
+  app_automation_template: "apps/app_automation/Template"
+  # UI 组件包配置文件
+  ui_component_pack: "apps/core/management/commands/ui-component-pack.yaml"
+  # 数据工厂静态图片目录
+  data_factory_static_img: "static_files/img"
+  # APP 自动化截图目录
+  app_automation_screenshots: "app-automation/screenshots"
+  # UI 自动化截图目录
+  ui_automation_screenshots: "ui_automation/screenshots"
+  # Chroma 向量数据库目录
+  chroma_db: "expand/chroma_db"
+
+# ================================
+# 超时配置
+# ================================
+timeouts:
+  # API 请求超时（秒）
+  api_request: 30
+  # Allure 报告生成超时（秒）
+  allure_report: 30
+  # 进程等待超时（秒）
+  process_wait: 5
+  # 测试执行超时（秒）
+  test_execution: 60
+  # AI 请求超时（秒）
+  ai_request: 60
+  # AI 快速请求超时（秒）
+  ai_fast_request: 3.0
+  # 页面加载超时（毫秒）
+  page_load_networkidle: 10000
+  page_load_domcontentloaded: 5000
+  # 元素操作超时（毫秒）
+  element_click: 2000
+  element_scroll: 5000
+  # 截图超时（毫秒）
+  screenshot: 5000
+
+# ================================
+# Docker镜像配置 - Docker Hub 示例
+# 不用docker部署可以忽略
+# ================================
+docker:
+  # Docker Hub 配置 (留空或使用 docker.io)
+  DOCKER_REGISTRY=https://hub.docker.com/
+  DOCKER_NAMESPACE=your-namespace
+  IMAGE_VERSION=latest

@@ -1,0 +1,51 @@
+# 忽略虚拟环境及项目产生的临时文件
+.venv/
+.idea/
+.claude/
+.vscode/
+.trae/
+__pycache__/
+.DS_Store
+.pytest_cache
+备注笔记.txt
+# 忽略log文件
+logs/*
+!logs/.gitkeep
+# 忽略.env配置文件(但保留.env.example示例文件)
+.env
+.sql
+static_files/img/
+.bak
+# migrations 文件需要提交到版本控制
+# apps/*/migrations/*
+# !apps/*/migrations/__init__.py
+
+# 忽略media下的子目录及文件，但保留.gitkeep文件
+../expand/media/allure-reports/*
+!../expand/media/allure-reports/.gitkeep
+../expand/media/allure-results/*
+!../expand/media/allure-results/.gitkeep
+../expand/media/requirement_docs/*
+!../expand/media/requirement_docs/.gitkeep
+../expand/media/ai_recording/*
+!../expand/media/ai_recording/.gitkeep
+
+# 忽略前端文件
+frontend/node_modules/
+frontend/.DS_Store
+frontend/*.log
+frontend/dist/
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+nginx.conf
+Makefile
+build-multiplatform.sh
+
+# 忽略程序运行时生成的pid文件
+.django_server.pid
+.qcluster.pid
+django_server.pid
+django_qcluster.pid

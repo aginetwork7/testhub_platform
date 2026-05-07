@@ -1,0 +1,371 @@
+# TestHub 项目中文翻译（包含 Django Q）
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: zh_Hans\n"
+
+# ============================================
+# Django Q 应用翻译
+# ============================================
+
+# 应用名称
+msgid "Django Q"
+msgstr "任务管理"
+
+# Task 模型
+msgid "task"
+msgid_plural "tasks"
+msgstr[0] "任务"
+msgstr[1] "任务"
+
+msgid "Tasks"
+msgstr "任务管理"
+
+msgid "Task"
+msgstr "任务"
+
+msgid "Queued tasks"
+msgstr "队列任务"
+
+# Schedule 模型
+msgid "schedule"
+msgid_plural "schedules"
+msgstr[0] "定时任务"
+msgstr[1] "定时任务"
+
+msgid "Schedules"
+msgstr "定时任务"
+
+msgid "Schedule"
+msgstr "定时任务"
+
+msgid "Scheduled tasks"
+msgstr "定时任务"
+
+# Success 模型
+msgid "success"
+msgid_plural "successes"
+msgstr[0] "成功记录"
+msgstr[1] "成功记录"
+
+msgid "Successes"
+msgstr "成功记录"
+
+msgid "Successful tasks"
+msgstr "成功任务"
+
+# Failure 模型
+msgid "failure"
+msgid_plural "failures"
+msgstr[0] "失败记录"
+msgstr[1] "失败记录"
+
+msgid "Failures"
+msgstr "失败记录"
+
+msgid "Failed tasks"
+msgstr "失败任务"
+
+# ============================================
+# 字段名称翻译
+# ============================================
+
+msgid "ID"
+msgstr "ID"
+
+msgid "Name"
+msgstr "名称"
+
+msgid "name"
+msgstr "名称"
+
+msgid "Func"
+msgstr "函数"
+
+msgid "func"
+msgstr "函数"
+
+msgid "Hook"
+msgstr "钩子函数"
+
+msgid "hook"
+msgstr "钩子函数"
+
+msgid "Args"
+msgstr "参数"
+
+msgid "args"
+msgstr "参数"
+
+msgid "Kwargs"
+msgstr "关键字参数"
+
+msgid "kwargs"
+msgstr "关键字参数"
+
+msgid "Result"
+msgstr "结果"
+
+msgid "result"
+msgstr "结果"
+
+msgid "Group"
+msgstr "分组"
+
+msgid "group"
+msgstr "分组"
+
+msgid "Cluster"
+msgstr "集群"
+
+msgid "cluster"
+msgstr "集群"
+
+msgid "Started"
+msgstr "开始时间"
+
+msgid "started"
+msgstr "开始时间"
+
+msgid "Stopped"
+msgstr "结束时间"
+
+msgid "stopped"
+msgstr "结束时间"
+
+msgid "Attempt count"
+msgstr "尝试次数"
+
+msgid "attempt_count"
+msgstr "尝试次数"
+
+msgid "Schedule type"
+msgstr "调度类型"
+
+msgid "schedule_type"
+msgstr "调度类型"
+
+msgid "Minutes"
+msgstr "分钟"
+
+msgid "minutes"
+msgstr "分钟"
+
+msgid "Repeats"
+msgstr "重复次数"
+
+msgid "repeats"
+msgstr "重复次数"
+
+msgid "Next run"
+msgstr "下次运行"
+
+msgid "next_run"
+msgstr "下次运行"
+
+msgid "Cron"
+msgstr "Cron表达式"
+
+msgid "cron"
+msgstr "Cron表达式"
+
+# ============================================
+# 调度类型选项
+# ============================================
+
+msgid "Once"
+msgstr "单次"
+
+msgid "Hourly"
+msgstr "每小时"
+
+msgid "Daily"
+msgstr "每天"
+
+msgid "Weekly"
+msgstr "每周"
+
+msgid "Biweekly"
+msgstr "双周"
+
+msgid "Monthly"
+msgstr "每月"
+
+msgid "Bimonthly"
+msgstr "双月"
+
+msgid "Quarterly"
+msgstr "每季度"
+
+msgid "Yearly"
+msgstr "每年"
+
+# ============================================
+# 通用翻译
+# ============================================
+
+msgid "Add"
+msgstr "添加"
+
+msgid "Change"
+msgstr "修改"
+
+msgid "Delete"
+msgstr "删除"
+
+msgid "View"
+msgstr "查看"
+
+msgid "Save"
+msgstr "保存"
+
+msgid "Search"
+msgstr "搜索"
+
+msgid "Filter"
+msgstr "过滤"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Select all"
+msgstr "全选"
+
+msgid "Clear selection"
+msgstr "清除选择"
+
+# ============================================
+# 调度器模块翻译 (Scheduler)
+# ============================================
+
+msgid "Task scheduling"
+msgstr "任务调度"
+
+msgid "Task config"
+msgstr "任务配置"
+
+msgid "Task configs"
+msgstr "任务配置"
+
+msgid "任务配置"
+msgstr "任务配置"
+
+msgid "任务执行记录"
+msgstr "任务执行记录"
+
+# 模块选项
+msgid "API"
+msgstr "API测试"
+
+msgid "UI"
+msgstr "UI自动化"
+
+msgid "APP"
+msgstr "APP自动化"
+
+# 任务类型选项
+msgid "API_TEST_SUITE"
+msgstr "API测试套件"
+
+msgid "API_REQUEST"
+msgstr "API请求"
+
+msgid "UI_TEST_SUITE"
+msgstr "UI测试套件"
+
+msgid "UI_TEST_CASE"
+msgstr "UI测试用例"
+
+msgid "APP_TEST_SUITE"
+msgstr "APP测试套件"
+
+msgid "APP_TEST_CASE"
+msgstr "APP测试用例"
+
+# 触发类型选项
+msgid "CRON"
+msgstr "Cron表达式"
+
+msgid "INTERVAL"
+msgstr "固定间隔"
+
+msgid "ONCE"
+msgstr "单次执行"
+
+# 状态选项
+msgid "ACTIVE"
+msgstr "激活"
+
+msgid "PAUSED"
+msgstr "暂停"
+
+msgid "COMPLETED"
+msgstr "已完成"
+
+msgid "FAILED"
+msgstr "失败"
+
+# 执行状态
+msgid "PENDING"
+msgstr "等待中"
+
+msgid "RUNNING"
+msgstr "执行中"
+
+msgid "SUCCESS"
+msgstr "成功"
+
+msgid "TIMEOUT"
+msgstr "超时"
+
+# 字段翻译
+msgid "所属模块"
+msgstr "所属模块"
+
+msgid "任务类型"
+msgstr "任务类型"
+
+msgid "触发类型"
+msgstr "触发类型"
+
+msgid "目标ID"
+msgstr "目标ID"
+
+msgid "执行配置"
+msgstr "执行配置"
+
+msgid "Django-Q调度"
+msgstr "Django-Q调度"
+
+msgid "成功次数"
+msgstr "成功次数"
+
+msgid "失败次数"
+msgstr "失败次数"
+
+msgid "通知邮箱"
+msgstr "通知邮箱"
+
+msgid "Webhook地址"
+msgstr "Webhook地址"
+
+msgid "任务名称"
+msgstr "任务名称"
+
+msgid "开始时间"
+msgstr "开始时间"
+
+msgid "结束时间"
+msgstr "结束时间"
+
+msgid "执行结果"
+msgstr "执行结果"
+
+msgid "错误信息"
+msgstr "错误信息"
+
+msgid "Django-Q任务ID"
+msgstr "Django-Q任务ID"
+
+msgid "耗时"
+msgstr "耗时"
