@@ -1393,7 +1393,7 @@ class UiFlowRunner:
         if self._ocr_helper is None:
             if not OCR_AVAILABLE:
                 raise RuntimeError("OCR 功能不可用，请安装: pip install easyocr opencv-python")
-            self._ocr_helper = get_ocr_helper(languages=['en'], use_gpu=False)
+            self._ocr_helper = get_ocr_helper(languages=['en'], use_gpu=settings.OCR_USE_GPU)
         return self._ocr_helper
     
     

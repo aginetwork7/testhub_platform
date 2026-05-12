@@ -74,6 +74,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
     def run(self, request, pk=None):
         """执行 AI 用例"""
         ai_case = self.get_object()
+        execution_mode = request.data.get('execution_mode', 'text')
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
@@ -81,6 +82,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
             ai_case=ai_case,
             case_name=ai_case.name,
             task_description=ai_case.task_description,
+            execution_mode=execution_mode,
             status='running',
             executed_by=request.user,
             logs="正在分析任务...\n"
@@ -186,7 +188,10 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     ai_case.task_description,
                     analysis_callback=on_analysis_complete,
                     step_callback=on_step_update,
-                    should_stop=should_stop
+                    should_stop=should_stop,
+                    execution_mode=execution_mode,
+                    enable_gif=(execution_mode == 'text'),
+                    case_name=ai_case.name,
                 )
 
                 # 检查是否是手动停止
@@ -238,7 +243,8 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     )
 
                 # 处理GIF录制文件
-                self._process_gif_recording(execution_record, history)
+                if execution_record.execution_mode == 'text':
+                    self._process_gif_recording(execution_record, history)
 
                 safe_save(execution_record)
 
@@ -950,7 +956,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     )
 
                 # 处理GIF录制文件
-                self._process_gif_recording(execution_record, history)
+                if execution_record.execution_mode == 'text':
+                    self._process_gif_recording(execution_record, history)
 
                 safe_save(execution_record)
 
@@ -1148,7 +1155,9 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             'status_color': self._status_color(execution_record.status),
             'duration_formatted': self._format_duration(execution_record.duration),
             'completion_rate': completion_rate,
-            'total_steps': total_steps
+            'total_steps': total_steps,
+            'execution_mode': execution_record.execution_mode,
+            'execution_mode_display': 'Hermes' if execution_record.execution_mode == 'hermes' else 'Browser'
         }
 
         timeline = []

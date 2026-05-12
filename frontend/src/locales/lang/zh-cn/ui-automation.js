@@ -470,11 +470,13 @@ export default {
     title: 'AI 智能测试',
     taskInput: '任务输入',
     taskDescription: '任务描述',
+    executionBackend: '执行后端',
     taskPlaceholder: '请用自然语言描述要执行的任务，例如：\n1. 访问 https://www.baidu.com\n2. 搜索 \'TestHub\'\n3. 点击第一条搜索结果',
     gifRecording: 'GIF录制',
     on: '开启',
     off: '关闭',
     gifTip: '开启后将录制执行过程并生成GIF文件，保存到 ai_agent_history 目录',
+    hermesGifTip: 'Hermes 模式暂不生成浏览器 GIF。',
     startExecution: '开始执行',
     stopExecution: '停止执行',
     saveAsCase: '保存为用例',
@@ -493,6 +495,10 @@ export default {
     rules: {
       nameRequired: '请输入用例名称'
     },
+    backends: {
+      browser: 'Browser',
+      hermes: 'Hermes'
+    },
     messages: {
       initAgent: '正在初始化 AI Agent...\n',
       startSuccess: '任务开始执行',
@@ -509,6 +515,7 @@ export default {
     caseList: {
       title: 'AI 用例管理',
       newCase: '新建AI用例',
+      executionBackend: '执行后端',
       searchPlaceholder: '搜索用例名称或描述',
       caseName: '用例名称',
       taskDescription: '任务描述',
@@ -538,6 +545,8 @@ export default {
       serialNumber: '序号',
       caseName: '用例名称',
       executionMode: '执行模式',
+      browserMode: 'Browser',
+      hermesMode: 'Hermes',
       adhocExecution: '临时执行',
       caseExecution: '用例执行',
       status: '状态',

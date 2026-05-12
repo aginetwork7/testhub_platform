@@ -103,7 +103,7 @@ export default {
   // AI Intelligent Mode Configuration
   aiMode: {
     title: 'AI Intelligent Mode',
-    description: 'Configure intelligent mode and model parameters for Browser-use execution',
+    description: 'Configure AI intelligent mode backends and model parameters for Browser and Hermes execution',
     configList: 'Configuration List',
     addConfig: 'Add Config',
     addFirstConfig: 'Add First Config',
@@ -127,10 +127,11 @@ export default {
     enableConfig: 'Enable this config',
     enableConfigHint: 'When enabled, other active configs with the same mode will be automatically disabled',
     executionMode: 'Execution Mode',
-    executionModeHint: 'Text mode uses HTML parsing, Vision mode uses screenshot recognition (requires vision model like qwen-vl, gpt-4o)',
+    executionModeHint: 'Text mode uses HTML parsing, Vision mode uses screenshot recognition, and Hermes mode sends the full task directly to Hermes',
     roles: {
       text: 'Text Mode',
-      vision: 'Vision Mode'
+      vision: 'Vision Mode',
+      hermes: 'Hermes Mode'
     },
     testConnection: 'Test Connection',
     testing: 'Testing...',
@@ -172,7 +173,7 @@ export default {
   // AI Intelligent Mode Prompt Configuration
   aiModePrompt: {
     title: 'AI Mode Prompt Configuration',
-    description: 'Configure prompts for Browser-use execution in text mode and vision mode',
+    description: 'Configure prompts for AI intelligent mode execution in text, vision, and Hermes modes',
     configList: 'Prompt Configuration List',
     addConfig: 'Add Prompt',
     editConfig: 'Edit Prompt',
@@ -183,6 +184,7 @@ export default {
     selectPromptType: 'Select Prompt Type',
     textPrompt: 'Text Mode Prompt',
     visionPrompt: 'Vision Mode Prompt',
+    hermesPrompt: 'Hermes Prompt',
     promptContent: 'Prompt Content',
     contentPlaceholder: 'Enter prompt content...',
     contentPreview: 'Content Preview',
@@ -200,6 +202,7 @@ export default {
     emptyDescription: 'Please add or load default prompts to get started',
     defaultTextName: 'Default Text Mode Prompt',
     defaultVisionName: 'Default Vision Mode Prompt',
+    defaultHermesName: 'Default Hermes Prompt',
     messages: {
       loadFailed: 'Failed to load configurations',
       saveSuccess: 'Prompt added successfully',

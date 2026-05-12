@@ -33,6 +33,13 @@
           </template>
         </el-table-column>
         <el-table-column prop="case_name" :label="$t('uiAutomation.ai.executionRecords.caseName')" min-width="200" show-overflow-tooltip />
+        <el-table-column label="执行模式" width="120">
+          <template #default="{ row }">
+            <el-tag :type="getExecutionModeTag(row.execution_mode)">
+              {{ getExecutionModeText(row.execution_mode) }}
+            </el-tag>
+          </template>
+        </el-table-column>
 
         <el-table-column prop="status" :label="$t('uiAutomation.ai.executionRecords.status')" width="120">
           <template #default="{ row }">
@@ -79,6 +86,13 @@
         <div class="detail-item">
           <span class="label">{{ $t('uiAutomation.ai.executionRecords.caseName') }}:</span>
           <span class="value">{{ currentRecord.case_name }}</span>
+        </div>
+
+        <div class="detail-item">
+          <span class="label">执行模式:</span>
+          <el-tag :type="getExecutionModeTag(currentRecord.execution_mode)">
+            {{ getExecutionModeText(currentRecord.execution_mode) }}
+          </el-tag>
         </div>
 
         <div class="detail-item">
@@ -254,6 +268,20 @@ const getStatusText = (status) => {
     'stopped': t('uiAutomation.status.stopped')
   }
   return map[status] || status
+}
+
+const getExecutionModeText = (executionMode) => {
+  if (executionMode === 'hermes') {
+    return t('uiAutomation.ai.executionRecords.hermesMode')
+  }
+  return t('uiAutomation.ai.executionRecords.browserMode')
+}
+
+const getExecutionModeTag = (executionMode) => {
+  if (executionMode === 'hermes') {
+    return 'success'
+  }
+  return 'info'
 }
 
 const formatDate = (row, column, cellValue) => {

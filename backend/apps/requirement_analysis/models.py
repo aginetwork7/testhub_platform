@@ -240,6 +240,7 @@ class AIModelConfig(models.Model):
         ('reviewer', '测试评审专家'),
         ('browser_use_text', 'Browser Use - 文本模式'),
         ('browser_use_vision', 'Browser Use - 视觉模式'),
+        ('hermes_agent', 'Hermes Agent'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -283,6 +284,7 @@ class PromptConfig(models.Model):
         ('reviewer', '用例评审提示词'),
         ('browser_use_text', 'AI智能模式-文本提示词'),
         ('browser_use_vision', 'AI智能模式-视觉提示词'),
+        ('hermes_agent', 'Hermes Agent提示词'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')

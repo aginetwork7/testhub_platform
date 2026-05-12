@@ -6,6 +6,10 @@ import subprocess
 import platform
 import os
 import logging
+import json
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -200,8 +204,147 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     AI智能模式配置视图集 (Browser-use) - 使用ModelViewSet支持标准CRUD
     """
     permission_classes = [IsAuthenticated]
-    BROWSER_USE_ROLES = ['browser_use_text', 'browser_use_vision']
-    queryset = AIModelConfig.objects.filter(role__in=['browser_use_text', 'browser_use_vision'])
+    BROWSER_USE_ROLES = ['browser_use_text', 'browser_use_vision', 'hermes_agent']
+    queryset = AIModelConfig.objects.filter(role__in=['browser_use_text', 'browser_use_vision', 'hermes_agent'])
+
+    @staticmethod
+    def _running_in_docker():
+        return os.path.exists('/.dockerenv') or os.getenv('IN_DOCKER', '').lower() == 'true'
+
+    def _resolve_base_url(self, provider, base_url):
+        normalized = str(base_url or '').strip()
+        if normalized:
+            normalized = normalized.rstrip('/')
+            if normalized.endswith('/chat/completions'):
+                normalized = normalized[:-len('/chat/completions')]
+
+            parsed = urlparse(normalized)
+            hostname = parsed.hostname
+            if self._running_in_docker() and hostname in {'127.0.0.1', 'localhost'}:
+                netloc = parsed.netloc.replace(hostname, 'host.docker.internal')
+                parsed = parsed._replace(netloc=netloc)
+                normalized = urlunparse(parsed)
+
+            if not normalized.endswith('/v1'):
+                normalized += '/v1'
+            return normalized
+
+        if provider == 'openai':
+            return 'https://api.openai.com/v1'
+        if provider == 'siliconflow':
+            return 'https://api.siliconflow.cn/v1'
+        if provider == 'deepseek':
+            return 'https://api.deepseek.com'
+        if provider == 'anthropic':
+            return 'https://api.anthropic.com'
+        if provider == 'other':
+            return ''
+        return ''
+
+    def _build_auth_key_url(self, normalized_base_url):
+        parsed = urlparse(str(normalized_base_url or '').strip())
+        if not parsed.scheme or not parsed.netloc:
+            return ''
+        return urlunparse((parsed.scheme, parsed.netloc, '/api/auth/key', '', '', ''))
+
+    def _read_api_key_file(self):
+        file_path = str(os.getenv('HERMES_API_KEY_FILE') or os.getenv('API_KEY_FILE') or '').strip()
+        if not file_path:
+            return ''
+
+        try:
+            return Path(file_path).read_text(encoding='utf-8').strip()
+        except OSError as error:
+            logger.warning(f"AI智能模式 - 读取 Hermes API key 文件失败: {error}")
+            return ''
+
+    def _resolve_api_key(self, role, base_url, api_key):
+        explicit_api_key = str(api_key or '').strip()
+        if role != 'hermes_agent' and explicit_api_key:
+            return explicit_api_key
+
+        if explicit_api_key:
+            return explicit_api_key
+
+        file_api_key = self._read_api_key_file()
+        if file_api_key:
+            return file_api_key
+
+        auth_key_url = self._build_auth_key_url(base_url)
+        if auth_key_url:
+            try:
+                response = requests.get(auth_key_url, timeout=(10, 30))
+                response.raise_for_status()
+                payload = response.json()
+                dynamic_api_key = str(payload.get('api_key', '') or '').strip()
+                if dynamic_api_key:
+                    return dynamic_api_key
+            except (requests.RequestException, ValueError) as error:
+                logger.warning(f"AI智能模式 - 获取 Hermes API key 失败: {error}")
+
+        return explicit_api_key
+
+    def _build_test_payload(self, role, model_name):
+        if role == 'hermes_agent':
+            return {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            'You are Hermes. Return only compact JSON with keys '
+                            'success, summary, logs.'
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": '请返回一个Hermes连接自检结果。'
+                    }
+                ],
+                "max_tokens": 120,
+                "temperature": 0
+            }
+
+        return {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 1
+        }
+
+    def _extract_test_message(self, role, response):
+        try:
+            response_json = response.json()
+        except ValueError:
+            return '连接成功，但响应不是JSON格式。'
+
+        if role != 'hermes_agent':
+            return '连接成功'
+
+        content = (
+            response_json.get('choices', [{}])[0]
+            .get('message', {})
+            .get('content', '')
+        )
+
+        if not content:
+            return 'Hermes 连接成功，但未返回可读内容。'
+
+        normalized = content.strip()
+        if normalized.startswith('```'):
+            normalized = normalized.strip('`')
+            if normalized.startswith('json'):
+                normalized = normalized[4:].strip()
+
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError:
+            return f'Hermes 连接成功，原始响应: {content[:200]}'
+
+        summary = parsed.get('summary') or parsed.get('message') or 'Hermes 连接成功'
+        logs = parsed.get('logs') or []
+        if isinstance(logs, list) and logs:
+            return f'{summary} 首条日志: {logs[0]}'
+        return summary
 
     def list(self, request):
         """
@@ -230,7 +373,10 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         user = request.user
 
         # 验证必填字段
-        required_fields = ['name', 'model_type', 'model_name', 'api_key']
+        role = data.get('role', 'browser_use_text')
+        required_fields = ['name', 'model_type', 'model_name']
+        if role != 'hermes_agent':
+            required_fields.append('api_key')
         for field in required_fields:
             if not data.get(field):
                 return Response(
@@ -239,7 +385,6 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 )
 
         # 验证role字段
-        role = data.get('role', 'browser_use_text')
         if role not in self.BROWSER_USE_ROLES:
             return Response(
                 {'error': f'role must be one of {self.BROWSER_USE_ROLES}'},
@@ -256,7 +401,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             model_type=data['model_type'],
             role=role,
             model_name=data['model_name'],
-            api_key=data['api_key'],
+            api_key=data.get('api_key', ''),
             base_url=data.get('base_url', ''),
             is_active=data.get('is_active', True),
             created_by=user
@@ -386,31 +531,32 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         base_url = request.data.get('base_url')
         api_key = request.data.get('api_key')
         model_name = request.data.get('model_name')
+        role = request.data.get('role', 'browser_use_text')
 
-        if not api_key:
+        if role != 'hermes_agent' and not api_key:
             return Response(
                 {'error': 'API Key is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 默认Base URL处理
-        if not base_url:
-            if provider == 'openai':
-                base_url = 'https://api.openai.com/v1'
-            elif provider == 'siliconflow':
-                base_url = 'https://api.siliconflow.cn/v1'
-            elif provider == 'deepseek':
-                base_url = 'https://api.deepseek.com'
-            elif provider == 'anthropic':
-                base_url = 'https://api.anthropic.com'
+        if role not in self.BROWSER_USE_ROLES:
+            return Response(
+                {'error': f'role must be one of {self.BROWSER_USE_ROLES}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+        base_url = self._resolve_base_url(provider, base_url)
+        api_key = self._resolve_api_key(role, base_url, api_key)
         if not base_url:
              return Response(
                  {'error': 'Base URL is required for this provider'},
                  status=status.HTTP_400_BAD_REQUEST
              )
-
-        base_url = base_url.rstrip('/')
+        if not api_key:
+            return Response(
+                {'error': 'API Key is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
             # 尝试调用 chat completions 接口 (OpenAI Compatible)
@@ -420,20 +566,16 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 "Content-Type": "application/json"
             }
 
-            data = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1
-            }
+            data = self._build_test_payload(role, model_name)
 
-            logger.info(f"AI智能模式预览 - 发送POST请求到: {url}")
+            logger.info(f"AI智能模式预览 - 发送POST请求到: {url}, role={role}")
             # 增加超时时间：连接超时60秒，读取超时900秒
             response = requests.post(url, headers=headers, json=data, timeout=(60, 900))
 
             logger.info(f"AI智能模式预览 - 收到响应: status_code={response.status_code}")
 
             if response.status_code == 200:
-                return Response({'message': '连接成功'})
+                return Response({'message': self._extract_test_message(role, response)})
             else:
                 logger.error(f"AI智能模式 - API调用返回错误: Status={response.status_code}, Body={response.text}")
                 return Response(
@@ -472,41 +614,29 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         logger.info(f"API URL: {config.base_url}")
         logger.info(f"API Key前缀: {config.api_key[:10]}..." if len(config.api_key) > 10 else f"API Key: {config.api_key}")
 
-        base_url = config.base_url
-        if not base_url:
-            # 使用默认Base URL
-            provider = config.model_type
-            if provider == 'openai':
-                base_url = 'https://api.openai.com/v1'
-            elif provider == 'siliconflow':
-                base_url = 'https://api.siliconflow.cn/v1'
-            elif provider == 'deepseek':
-                base_url = 'https://api.deepseek.com'
-            elif provider == 'anthropic':
-                base_url = 'https://api.anthropic.com'
-
+        base_url = self._resolve_base_url(config.model_type, config.base_url)
+        api_key = self._resolve_api_key(config.role, base_url, config.api_key)
         if not base_url:
             return Response(
                 {'error': 'Base URL is required'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        base_url = base_url.rstrip('/')
+        if not api_key:
+            return Response(
+                {'error': 'API Key is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
             url = f"{base_url}/chat/completions"
             headers = {
-                "Authorization": f"Bearer {config.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
 
-            data = {
-                "model": config.model_name,
-                "messages": [{"role": "user", "content": "Hi"}],
-                "max_tokens": 1
-            }
+            data = self._build_test_payload(config.role, config.model_name)
 
-            logger.info(f"AI智能模式 - 发送POST请求到: {url}")
+            logger.info(f"AI智能模式 - 发送POST请求到: {url}, role={config.role}")
             # 增加超时时间：连接超时60秒，读取超时900秒
             response = requests.post(url, headers=headers, json=data, timeout=(60, 900))
 
@@ -514,7 +644,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
 
             if response.status_code == 200:
                 logger.info("AI智能模式 - API连接测试成功")
-                return Response({'message': '连接成功'})
+                return Response({'message': self._extract_test_message(config.role, response)})
             else:
                 logger.error(f"AI智能模式 - API调用返回错误: Status={response.status_code}, Body={response.text}")
                 return Response(
@@ -540,7 +670,7 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
     AI智能模式提示词配置视图集
     """
     permission_classes = [IsAuthenticated]
-    BROWSER_USE_PROMPT_TYPES = ['browser_use_text', 'browser_use_vision']
+    BROWSER_USE_PROMPT_TYPES = ['browser_use_text', 'browser_use_vision', 'hermes_agent']
 
     def _get_queryset(self):
         return PromptConfig.objects.filter(prompt_type__in=self.BROWSER_USE_PROMPT_TYPES)
@@ -637,7 +767,11 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
         """加载默认提示词"""
         from django.conf import settings
         defaults = {}
-        for prompt_type, filename in [('browser_use_text', 'browser_use_text.md'), ('browser_use_vision', 'browser_use_vision.md')]:
+        for prompt_type, filename in [
+            ('browser_use_text', 'browser_use_text.md'),
+            ('browser_use_vision', 'browser_use_vision.md'),
+            ('hermes_agent', 'hermes_agent.md'),
+        ]:
             filepath = os.path.join(settings.BASE_DIR, 'docs', filename)
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:

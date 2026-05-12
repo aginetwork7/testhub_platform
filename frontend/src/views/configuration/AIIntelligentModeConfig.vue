@@ -25,7 +25,7 @@
                     {{ getProviderLabel(config.model_type) }}
                   </span>
                   <span class="role-badge" :class="config.role">
-                    {{ config.role === 'browser_use_vision' ? $t('configuration.aiMode.roles.vision') : $t('configuration.aiMode.roles.text') }}
+                    {{ getRoleLabel(config.role) }}
                   </span>
                   <span class="model-name-badge">{{ config.model_name }}</span>
                   <span class="status-badge" :class="{ active: config.is_active }">
@@ -97,6 +97,7 @@
               <select v-model="configForm.role" class="form-select" required>
                 <option value="browser_use_text">{{ $t('configuration.aiMode.roles.text') }}</option>
                 <option value="browser_use_vision">{{ $t('configuration.aiMode.roles.vision') }}</option>
+                <option value="hermes_agent">{{ $t('configuration.aiMode.roles.hermes') }}</option>
               </select>
               <small class="form-hint">{{ $t('configuration.aiMode.executionModeHint') }}</small>
             </div>
@@ -255,6 +256,16 @@ const getProviderLabel = (modelType) => {
   const translated = t(key)
   // 如果翻译key存在则返回翻译，否则返回原值
   return translated !== key ? translated : modelType
+}
+
+const getRoleLabel = (role) => {
+  if (role === 'browser_use_vision') {
+    return t('configuration.aiMode.roles.vision')
+  }
+  if (role === 'hermes_agent') {
+    return t('configuration.aiMode.roles.hermes')
+  }
+  return t('configuration.aiMode.roles.text')
 }
 
 const loadConfigs = async () => {
@@ -451,14 +462,14 @@ const testConnection = async (config) => {
 
   try {
     // 测试连接需要更长的超时时间（90秒），因为大模型响应较慢
-    await api.post(
+    const response = await api.post(
       `/ui-automation/config/ai-mode/${config.id}/test_connection/`,
       {},
       { timeout: 90000 }  // 90秒超时
     )
     testResult.value = {
       success: true,
-      message: t('configuration.aiMode.connectionSuccessMsg')
+      message: response.data?.message || t('configuration.aiMode.connectionSuccessMsg')
     }
     showTestResult.value = true
   } catch (error) {
@@ -490,7 +501,7 @@ const testConnectionInModal = async () => {
     isTestingInModal.value = true
     try {
       // 测试连接需要90秒超时
-      await api.post(
+      const response = await api.post(
         `/ui-automation/config/ai-mode/${editingConfigId.value}/test_connection/`,
         {},
         { timeout: 90000 }
@@ -498,7 +509,7 @@ const testConnectionInModal = async () => {
 
       testResult.value = {
         success: true,
-        message: t('configuration.aiMode.connectionSuccessMsg')
+        message: response.data?.message || t('configuration.aiMode.connectionSuccessMsg')
       }
       showTestResult.value = true
     } catch (error) {
@@ -519,10 +530,11 @@ const testConnectionInModal = async () => {
 
   try {
     // 测试连接需要90秒超时
-    await api.post(
+    const response = await api.post(
       '/ui-automation/config/ai-mode/test_connection/',
       {
         provider: configForm.value.model_type,
+        role: configForm.value.role,
         model_name: configForm.value.model_name,
         api_key: configForm.value.api_key,
         base_url: configForm.value.base_url
@@ -532,7 +544,7 @@ const testConnectionInModal = async () => {
 
     testResult.value = {
       success: true,
-      message: t('configuration.aiMode.connectionSuccessMsg')
+      message: response.data?.message || t('configuration.aiMode.connectionSuccessMsg')
     }
     showTestResult.value = true
   } catch (error) {
@@ -682,6 +694,11 @@ onMounted(() => {
 .role-badge.browser_use_vision {
   background: #fff3e0;
   color: #e65100;
+}
+
+.role-badge.hermes_agent {
+  background: #e8f5e9;
+  color: #1b5e20;
 }
 
 .provider-badge.openai {

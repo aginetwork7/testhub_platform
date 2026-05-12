@@ -100,6 +100,7 @@
                 <option value="">{{ $t('configuration.aiModePrompt.selectPromptType') }}</option>
                 <option value="browser_use_text">{{ $t('configuration.aiModePrompt.textPrompt') }}</option>
                 <option value="browser_use_vision">{{ $t('configuration.aiModePrompt.visionPrompt') }}</option>
+                <option value="hermes_agent">{{ $t('configuration.aiModePrompt.hermesPrompt') }}</option>
               </select>
             </div>
 
@@ -163,6 +164,8 @@
               @click="activeTab = 'browser_use_text'">{{ $t('configuration.aiModePrompt.textPrompt') }}</button>
             <button class="tab-btn" :class="{ active: activeTab === 'browser_use_vision' }"
               @click="activeTab = 'browser_use_vision'">{{ $t('configuration.aiModePrompt.visionPrompt') }}</button>
+            <button class="tab-btn" :class="{ active: activeTab === 'hermes_agent' }"
+              @click="activeTab = 'hermes_agent'">{{ $t('configuration.aiModePrompt.hermesPrompt') }}</button>
           </div>
           <div class="content-display">{{ defaultPrompts[activeTab] || $t('configuration.aiModePrompt.noContent') }}</div>
           <div class="modal-actions">
@@ -197,7 +200,7 @@ export default {
       isLoadingDefaults: false,
       editingConfigId: null,
       previewConfig: {},
-      defaultPrompts: { browser_use_text: '', browser_use_vision: '' },
+      defaultPrompts: { browser_use_text: '', browser_use_vision: '', hermes_agent: '' },
       activeTab: 'browser_use_text',
       configForm: {
         name: '',
@@ -214,7 +217,8 @@ export default {
     getTypeLabel(type) {
       const map = {
         browser_use_text: this.$t('configuration.aiModePrompt.textPrompt'),
-        browser_use_vision: this.$t('configuration.aiModePrompt.visionPrompt')
+        browser_use_vision: this.$t('configuration.aiModePrompt.visionPrompt'),
+        hermes_agent: this.$t('configuration.aiModePrompt.hermesPrompt')
       }
       return map[type] || type
     },
@@ -290,7 +294,9 @@ export default {
           if (content) {
             const label = type === 'browser_use_text'
               ? this.$t('configuration.aiModePrompt.defaultTextName')
-              : this.$t('configuration.aiModePrompt.defaultVisionName')
+              : type === 'browser_use_vision'
+                ? this.$t('configuration.aiModePrompt.defaultVisionName')
+                : this.$t('configuration.aiModePrompt.defaultHermesName')
             await api.post(`${API_BASE}/`, {
               name: label,
               prompt_type: type,
@@ -440,6 +446,10 @@ export default {
 .type-badge.browser_use_vision {
   background: #fce4ec;
   color: #c62828;
+}
+.type-badge.hermes_agent {
+  background: #e8f5e9;
+  color: #1b5e20;
 }
 .status-badge {
   background: #ffebee;

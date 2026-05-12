@@ -17,6 +17,7 @@ docs/
 
 # 忽略配置文件（但保留示例文件）
 config.yaml
+secrets/
 .env
 .env.local
 .env.*.local

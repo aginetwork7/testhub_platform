@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+ARG TORCH_INDEX_URL=""
+ARG TORCH_PACKAGES=""
+
 WORKDIR /app
 
 # 安装系统级依赖 (MySQL驱动编译依赖 + Playwright依赖)
@@ -11,6 +14,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 安装 Python 依赖（清华镜像加速，官方 PyPI 兜底）
 # cache mount 让 pip 缓存跨构建持久化，网络断连重试时已下载的包直接从缓存读取
 COPY backend/requirements.txt .
+
+# 可选：按目标设备预装 torch/torchvision。
+# 对 Nvidia Spark 这类 GPU 设备，不应强制使用 CPU-only 轮子；
+# 如需绑定设备对应的 PyTorch 源，可在构建时传入 TORCH_INDEX_URL / TORCH_PACKAGES。
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -n "$TORCH_PACKAGES" ]; then \
+        if [ -n "$TORCH_INDEX_URL" ]; then \
+            pip install --index-url "$TORCH_INDEX_URL" $TORCH_PACKAGES; \
+        else \
+            pip install $TORCH_PACKAGES; \
+        fi; \
+    fi
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install -r requirements.txt \

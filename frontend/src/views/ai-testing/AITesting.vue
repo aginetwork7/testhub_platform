@@ -25,14 +25,22 @@
               />
             </el-form-item>
 
+            <el-form-item :label="$t('uiAutomation.ai.executionBackend')">
+              <el-select v-model="taskForm.executionMode" style="width: 220px;">
+                <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
+                <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
+              </el-select>
+            </el-form-item>
+
             <el-form-item :label="$t('uiAutomation.ai.gifRecording')">
               <el-switch
                 v-model="taskForm.enableGif"
                 :active-text="$t('uiAutomation.ai.on')"
                 :inactive-text="$t('uiAutomation.ai.off')"
+                :disabled="taskForm.executionMode !== 'text'"
               />
               <span style="margin-left: 10px; color: #909399; font-size: 12px;">
-                {{ $t('uiAutomation.ai.gifTip') }}
+                {{ taskForm.executionMode === 'text' ? $t('uiAutomation.ai.gifTip') : $t('uiAutomation.ai.hermesGifTip') }}
               </span>
             </el-form-item>
 
@@ -162,7 +170,8 @@ const logContainer = ref(null)
 
 const taskForm = reactive({
   description: '',
-  enableGif: true  // GIF录制开关，默认开启
+  enableGif: true,  // GIF录制开关，默认开启
+  executionMode: 'text'
 })
 
 const showSaveDialog = ref(false)
@@ -209,8 +218,8 @@ const handleRun = async () => {
     const response = await runAdhocAICase({
       project_id: projectId.value || null,
       task_description: taskForm.description,
-      execution_mode: 'text',
-      enable_gif: taskForm.enableGif
+      execution_mode: taskForm.executionMode,
+      enable_gif: taskForm.executionMode === 'text' ? taskForm.enableGif : false
     })
 
     // analyzing.value = false // 移除过早设置，改为在轮询获取到任务列表后再取消

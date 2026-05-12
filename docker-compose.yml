@@ -31,6 +31,7 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     container_name: testhub_backend
+    gpus: all
     depends_on:
       db:
         condition: service_healthy
@@ -44,6 +45,15 @@ services:
       - DB_PASSWORD=rootpassword
       - DB_HOST=db
       - DB_PORT=3306
+      - REDIS_URL=redis://redis:6379/
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://host.docker.internal:8642/v1}
+      - HERMES_MODEL_NAME=${HERMES_MODEL_NAME:-hermes-agent}
+      - HERMES_API_KEY=${HERMES_API_KEY:-}
+      - HERMES_API_KEY_FILE=${HERMES_API_KEY_FILE:-/run/secrets/hermes_api_key}
+      - IN_DOCKER=true
+      - OCR_USE_GPU=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # debug=false 时必须配置，部署时按实际 IP/域名修改
       - ALLOWED_HOSTS=localhost,127.0.0.1,172.16.0.202
       # ADB over TCP: 容器通过宿主机的 ADB server 连接 Android 设备
@@ -64,7 +74,8 @@ services:
     volumes:
       - ./expand:/expand
       - ./logs:/app/logs
-      - ./docker/config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ${HERMES_API_KEY_FILE_HOST:-$HOME/.secrets/hermes_api_key}:/run/secrets/hermes_api_key:ro
 
   # 4. Django-Q2 任务队列 Worker
   worker:
@@ -73,6 +84,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: testhub_worker
     restart: always
+    gpus: all
     depends_on:
       - backend
     environment:
@@ -81,6 +93,15 @@ services:
       - DB_PASSWORD=rootpassword
       - DB_HOST=db
       - DB_PORT=3306
+      - REDIS_URL=redis://redis:6379/
+      - HERMES_BASE_URL=${HERMES_BASE_URL:-http://host.docker.internal:8642/v1}
+      - HERMES_MODEL_NAME=${HERMES_MODEL_NAME:-hermes-agent}
+      - HERMES_API_KEY=${HERMES_API_KEY:-}
+      - HERMES_API_KEY_FILE=${HERMES_API_KEY_FILE:-/run/secrets/hermes_api_key}
+      - IN_DOCKER=true
+      - OCR_USE_GPU=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - ALLOWED_HOSTS=localhost,127.0.0.1,172.16.0.202
       # ADB over TCP: 容器通过宿主机的 ADB server 连接 Android 设备
       - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
@@ -90,7 +111,8 @@ services:
     volumes:
       - ./expand:/expand
       - ./logs:/app/logs
-      - ./docker/config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - ${HERMES_API_KEY_FILE_HOST:-$HOME/.secrets/hermes_api_key}:/run/secrets/hermes_api_key:ro
 
   # 5. 前端服务 (Vite Dev Server)
   frontend:
@@ -101,8 +123,8 @@ services:
     ports:
       - "5173:3000"
     volumes:
-      # sync-config.js 解析路径为 /config.yaml，必须挂载到此位置
-      - ./docker/config.yaml:/config.yaml:ro
+      # sync-config.js 解析路径为 /config.yaml，挂载根目录配置文件
+      - ./config.yaml:/config.yaml:ro
     depends_on:
       - backend
 

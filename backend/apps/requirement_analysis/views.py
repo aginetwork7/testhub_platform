@@ -919,7 +919,7 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(role=role)
         else:
             # 如果没有指定角色，默认排除 AI智能模式专用模型
-            queryset = queryset.exclude(role__in=['browser_use_text', 'browser_use_vision'])
+            queryset = queryset.exclude(role__in=['browser_use_text', 'browser_use_vision', 'hermes_agent'])
 
         # 按是否启用过滤
         is_active = self.request.query_params.get('is_active')
@@ -3090,7 +3090,7 @@ class ConfigStatusViewSet(viewsets.ViewSet):
             # 检查AI模型配置
             ai_model_configs = AIModelConfig.objects.filter(
                 role__in=['writer', 'reviewer']
-            ).exclude(role__in=['browser_use_text', 'browser_use_vision'])
+            ).exclude(role__in=['browser_use_text', 'browser_use_vision', 'hermes_agent'])
 
             # 检查writer模型配置
             writer_model_enabled = ai_model_configs.filter(
