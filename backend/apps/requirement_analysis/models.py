@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import httpx
 from typing import Dict, Any, List, AsyncIterator
+from asgiref.sync import sync_to_async
 
 from django.core.files.storage import FileSystemStorage
 from backend.log_config import get_logger
@@ -454,6 +455,68 @@ class AIModelService:
     """AI模型服务类"""
 
     @staticmethod
+    def _load_task_with_related(task_id: int) -> TestCaseGenerationTask:
+        return TestCaseGenerationTask.objects.select_related(
+            'writer_model_config',
+            'reviewer_model_config',
+            'writer_prompt_config',
+            'reviewer_prompt_config',
+        ).get(id=task_id)
+
+    @staticmethod
+    async def _get_task_with_related(task: TestCaseGenerationTask) -> TestCaseGenerationTask:
+        return await sync_to_async(AIModelService._load_task_with_related)(task.id)
+
+    @staticmethod
+    def _build_writer_user_message(requirement_text: str) -> str:
+        return (
+            f"请根据以下需求文档直接输出测试用例结果，不要输出分析过程、思考过程、推理步骤、说明文字或开场白。\n\n"
+            f"【生成指令】\n"
+            f"1. 数量原则：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
+            f"2. 深度遍历策略：\n"
+            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
+            f"   - 对每个功能点，必须设计1个正常场景和2-3个异常或边界场景。\n"
+            f"3. 拒绝合并：严禁将多个验证点合并在一条用例中。例如“验证输入框”应拆分为“输入为空”“输入超长”“输入特殊字符”等独立用例。\n"
+            f"4. 场景扩展库：\n"
+            f"   - 数据完整性（必填项、默认值、数据类型）\n"
+            f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
+            f"   - 外部接口异常（超时、断网、返回错误）\n"
+            f"   - UI交互体验（提示文案、跳转逻辑、防误触）\n"
+            f"5. 输出顺序要求：\n"
+            f"   - 必须按用例编号从小到大的顺序输出。\n"
+            f"   - 绝对不能跳号、重复或乱序输出。\n"
+            f"   - 编号必须连续，中间不能有遗漏。\n"
+            f"6. 特殊字符处理：如果在表格内容中出现管道符 |，请使用 HTML 实体 &#124; 代替，不要使用反斜杠转义。\n"
+            f"7. 格式约束：\n"
+            f"   - 绝对禁止输出任何思考过程或类似 Here's a thinking process、分析如下、推理过程 等内容。\n"
+            f"   - 绝对禁止输出 Markdown 加粗语法。\n"
+            f"   - 只允许输出最终测试用例 Markdown 表格。\n"
+            f"   - 不要输出表格之外的任何额外文本。\n\n"
+            f"【需求文档内容】\n{requirement_text}"
+        )
+
+    @staticmethod
+    def _build_request_payload(
+            config: AIModelConfig,
+            messages: List[Dict[str, str]],
+            max_tokens: int,
+            stream: bool
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            'model': config.model_name,
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': config.temperature,
+            'top_p': config.top_p,
+            'stream': stream,
+        }
+
+        if config.model_type == 'qwen':
+            data['chat_template_kwargs'] = {'enable_thinking': False}
+
+        return data
+
+    @staticmethod
     async def call_openai_compatible_api(
             config: AIModelConfig,
             messages: List[Dict[str, str]],
@@ -478,14 +541,12 @@ class AIModelService:
         # 使用传入的max_tokens或默认使用config.max_tokens
         actual_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
 
-        data = {
-            'model': config.model_name,
-            'messages': messages,
-            'max_tokens': actual_max_tokens,
-            'temperature': config.temperature,
-            'top_p': config.top_p,
-            'stream': False
-        }
+        data = AIModelService._build_request_payload(
+            config=config,
+            messages=messages,
+            max_tokens=actual_max_tokens,
+            stream=False,
+        )
 
         # 确保base_url不以/结尾
         base_url = config.base_url.rstrip('/')
@@ -602,14 +663,12 @@ class AIModelService:
         MAX_CONTINUATIONS = 5  # 最大续写次数，防止死循环
 
         while continuation_count <= MAX_CONTINUATIONS:
-            data = {
-                'model': config.model_name,
-                'messages': current_messages,
-                'max_tokens': actual_max_tokens,
-                'temperature': config.temperature,
-                'top_p': config.top_p,
-                'stream': True
-            }
+            data = AIModelService._build_request_payload(
+                config=config,
+                messages=current_messages,
+                max_tokens=actual_max_tokens,
+                stream=True,
+            )
 
             logger.info(f"发起流式请求 (第{continuation_count + 1}次), messages数量: {len(current_messages)}")
 
@@ -721,38 +780,9 @@ class AIModelService:
     @staticmethod
     async def generate_test_cases(task: TestCaseGenerationTask) -> str:
         """生成测试用例"""
+        task = await AIModelService._get_task_with_related(task)
         writer_prompt = task.writer_prompt_config.content
-
-        # 构建更明确的用户提示，采用思维链(CoT)引导和细粒度拆分策略
-        user_message = (
-            f"请深入分析以下需求文档，并设计高覆盖率的测试用例。\n\n"
-            f"【生成指令】\n"
-            f"1. **数量原则**：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
-            f"2. **深度遍历策略**：\n"
-            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
-            f"   - 对每个功能点，必须设计：1个正常场景 + 2-3个异常/边界场景。\n"
-            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'、'输入特殊字符'等独立用例。\n"
-            f"4. **场景扩展库**：\n"
-            f"   - 数据完整性（必填项、默认值、数据类型）\n"
-            f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
-            f"   - 外部接口异常（超时、断网、返回错误）\n"
-            f"   - UI交互体验（提示文案、跳转逻辑、防误触）\n"
-            f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
-            f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
-            f"   - **绝对不能跳号、重复或乱序输出**\n"
-            f"   - **编号必须连续，中间不能有遗漏**\n"
-            f"   - **所有用例必须一次性完整输出，不能中断**\n"
-            rf"6. **⚠️ 特殊字符处理（关键）**：\n"
-            rf"   - **如果在表格内容（如操作步骤、预期结果）中出现管道符 '|'，请使用HTML实体 '&#124;' 代替**。\n"
-            rf"   - **绝对不要使用反斜杠转义（如 '\|'），这会导致输出混乱**。\n"
-            rf"   - 示例：应输入 'a&#124;b' 而不是 'a|b' 或 'a\|b'。\n"
-            f"7. **⚠️ 格式禁止事项（必须严格执行）**：\n"
-            f"   - **绝对禁止使用 Markdown 加粗语法（即 **文字** 格式）**\n"
-            f"   - 测试用例标题、步骤、预期结果等内容都不要加粗\n"
-            f"   - 正确示例：验证回车键触发登录\n"
-            f"   - 错误示例：**验证回车键触发登录**\n\n"
-            f"【需求文档内容】\n{task.requirement_text}"
-        )
+        user_message = AIModelService._build_writer_user_message(task.requirement_text)
 
         messages = [
             {"role": "system", "content": writer_prompt},
@@ -773,6 +803,7 @@ class AIModelService:
     async def review_test_cases(task: TestCaseGenerationTask, test_cases: str) -> str:
         """评审测试用例"""
         try:
+            task = await AIModelService._get_task_with_related(task)
             reviewer_prompt = task.reviewer_prompt_config.content
 
             # 增强的评审指令
@@ -817,38 +848,9 @@ class AIModelService:
         Returns:
             str: 完整的测试用例内容
         """
+        task = await AIModelService._get_task_with_related(task)
         writer_prompt = task.writer_prompt_config.content
-
-        # 构建用户提示
-        user_message = (
-            f"请深入分析以下需求文档，并设计高覆盖率的测试用例。\n\n"
-            f"【生成指令】\n"
-            f"1. **数量原则**：请根据需求内容的实际复杂度，自动决定生成用例的数量。务必覆盖所有功能点、异常场景和边界条件，不设数量上限，应写尽写。\n"
-            f"2. **深度遍历策略**：\n"
-            f"   - 请按文档结构逐章节分析，不要遗漏末尾的功能点。\n"
-            f"   - 对每个功能点，必须设计：1个正常场景 + 2-3个异常/边界场景。\n"
-            f"3. **拒绝合并**：严禁将多个验证点合并在一条用例中。例如'验证输入框'应拆分为'输入为空'、'输入超长'、'输入特殊字符'等独立用例。\n"
-            f"4. **场景扩展库**：\n"
-            f"   - 数据完整性（必填项、默认值、数据类型）\n"
-            f"   - 业务逻辑约束（状态流转、权限控制、重复操作）\n"
-            f"   - 外部接口异常（超时、断网、返回错误）\n"
-            f"   - UI交互体验（提示文案、跳转逻辑、防误触）\n"
-            f"5. **⚠️ 输出顺序要求（必须严格执行）**：\n"
-            f"   - **必须按用例编号从小到大的顺序输出**（如：001, 002, 003...或LOGIN_001, LOGIN_002, LOGIN_003...）\n"
-            f"   - **绝对不能跳号、重复或乱序输出**\n"
-            f"   - **编号必须连续，中间不能有遗漏**\n"
-            f"   - **所有用例必须一次性完整输出，不能中断**\n"
-            rf"6. **⚠️ 特殊字符处理（关键）**：\n"
-            rf"   - **如果在表格内容（如操作步骤、预期结果）中出现管道符 '|'，请使用HTML实体 '&#124;' 代替**。\n"
-            rf"   - **绝对不要使用反斜杠转义（如 '\|'），这会导致输出混乱**。\n"
-            rf"   - 示例：应输入 'a&#124;b' 而不是 'a|b' 或 'a\|b'。\n"
-            f"7. **⚠️ 格式禁止事项（必须严格执行）**：\n"
-            f"   - **绝对禁止使用 Markdown 加粗语法（即 **文字** 格式）**\n"
-            f"   - 测试用例标题、步骤、预期结果等内容都不要加粗\n"
-            f"   - 正确示例：验证回车键触发登录\n"
-            f"   - 错误示例：**验证回车键触发登录**\n\n"
-            f"【需求文档内容】\n{task.requirement_text}"
-        )
+        user_message = AIModelService._build_writer_user_message(task.requirement_text)
 
         messages = [
             {"role": "system", "content": writer_prompt},
@@ -913,6 +915,7 @@ class AIModelService:
         Returns:
             str: 完整的评审反馈
         """
+        task = await AIModelService._get_task_with_related(task)
         reviewer_prompt = task.reviewer_prompt_config.content
 
         # 增强的评审指令
@@ -978,6 +981,7 @@ class AIModelService:
         Returns:
             str: 改进后的测试用例
         """
+        task = await AIModelService._get_task_with_related(task)
         writer_prompt = task.writer_prompt_config.content
 
         # 构建改进指令
