@@ -103,7 +103,7 @@ export default {
   // AI 智能模式配置
   aiMode: {
     title: 'AI智能模式配置',
-    description: '配置Browser-use执行时的智能模式与模型参数',
+    description: '配置AI智能模式的执行后端与模型参数，支持Browser与Hermes',
     configList: '配置列表',
     addConfig: '添加配置',
     addFirstConfig: '添加第一个配置',
@@ -127,10 +127,11 @@ export default {
     enableConfig: '启用此配置',
     enableConfigHint: '启用后，同一模式下其他已启用的配置将自动禁用',
     executionMode: '执行模式',
-    executionModeHint: '文本模式使用HTML解析，视觉模式使用截图识别（需视觉模型如 qwen-vl、gpt-4o）',
+    executionModeHint: '文本模式使用HTML解析，视觉模式使用截图识别，Hermes模式将整句任务直接发送给Hermes执行',
     roles: {
       text: '文本模式',
-      vision: '视觉模式'
+      vision: '视觉模式',
+      hermes: 'Hermes模式'
     },
     testConnection: '测试连接',
     testing: '测试中...',
@@ -172,7 +173,7 @@ export default {
   // AI 智能模式提示词配置
   aiModePrompt: {
     title: 'AI智能模式提示词配置',
-    description: '配置Browser-use执行时的提示词，支持文本模式和视觉模式',
+    description: '配置AI智能模式执行时的提示词，支持文本模式、视觉模式和Hermes模式',
     configList: '提示词配置列表',
     addConfig: '添加提示词',
     editConfig: '编辑提示词',
@@ -183,6 +184,7 @@ export default {
     selectPromptType: '请选择提示词类型',
     textPrompt: '文本模式提示词',
     visionPrompt: '视觉模式提示词',
+    hermesPrompt: 'Hermes提示词',
     promptContent: '提示词内容',
     contentPlaceholder: '请输入提示词内容...',
     contentPreview: '内容预览',
@@ -200,6 +202,7 @@ export default {
     emptyDescription: '请添加或加载默认提示词以开始使用',
     defaultTextName: '默认文本模式提示词',
     defaultVisionName: '默认视觉模式提示词',
+    defaultHermesName: '默认Hermes提示词',
     messages: {
       loadFailed: '加载配置失败',
       saveSuccess: '提示词添加成功',

@@ -223,6 +223,7 @@ TIMEOUTS_SCREENSHOT = timeouts_config.get('screenshot', 5000)
 # 缓存配置
 cache_config = config_loader.get_cache_config()
 CACHE_OCR_MAX_SIZE = cache_config.get('ocr_max_size', 50)
+OCR_USE_GPU = config('OCR_USE_GPU', default=cache_config.get('ocr_use_gpu', False), cast=bool)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
@@ -432,7 +433,10 @@ SPECTACULAR_SETTINGS = {
 
 # Redis配置，开发环境和生产环境都使用配置的Redis
 redis_config = config_loader.get_redis_config()
-REDIS_URL = redis_config.get('url', 'redis://127.0.0.1:6379/')
+REDIS_URL = config('REDIS_URL', default=redis_config.get('url', 'redis://127.0.0.1:6379/'))
+REDIS_DB = config('REDIS_DB', default=redis_config.get('redis_db', 0), cast=int)
+REDIS_CACHE_DB = config('REDIS_CACHE_DB', default=redis_config.get('cache_db', 1), cast=int)
+REDIS_SESSION_DB = config('REDIS_SESSION_DB', default=redis_config.get('session_db', 2), cast=int)
 
 # 从Redis URL中提取基础URL（去掉末尾的数据库编号）
 def get_redis_base_url(url):
@@ -447,10 +451,10 @@ def get_redis_base_url(url):
 REDIS_BASE_URL = get_redis_base_url(REDIS_URL)
 
 # 缓存Redis配置（使用config.yaml中的cache_db）
-REDIS_CACHE_URL = f"{REDIS_BASE_URL}{redis_config.get('cache_db', 1)}"
+REDIS_CACHE_URL = f"{REDIS_BASE_URL}{REDIS_CACHE_DB}"
 
 # 会话Redis配置（使用config.yaml中的session_db）
-REDIS_SESSION_URL = f"{REDIS_BASE_URL}{redis_config.get('session_db', 2)}"
+REDIS_SESSION_URL = f"{REDIS_BASE_URL}{REDIS_SESSION_DB}"
 
 # Session配置：使用Redis存储会话（通过sessions缓存）
 SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
@@ -461,7 +465,7 @@ CHANNEL_LAYERS = {
     'default': {
         'BACKEND': 'channels_redis.core.RedisChannelLayer',
         'CONFIG': {
-            'hosts': [f"{REDIS_BASE_URL}{redis_config.get('redis_db', 0)}"],
+            'hosts': [f"{REDIS_BASE_URL}{REDIS_DB}"],
         },
     },
 }
@@ -481,7 +485,7 @@ Q_CLUSTER = {
     'save_limit': 250,  # 保存限制
     'cpu_affinity': 1,  # CPU 亲和性
     'label': '任务管理',  # 菜单名称
-    'redis': f"{REDIS_BASE_URL}{redis_config.get('redis_db', 0)}",  # Redis 配置
+    'redis': f"{REDIS_BASE_URL}{REDIS_DB}",  # Redis 配置
     'sync': False,  # False异步模式，True同步模式
 }
 

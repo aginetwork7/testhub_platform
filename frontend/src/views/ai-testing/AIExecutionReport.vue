@@ -49,6 +49,10 @@
               </el-tag>
             </div>
             <div class="overview-card">
+              <div class="card-label">执行模式</div>
+              <div class="card-value">{{ reportData.overview.execution_mode_display || '-' }}</div>
+            </div>
+            <div class="overview-card">
               <div class="card-label">{{ $t('uiAutomation.ai.executionReport.executionDuration') }}</div>
               <div class="card-value">{{ reportData.overview.duration_formatted }}</div>
             </div>

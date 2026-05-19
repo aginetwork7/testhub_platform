@@ -6,6 +6,10 @@
         <el-select v-model="projectId" :placeholder="$t('uiAutomation.project.selectProject')" style="width: 200px; margin-right: 15px" @change="onProjectChange">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
+        <el-select v-model="executionMode" :placeholder="$t('uiAutomation.ai.caseList.executionBackend')" style="width: 140px;">
+          <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
+          <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
+        </el-select>
       </div>
     </div>
 
@@ -103,6 +107,7 @@ const projectId = ref('')
 const cases = ref([])
 const loading = ref(false)
 const searchText = ref('')
+const executionMode = ref('text')
 const total = ref(0)
 const pagination = reactive({
   currentPage: 1,
@@ -243,7 +248,7 @@ const deleteCase = async (id) => {
 // 执行用例
 const runCase = async (row) => {
   try {
-    await executeAICase(row.id)
+    await executeAICase(row.id, { execution_mode: executionMode.value })
     ElMessage.success(t('uiAutomation.ai.caseList.messages.runSuccess'))
     // 跳转到执行记录页面
     router.push('/ai-intelligent-mode/execution-records')

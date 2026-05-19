@@ -41,6 +41,11 @@ class AICase(models.Model):
 
 class AIExecutionRecord(models.Model):
     """AI执行记录"""
+    EXECUTION_MODE_CHOICES = [
+        ('text', '文本模式'),
+        ('hermes', 'Hermes模式'),
+    ]
+
     STATUS_CHOICES = [
         ('pending', '等待中'),
         ('running', '执行中'),
@@ -53,7 +58,7 @@ class AIExecutionRecord(models.Model):
     ai_case = models.ForeignKey(AICase, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='关联AI用例')
     case_name = models.CharField(max_length=200, verbose_name='用例名称快照')
     task_description = models.TextField(blank=True, default='', verbose_name='任务描述', help_text='用户输入的原始任务描述')
-    execution_mode = models.CharField(max_length=20, choices=[('text', '文本模式')], default='text', verbose_name='执行模式')
+    execution_mode = models.CharField(max_length=20, choices=EXECUTION_MODE_CHOICES, default='text', verbose_name='执行模式')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='执行状态')
     start_time = models.DateTimeField(auto_now_add=True, verbose_name='开始时间')
     end_time = models.DateTimeField(null=True, blank=True, verbose_name='结束时间')

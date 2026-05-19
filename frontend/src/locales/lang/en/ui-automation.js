@@ -470,11 +470,13 @@ export default {
     title: 'AI Intelligent Testing',
     taskInput: 'Task Input',
     taskDescription: 'Task Description',
+    executionBackend: 'Execution Backend',
     taskPlaceholder: 'Describe the task in natural language, e.g.:\n1. Visit https://www.baidu.com\n2. Search \'TestHub\'\n3. Click the first search result',
     gifRecording: 'GIF Recording',
     on: 'On',
     off: 'Off',
     gifTip: 'When enabled, the execution process will be recorded as a GIF file and saved to ai_agent_history directory',
+    hermesGifTip: 'GIF generation is not available in Hermes mode.',
     startExecution: 'Start Execution',
     stopExecution: 'Stop Execution',
     saveAsCase: 'Save as Case',
@@ -493,6 +495,10 @@ export default {
     rules: {
       nameRequired: 'Please enter case name'
     },
+    backends: {
+      browser: 'Browser',
+      hermes: 'Hermes'
+    },
     messages: {
       initAgent: 'Initializing AI Agent...\n',
       startSuccess: 'Task started',
@@ -509,6 +515,7 @@ export default {
     caseList: {
       title: 'AI Case Management',
       newCase: 'New AI Case',
+      executionBackend: 'Execution Backend',
       searchPlaceholder: 'Search case name or description',
       caseName: 'Case Name',
       taskDescription: 'Task Description',
@@ -538,6 +545,8 @@ export default {
       serialNumber: 'No.',
       caseName: 'Case Name',
       executionMode: 'Execution Mode',
+      browserMode: 'Browser',
+      hermesMode: 'Hermes',
       adhocExecution: 'Adhoc Execution',
       caseExecution: 'Case Execution',
       status: 'Status',
