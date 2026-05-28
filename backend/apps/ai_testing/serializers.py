@@ -66,7 +66,9 @@ class AICaseSerializer(serializers.Serializer):
     project_name = serializers.SerializerMethodField()
     name = serializers.CharField(max_length=200)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    task_description = serializers.CharField()
+    task_description = serializers.CharField(required=False, allow_blank=True)
+    case_mode = serializers.ChoiceField(choices=AICase.CASE_MODE_CHOICES, required=False, default='freeform')
+    task_steps = serializers.JSONField(required=False)
     created_by_name = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)
@@ -77,6 +79,24 @@ class AICaseSerializer(serializers.Serializer):
     def get_project_name(self, obj):
         return obj.project.name if obj.project else ''
 
+    def validate(self, attrs):
+        case_mode = attrs.get('case_mode') or getattr(self.instance, 'case_mode', 'freeform')
+        task_description = attrs.get('task_description')
+        if task_description is None and self.instance is not None:
+            task_description = self.instance.task_description
+
+        task_steps = attrs.get('task_steps')
+        if task_steps is None and self.instance is not None:
+            task_steps = self.instance.task_steps
+
+        if case_mode in {'structured', 'hybrid'}:
+            if not isinstance(task_steps, list) or not task_steps:
+                raise serializers.ValidationError({'task_steps': 'structured mode requires a non-empty step list'})
+        elif not str(task_description or '').strip():
+            raise serializers.ValidationError({'task_description': 'freeform mode requires task_description'})
+
+        return attrs
+
     def create(self, validated_data):
         validated_data['created_by'] = self.context['request'].user
         return AICase.objects.create(**validated_data)
@@ -86,6 +106,8 @@ class AICaseSerializer(serializers.Serializer):
         instance.name = validated_data.get('name', instance.name)
         instance.description = validated_data.get('description', instance.description)
         instance.task_description = validated_data.get('task_description', instance.task_description)
+        instance.case_mode = validated_data.get('case_mode', instance.case_mode)
+        instance.task_steps = validated_data.get('task_steps', instance.task_steps)
         instance.save()
         return instance
 
@@ -105,6 +127,9 @@ class AIExecutionRecordSerializer(serializers.Serializer):
     logs = serializers.CharField(read_only=True, allow_blank=True)
     steps_completed = serializers.JSONField(read_only=True)
     planned_tasks = serializers.JSONField(read_only=True)
+    planner_trace = serializers.JSONField(read_only=True)
+    artifacts = serializers.JSONField(read_only=True)
+    cache_stats = serializers.JSONField(read_only=True)
     executed_by_name = serializers.SerializerMethodField()
     gif_path = serializers.CharField(read_only=True, allow_null=True)
     screenshots_sequence = serializers.JSONField(read_only=True)

@@ -89,3 +89,5 @@ frontend/.DS_Store
 frontend/*.log
 frontend/dist/
 
+# reference:
+pyuitest/

@@ -14,7 +14,26 @@
         <el-col :span="12">
           <div class="section-title">{{ $t('uiAutomation.ai.taskInput') }}</div>
           <el-form :model="taskForm" label-position="top">
-            <el-form-item :label="$t('uiAutomation.ai.taskDescription')" required>
+            <el-form-item :label="$t('uiAutomation.ai.executionBackend')">
+              <el-select v-model="taskForm.executionMode" style="width: 220px;">
+                <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
+                <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
+                <el-option :label="$t('uiAutomation.ai.backends.plannerV2')" value="planner_v2" />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item :label="$t('uiAutomation.ai.caseMode')">
+              <el-select v-model="taskForm.caseMode" style="width: 220px;">
+                <el-option :label="$t('uiAutomation.ai.caseModes.freeform')" value="freeform" />
+                <el-option :label="$t('uiAutomation.ai.caseModes.hybrid')" value="hybrid" :disabled="taskForm.executionMode !== 'planner_v2'" />
+                <el-option :label="$t('uiAutomation.ai.caseModes.structured')" value="structured" :disabled="taskForm.executionMode !== 'planner_v2'" />
+              </el-select>
+              <span style="margin-left: 10px; color: #909399; font-size: 12px;">
+                {{ caseModeTipText }}
+              </span>
+            </el-form-item>
+
+            <el-form-item v-if="taskForm.caseMode === 'freeform'" :label="$t('uiAutomation.ai.taskDescription')" required>
               <el-input
                 v-model="taskForm.description"
                 type="textarea"
@@ -25,11 +44,72 @@
               />
             </el-form-item>
 
-            <el-form-item :label="$t('uiAutomation.ai.executionBackend')">
-              <el-select v-model="taskForm.executionMode" style="width: 220px;">
-                <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
-                <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
-              </el-select>
+            <el-form-item v-else :label="stepsSectionTitle" required>
+              <div class="structured-steps">
+                <div v-for="(step, index) in taskForm.taskSteps" :key="index" class="structured-step-card">
+                  <div class="structured-step-header">
+                    <span>{{ $t('uiAutomation.ai.structuredStep') }} {{ index + 1 }}</span>
+                    <el-button text type="danger" @click="removeStructuredStep(index)">
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </div>
+
+                  <div v-if="taskForm.caseMode === 'hybrid'" class="structured-step-grid hybrid-meta-grid">
+                    <el-select v-model="step.step_mode">
+                      <el-option :label="$t('uiAutomation.ai.stepModes.ai')" value="ai" />
+                      <el-option :label="$t('uiAutomation.ai.stepModes.direct')" value="direct" />
+                    </el-select>
+                    <el-input-number v-model="step.timeout_ms" :min="1000" :step="1000" :controls="false" />
+                  </div>
+
+                  <div v-if="taskForm.caseMode === 'hybrid' && step.step_mode === 'ai'" class="structured-step-grid single-line">
+                    <el-input v-model="step.description" type="textarea" :rows="3" :placeholder="$t('uiAutomation.ai.aiStepPlaceholder')" />
+                  </div>
+
+                  <template v-else>
+                    <div class="structured-step-grid">
+                      <el-input v-model="step.description" :placeholder="$t('uiAutomation.ai.stepDescriptionPlaceholder')" />
+                      <el-select v-model="step.action">
+                        <el-option v-for="option in stepActionOptions" :key="option.value" :label="option.label" :value="option.value" />
+                      </el-select>
+                      <el-input-number v-model="step.timeout_ms" :min="1000" :step="1000" :controls="false" />
+                    </div>
+
+                    <div v-if="step.action === 'navigate'" class="structured-step-grid single-line">
+                      <el-input v-model="step.url" :placeholder="$t('uiAutomation.ai.stepUrlPlaceholder')" />
+                    </div>
+
+                    <div v-else-if="step.action === 'click'" class="structured-step-grid single-line">
+                      <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                    </div>
+
+                    <div v-else-if="['fill', 'press', 'select'].includes(step.action)" class="structured-step-grid">
+                      <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                      <el-input v-model="step.value" :placeholder="$t('uiAutomation.ai.stepValuePlaceholder')" />
+                    </div>
+
+                    <div v-else-if="step.action === 'assert_url_contains'" class="structured-step-grid single-line">
+                      <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
+                    </div>
+
+                    <div v-else-if="step.action === 'assert_text_contains'" class="structured-step-grid">
+                      <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                      <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
+                    </div>
+                  </template>
+                </div>
+
+                <div class="structured-actions">
+                  <el-button plain type="primary" class="structured-add-btn" @click="addStructuredStep()">
+                    <el-icon><Plus /></el-icon>
+                    {{ $t('uiAutomation.ai.addStructuredStep') }}
+                  </el-button>
+                  <el-button v-if="taskForm.caseMode === 'hybrid'" plain type="success" class="structured-add-btn" @click="addStructuredStep('direct')">
+                    <el-icon><Plus /></el-icon>
+                    {{ $t('uiAutomation.ai.addDirectStep') }}
+                  </el-button>
+                </div>
+              </div>
             </el-form-item>
 
             <el-form-item :label="$t('uiAutomation.ai.gifRecording')">
@@ -40,7 +120,7 @@
                 :disabled="taskForm.executionMode !== 'text'"
               />
               <span style="margin-left: 10px; color: #909399; font-size: 12px;">
-                {{ taskForm.executionMode === 'text' ? $t('uiAutomation.ai.gifTip') : $t('uiAutomation.ai.hermesGifTip') }}
+                {{ taskForm.executionMode === 'text' ? $t('uiAutomation.ai.gifTip') : $t('uiAutomation.ai.nonBrowserGifTip') }}
               </span>
             </el-form-item>
 
@@ -49,7 +129,7 @@
                 type="primary"
                 @click="handleRun"
                 :loading="running"
-                :disabled="!taskForm.description"
+                :disabled="!canRun"
               >
                 <el-icon><VideoPlay /></el-icon>
                 {{ $t('uiAutomation.ai.startExecution') }}
@@ -66,7 +146,7 @@
               <el-button
                 type="success"
                 @click="handleSaveAsCase"
-                :disabled="!taskForm.description"
+                :disabled="!canRun"
               >
                 <el-icon><DocumentAdd /></el-icon>
                 {{ $t('uiAutomation.ai.saveAsCase') }}
@@ -149,11 +229,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, computed, onMounted } from 'vue'
+import { ref, reactive, nextTick, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { VideoPlay, DocumentAdd, CircleCheckFilled, CircleCheck, Loading, SwitchButton } from '@element-plus/icons-vue'
+import { VideoPlay, DocumentAdd, CircleCheckFilled, CircleCheck, Loading, SwitchButton, Plus, Delete } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
-import { getMetaProjects } from '@/api/unified-projects'
 import { createAICase, stopAIExecution, getAIExecutionRecord, getAiProjects, runAdhocAICase } from '@/api/ai-testing'
 
 const { t } = useI18n()
@@ -168,10 +247,23 @@ const plannedTasks = ref([])
 const currentExecutionId = ref(null)
 const logContainer = ref(null)
 
+const createStructuredStep = (stepMode = 'direct') => ({
+  step_mode: stepMode,
+  action: 'navigate',
+  description: '',
+  url: '',
+  selector: '',
+  value: '',
+  expected: '',
+  timeout_ms: 10000
+})
+
 const taskForm = reactive({
   description: '',
   enableGif: true,  // GIF录制开关，默认开启
-  executionMode: 'text'
+  executionMode: 'text',
+  caseMode: 'freeform',
+  taskSteps: [createStructuredStep()]
 })
 
 const showSaveDialog = ref(false)
@@ -184,6 +276,145 @@ const saveFormRef = ref(null)
 const saveRules = computed(() => ({
   name: [{ required: true, message: t('uiAutomation.ai.rules.nameRequired'), trigger: 'blur' }]
 }))
+
+const requiresStructuredMode = computed(() => taskForm.executionMode === 'planner_v2')
+
+const stepActionOptions = computed(() => [
+  { label: t('uiAutomation.ai.stepActions.navigate'), value: 'navigate' },
+  { label: t('uiAutomation.ai.stepActions.click'), value: 'click' },
+  { label: t('uiAutomation.ai.stepActions.fill'), value: 'fill' },
+  { label: t('uiAutomation.ai.stepActions.press'), value: 'press' },
+  { label: t('uiAutomation.ai.stepActions.select'), value: 'select' },
+  { label: t('uiAutomation.ai.stepActions.wait'), value: 'wait' },
+  { label: t('uiAutomation.ai.stepActions.assertUrlContains'), value: 'assert_url_contains' },
+  { label: t('uiAutomation.ai.stepActions.assertTextContains'), value: 'assert_text_contains' }
+])
+
+const stepsSectionTitle = computed(() => taskForm.caseMode === 'hybrid'
+  ? t('uiAutomation.ai.hybridSteps')
+  : t('uiAutomation.ai.structuredSteps'))
+
+const caseModeTipText = computed(() => {
+  if (taskForm.executionMode !== 'planner_v2') {
+    return t('uiAutomation.ai.caseModeTip')
+  }
+  if (taskForm.caseMode === 'hybrid') {
+    return t('uiAutomation.ai.hybridCaseModeTip')
+  }
+  return t('uiAutomation.ai.plannerV2Tip')
+})
+
+const canRun = computed(() => {
+  if (taskForm.caseMode !== 'freeform') {
+    return taskForm.taskSteps.some(step => String(step.description || '').trim())
+  }
+  return !!String(taskForm.description || '').trim()
+})
+
+watch(
+  () => taskForm.executionMode,
+  (mode) => {
+    if (mode === 'planner_v2') {
+      if (taskForm.caseMode === 'freeform') {
+        taskForm.caseMode = 'hybrid'
+      }
+      taskForm.enableGif = false
+      if (taskForm.taskSteps.length === 0) {
+        taskForm.taskSteps.push(createStructuredStep(taskForm.caseMode === 'hybrid' ? 'ai' : 'direct'))
+      }
+      return
+    }
+
+    if (taskForm.caseMode !== 'freeform') {
+      taskForm.caseMode = 'freeform'
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => taskForm.caseMode,
+  (mode) => {
+    if (mode !== 'freeform' && taskForm.taskSteps.length === 0) {
+      taskForm.taskSteps.push(createStructuredStep(mode === 'hybrid' ? 'ai' : 'direct'))
+    }
+  }
+)
+
+const addStructuredStep = (stepMode = null) => {
+  const fallbackMode = taskForm.caseMode === 'hybrid' ? 'ai' : 'direct'
+  taskForm.taskSteps.push(createStructuredStep(stepMode || fallbackMode))
+}
+
+const removeStructuredStep = (index) => {
+  if (taskForm.taskSteps.length === 1) {
+    taskForm.taskSteps.splice(0, 1, createStructuredStep(taskForm.caseMode === 'hybrid' ? 'ai' : 'direct'))
+    return
+  }
+  taskForm.taskSteps.splice(index, 1)
+}
+
+const normalizeStructuredStep = (step = {}, index = 0) => ({
+  step_mode: step.step_mode || (taskForm.caseMode === 'hybrid' ? 'ai' : 'direct'),
+  action: step.action || 'navigate',
+  description: step.description || '',
+  url: step.url || '',
+  selector: step.selector || '',
+  value: step.value || '',
+  expected: step.expected || '',
+  timeout_ms: Number(step.timeout_ms) || 10000,
+  step_no: Number(step.step_no) || index + 1
+})
+
+const validateStructuredSteps = () => {
+  if (!Array.isArray(taskForm.taskSteps) || taskForm.taskSteps.length === 0) {
+    ElMessage.error(t('uiAutomation.ai.messages.structuredStepsRequired'))
+    return false
+  }
+
+  for (const [index, step] of taskForm.taskSteps.entries()) {
+    const label = `${t('uiAutomation.ai.structuredStep')} ${index + 1}`
+    if (!String(step.description || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepDescriptionRequired')}`)
+      return false
+    }
+    if (taskForm.caseMode === 'hybrid' && step.step_mode === 'ai') {
+      continue
+    }
+    if (!String(step.action || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepActionRequired')}`)
+      return false
+    }
+    if (step.action === 'navigate' && !String(step.url || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepUrlRequired')}`)
+      return false
+    }
+    if (['click', 'fill', 'press', 'select', 'assert_text_contains'].includes(step.action) && !String(step.selector || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepSelectorRequired')}`)
+      return false
+    }
+    if (['fill', 'press', 'select'].includes(step.action) && !String(step.value || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepValueRequired')}`)
+      return false
+    }
+    if (['assert_url_contains', 'assert_text_contains'].includes(step.action) && !String(step.expected || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepExpectedRequired')}`)
+      return false
+    }
+  }
+
+  return true
+}
+
+const buildTaskStepsPayload = () => taskForm.taskSteps.map((step, index) => ({
+  ...normalizeStructuredStep(step, index),
+  step_no: index + 1
+}))
+
+const buildTaskDescriptionFromSteps = (taskSteps) => taskSteps.map((step, index) => {
+  const prefix = step.step_mode === 'direct' ? '[DIRECT]' : '[AI]'
+  return `${index + 1}. ${prefix} ${step.description || ''}`.trim()
+}).join('\n')
 
 const loadProjects = async () => {
   try {
@@ -209,6 +440,15 @@ const onProjectChange = () => {
 
 // 执行任务
 const handleRun = async () => {
+  if (taskForm.caseMode !== 'freeform' && !validateStructuredSteps()) {
+    return
+  }
+
+  const taskSteps = taskForm.caseMode === 'freeform' ? [] : buildTaskStepsPayload()
+  const taskDescription = taskForm.caseMode === 'freeform'
+    ? taskForm.description
+    : buildTaskDescriptionFromSteps(taskSteps)
+
   running.value = true
   analyzing.value = true
   logs.value = t('uiAutomation.ai.messages.initAgent')
@@ -217,9 +457,11 @@ const handleRun = async () => {
   try {
     const response = await runAdhocAICase({
       project_id: projectId.value || null,
-      task_description: taskForm.description,
+      task_description: taskDescription,
       execution_mode: taskForm.executionMode,
-      enable_gif: taskForm.executionMode === 'text' ? taskForm.enableGif : false
+      enable_gif: taskForm.executionMode === 'text' ? taskForm.enableGif : false,
+      case_mode: taskForm.caseMode,
+      task_steps: taskSteps
     })
 
     // analyzing.value = false // 移除过早设置，改为在轮询获取到任务列表后再取消
@@ -310,13 +552,24 @@ const confirmSaveCase = async () => {
 
   await saveFormRef.value.validate(async (valid) => {
     if (valid) {
+      if (taskForm.caseMode !== 'freeform' && !validateStructuredSteps()) {
+        return
+      }
+
+      const taskSteps = taskForm.caseMode === 'freeform' ? [] : buildTaskStepsPayload()
+      const taskDescription = taskForm.caseMode === 'freeform'
+        ? taskForm.description
+        : buildTaskDescriptionFromSteps(taskSteps)
+
       saving.value = true
       try {
         await createAICase({
           name: saveForm.name,
           description: saveForm.description,
-          task_description: taskForm.description,
-          project_id: projectId.value || null
+          task_description: taskDescription,
+          project_id: projectId.value || null,
+          case_mode: taskForm.caseMode,
+          task_steps: taskSteps
         })
 
         ElMessage.success(t('uiAutomation.ai.messages.saveSuccess'))
@@ -469,5 +722,49 @@ onMounted(() => {
     font-size: 14px;
     line-height: 1.5;
   }
+}
+
+.structured-steps {
+  width: 100%;
+}
+
+.structured-step-card {
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background-color: #fafafa;
+}
+
+.structured-step-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.structured-step-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr 140px;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.structured-step-grid.single-line {
+  grid-template-columns: 1fr;
+}
+
+.hybrid-meta-grid {
+  grid-template-columns: 1fr 140px;
+}
+
+.structured-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.structured-add-btn {
+  width: 100%;
 }
 </style>

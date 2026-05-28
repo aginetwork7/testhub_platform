@@ -6,19 +6,22 @@ from django.contrib.auth import get_user_model
 from django.http import HttpResponse
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
+import ast
 import json
+import os
 import re
 import random
 import time
+from urllib.parse import urlparse
 from loguru import logger
 
 from .models import (
     UiProject, LocatorStrategy, Element, TestScript, TestSuite,
     TestSuiteScript, TestExecution, Screenshot,
     ElementGroup, PageObject, PageObjectElement, ScriptStep, ScriptElementUsage,
-    TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
+    TestCase, TestCaseStep, TestCaseExecution, RecordingSession, OperationRecord,
     UiNotificationLog
 )
 from .serializers import (
@@ -35,6 +38,8 @@ from .serializers import (
     ScriptStepSerializer, ScriptElementUsageSerializer,
     ScriptAnalysisSerializer, ElementValidationSerializer, CodeGenerationSerializer,
     TestCaseSerializer, TestCaseStepSerializer, TestCaseExecutionSerializer, OperationRecordSerializer,
+    RecordingSessionSerializer, RecordingSessionCreateSerializer, RecordingSessionUploadSerializer,
+    RecordingSessionMaterializeSerializer,
     UiNotificationLogSerializer
 )
 from .operation_logger import log_operation
@@ -1082,6 +1087,120 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             logger.info(f"成功创建了 {created_count} 个新步骤")
 
+    def _resolve_import_element_id(self, step_data, element_map_by_name):
+        """解析批量导入步骤中的元素引用"""
+        if step_data.get('element_id'):
+            return step_data.get('element_id')
+
+        if step_data.get('element'):
+            return step_data.get('element')
+
+        element_name = step_data.get('element_name')
+        if not element_name:
+            return None
+
+        if element_name not in element_map_by_name:
+            raise ValueError(f"未找到元素: {element_name}")
+
+        return element_map_by_name[element_name]
+
+    def _create_test_case_steps(self, test_case, steps_data, element_map_by_name):
+        created_count = 0
+        for i, step_data in enumerate(steps_data):
+            raw_step_data = dict(step_data)
+            element_id = self._resolve_import_element_id(raw_step_data, element_map_by_name)
+
+            TestCaseStep.objects.create(
+                test_case=test_case,
+                step_number=raw_step_data.get('step_number', i + 1),
+                action_type=raw_step_data.get('action_type', 'click'),
+                element_id=element_id,
+                input_value=raw_step_data.get('input_value', ''),
+                wait_time=raw_step_data.get('wait_time', 1000),
+                assert_type=raw_step_data.get('assert_type', ''),
+                assert_value=raw_step_data.get('assert_value', ''),
+                description=raw_step_data.get('description', '')
+            )
+            created_count += 1
+
+        return created_count
+
+    @action(detail=False, methods=['post'], url_path='batch-import')
+    def batch_import(self, request):
+        """批量导入测试用例"""
+        project_id = request.data.get('project_id')
+        test_cases_data = request.data.get('test_cases', [])
+
+        if not project_id:
+            return Response({'error': 'project_id 为必填项'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(test_cases_data, str):
+            try:
+                test_cases_data = json.loads(test_cases_data)
+            except json.JSONDecodeError:
+                return Response({'error': 'test_cases JSON 格式无效'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not isinstance(test_cases_data, list) or not test_cases_data:
+            return Response({'error': 'test_cases 必须是非空数组'}, status=status.HTTP_400_BAD_REQUEST)
+
+        accessible_projects = UiProject.objects.filter(
+            models.Q(owner=request.user) | models.Q(members=request.user)
+        ).distinct()
+        project = accessible_projects.filter(id=project_id).first()
+
+        if project is None:
+            return Response({'error': '项目不存在或无权限访问'}, status=status.HTTP_404_NOT_FOUND)
+
+        elements = Element.objects.filter(project=project)
+        element_map_by_name = {element.name: element.id for element in elements}
+
+        created_cases = []
+        failed_cases = []
+
+        for index, case_data in enumerate(test_cases_data, start=1):
+            try:
+                with transaction.atomic():
+                    name = str(case_data.get('name', '')).strip()
+                    if not name:
+                        raise ValueError('name 不能为空')
+
+                    test_case = TestCase.objects.create(
+                        project=project,
+                        name=name,
+                        description=case_data.get('description', ''),
+                        priority=case_data.get('priority', 'medium'),
+                        status=case_data.get('status', 'ready'),
+                        created_by=request.user
+                    )
+
+                    steps_data = case_data.get('steps', [])
+                    created_step_count = self._create_test_case_steps(
+                        test_case=test_case,
+                        steps_data=steps_data,
+                        element_map_by_name=element_map_by_name
+                    )
+
+                    log_operation('create', 'test_case', test_case.id, test_case.name, request.user)
+                    created_cases.append({
+                        'index': index,
+                        'id': test_case.id,
+                        'name': test_case.name,
+                        'steps_count': created_step_count
+                    })
+            except Exception as e:
+                failed_cases.append({
+                    'index': index,
+                    'name': case_data.get('name', f'case_{index}'),
+                    'error': str(e)
+                })
+
+        return Response({
+            'created_count': len(created_cases),
+            'failed_count': len(failed_cases),
+            'created_cases': created_cases,
+            'failed_cases': failed_cases,
+        })
+
     @action(detail=True, methods=['post'])
     def copy_case(self, request, pk=None):
         """复制测试用例"""
@@ -1466,9 +1585,31 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             # 详细错误信息列表
             detailed_errors = []
             execution_result = {'status': 'passed', 'error_message': None}
+            thread_failure = {'message': None, 'details': None}
+
+            def mark_execution_failure(message, details='', action_type='执行引擎'):
+                execution_result['status'] = 'failed'
+                execution_result['error_message'] = message
+                execution_logs.append(f"✗ {message}")
+                if details:
+                    execution_logs.append(details)
+                detailed_errors.append({
+                    'step_number': None,
+                    'action_type': action_type,
+                    'element': '',
+                    'message': message,
+                    'details': details,
+                    'description': '执行前环境检查或执行线程异常',
+                })
+
+            headless_requested = request.data.get('headless', False)
+            if not headless_requested and not os.environ.get('DISPLAY'):
+                message = '当前环境不支持有头模式，请切换为无头模式后重试'
+                details = 'Docker/Linux 无图形界面环境下无法直接启动 headed 浏览器。请将运行模式切换为无头模式，或为容器提供 XServer / xvfb。'
+                mark_execution_failure(message, details, action_type='环境检查')
 
             # 根据引擎类型选择执行方式
-            if engine_type == 'selenium':
+            if execution_result['status'] != 'failed' and engine_type == 'selenium':
                 # Selenium同步执行
                 def run_test_selenium():
                     """使用Selenium执行测试"""
@@ -1660,11 +1801,19 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
                 # 在独立线程中运行Selenium测试
                 import threading
-                test_thread = threading.Thread(target=run_test_selenium)
+                def selenium_runner():
+                    try:
+                        run_test_selenium()
+                    except Exception as e:
+                        import traceback
+                        thread_failure['message'] = f'Selenium 执行线程异常: {str(e)}'
+                        thread_failure['details'] = traceback.format_exc()
+
+                test_thread = threading.Thread(target=selenium_runner)
                 test_thread.start()
                 test_thread.join()
 
-            else:
+            elif execution_result['status'] != 'failed':
                 # Playwright异步执行
                 def run_test_in_thread():
                     """在独立线程中运行异步测试"""
@@ -1875,9 +2024,20 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
                 # 在独立线程中运行Playwright测试
                 import threading
-                test_thread = threading.Thread(target=run_test_in_thread)
+                def playwright_runner():
+                    try:
+                        run_test_in_thread()
+                    except Exception as e:
+                        import traceback
+                        thread_failure['message'] = f'Playwright 执行线程异常: {str(e)}'
+                        thread_failure['details'] = traceback.format_exc()
+
+                test_thread = threading.Thread(target=playwright_runner)
                 test_thread.start()
                 test_thread.join()  # 等待测试完成
+
+            if thread_failure['message']:
+                mark_execution_failure(thread_failure['message'], thread_failure['details'])
 
             # 计算总执行时间
             total_time = round(time.time() - start_time, 2)
@@ -1898,8 +2058,9 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             # 保存error_message（step_log已经是简洁的错误信息）
             execution.error_message = execution_result['error_message'] or ''
 
-            # 保存步骤执行结果为JSON格式
-            execution.execution_logs = json.dumps(step_results, ensure_ascii=False)
+            # 优先保存结构化步骤结果；如果未进入步骤执行，回退为纯文本日志列表
+            response_logs = step_results if step_results else execution_logs
+            execution.execution_logs = json.dumps(response_logs, ensure_ascii=False)
             execution.execution_time = total_time
             execution.finished_at = timezone.now()
             execution.screenshots = screenshots
@@ -1932,7 +2093,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
 
             return Response({
                 'success': execution.status == 'passed',
+                'status': execution.status,
                 'logs': execution.execution_logs,
+                'timeline_logs': execution_logs,
+                'step_results': step_results,
                 'screenshots': screenshots,
                 'execution_time': execution.execution_time,
                 'errors': errors
@@ -1944,7 +2108,10 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             traceback.print_exc()
             return Response({
                 'success': False,
+                'status': 'failed',
                 'logs': f"执行失败: {str(e)}\n\n{traceback.format_exc()}",
+                'timeline_logs': [f"执行失败: {str(e)}", traceback.format_exc()],
+                'step_results': [],
                 'screenshots': [],
                 'execution_time': 0,
                 'errors': [{'message': str(e), 'stack': traceback.format_exc()}]
@@ -2070,6 +2237,669 @@ class TestCaseExecutionViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"批量删除测试用例执行记录失败: {str(e)}", exc_info=True)
             return Response({'error': f'批量删除失败: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class RecordingSessionViewSet(viewsets.ModelViewSet):
+    """Playwright codegen 录制会话视图集"""
+    queryset = RecordingSession.objects.all().select_related('project', 'started_by')
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['project', 'status', 'browser', 'framework', 'import_target']
+    search_fields = ['name', 'base_url', 'project__name']
+    ordering_fields = ['created_at', 'updated_at', 'started_at']
+    ordering = ['-created_at']
+    pagination_class = StandardPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        accessible_projects = UiProject.objects.filter(
+            models.Q(owner=user) | models.Q(members=user)
+        ).distinct()
+        return RecordingSession.objects.filter(project__in=accessible_projects).select_related('project', 'started_by')
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return RecordingSessionCreateSerializer
+        return RecordingSessionSerializer
+
+    def perform_create(self, serializer):
+        project = serializer.validated_data['project']
+        base_url = serializer.validated_data.get('base_url') or project.base_url
+        serializer.save(started_by=self.request.user, base_url=base_url)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        instance = serializer.instance
+        output_serializer = RecordingSessionSerializer(instance, context=self.get_serializer_context())
+        headers = self.get_success_headers(output_serializer.data)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def _extract_string_argument(self, expression):
+        literals = self._extract_string_literals(expression)
+        return literals[0] if literals else ''
+
+    def _extract_string_literals(self, expression):
+        literals = []
+        index = 0
+        text = str(expression or '')
+
+        while index < len(text):
+            current = text[index]
+            if current not in ['\'', '"']:
+                index += 1
+                continue
+
+            quote = current
+            start = index
+            index += 1
+            escape = False
+
+            while index < len(text):
+                current = text[index]
+                if escape:
+                    escape = False
+                    index += 1
+                    continue
+
+                if current == '\\':
+                    escape = True
+                    index += 1
+                    continue
+
+                if current == quote:
+                    literal_text = text[start:index + 1]
+                    try:
+                        literals.append(ast.literal_eval(literal_text))
+                    except (ValueError, SyntaxError):
+                        literals.append(literal_text[1:-1])
+                    index += 1
+                    break
+
+                index += 1
+            else:
+                break
+
+        return literals
+
+    def _extract_call_content(self, expression, anchor):
+        start = str(expression or '').find(anchor)
+        if start == -1:
+            return ''
+
+        text = str(expression or '')
+        paren_start = text.find('(', start + len(anchor))
+        if paren_start == -1:
+            return ''
+
+        depth = 0
+        in_quote = ''
+        escape = False
+
+        for index in range(paren_start, len(text)):
+            current = text[index]
+
+            if in_quote:
+                if escape:
+                    escape = False
+                elif current == '\\':
+                    escape = True
+                elif current == in_quote:
+                    in_quote = ''
+                continue
+
+            if current in ['\'', '"']:
+                in_quote = current
+                continue
+
+            if current == '(':
+                depth += 1
+                continue
+
+            if current == ')':
+                depth -= 1
+                if depth == 0:
+                    return text[paren_start + 1:index]
+
+        return ''
+
+    def _extract_role_locator(self, expression):
+        role_expression = expression[expression.rfind('.get_by_role('):] if '.get_by_role(' in expression else expression
+        literals = self._extract_string_literals(role_expression)
+        locator_value = literals[0] if literals else ''
+
+        if 'name=' in role_expression and len(literals) > 1:
+            locator_value = f"{locator_value}[name={literals[1]}]"
+
+        return {
+            'strategy': 'role',
+            'value': locator_value,
+        }
+
+    def _extract_locator_info(self, expression):
+        expression = expression.strip()
+
+        # Prefer the most specific locator in chained expressions such as
+        # page.locator(...).nth(0).get_by_role(...).click()
+        if expression.rfind('.get_by_role(') != -1:
+            return self._extract_role_locator(expression)
+        if expression.rfind('.get_by_text(') != -1:
+            return {
+                'strategy': 'text',
+                'value': self._extract_string_argument(expression[expression.rfind('.get_by_text('):]),
+            }
+        if expression.rfind('.get_by_test_id(') != -1:
+            return {
+                'strategy': 'test-id',
+                'value': self._extract_string_argument(expression[expression.rfind('.get_by_test_id('):]),
+            }
+        if expression.rfind('.get_by_placeholder(') != -1:
+            return {
+                'strategy': 'placeholder',
+                'value': self._extract_string_argument(expression[expression.rfind('.get_by_placeholder('):]),
+            }
+        if expression.rfind('.get_by_label(') != -1:
+            return {
+                'strategy': 'label',
+                'value': self._extract_string_argument(expression[expression.rfind('.get_by_label('):]),
+            }
+        if expression.rfind('.locator(') != -1:
+            return {
+                'strategy': 'css',
+                'value': self._extract_string_argument(expression[expression.rfind('.locator('):]),
+            }
+
+        return None
+
+    def _build_selector_locator(self, selector):
+        selector_value = str(selector or '').strip()
+        if not selector_value:
+            return None
+
+        strategy = 'xpath' if selector_value.startswith('//') else 'css'
+        return {
+            'strategy': strategy,
+            'value': selector_value,
+        }
+
+    def _strip_outer_quotes(self, value):
+        text = str(value or '').strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ['\'', '"']:
+            text = text[1:-1]
+
+        text = text.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+        return text.strip()
+
+    def _split_direct_call_arguments(self, content, expected_parts=1):
+        text = str(content or '').strip()
+        if not text:
+            return []
+
+        if expected_parts == 1:
+            return [self._strip_outer_quotes(text)]
+
+        if expected_parts == 2 and ',' in text:
+            selector_part, value_part = text.rsplit(',', 1)
+            return [
+                self._strip_outer_quotes(selector_part),
+                self._strip_outer_quotes(value_part),
+            ]
+
+        return [self._strip_outer_quotes(text)]
+
+    def _parse_recorded_script(self, raw_script):
+        parsed_steps = []
+
+        for line in raw_script.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+
+            goto_match = re.search(r"page\.goto\((['\"])(.*?)\1\)", stripped)
+            if goto_match:
+                parsed_steps.append({
+                    'action_type': 'navigateTo',
+                    'target': goto_match.group(2),
+                    'description': f"导航到 {goto_match.group(2)}",
+                })
+                continue
+
+            direct_fill_args = self._split_direct_call_arguments(
+                self._extract_call_content(stripped, 'page.fill'),
+                expected_parts=2,
+            )
+            if len(direct_fill_args) >= 2:
+                parsed_steps.append({
+                    'action_type': 'fill',
+                    'locator': self._build_selector_locator(direct_fill_args[0]),
+                    'input_value': direct_fill_args[1],
+                    'description': '录制生成的输入步骤',
+                })
+                continue
+
+            fill_match = re.search(r"(page\.[^\n]+?)\.fill\((['\"])(.*?)\2\)", stripped)
+            if fill_match:
+                locator_info = self._extract_locator_info(fill_match.group(1))
+                parsed_steps.append({
+                    'action_type': 'fill',
+                    'locator': locator_info,
+                    'input_value': fill_match.group(3),
+                    'description': '录制生成的输入步骤',
+                })
+                continue
+
+            direct_click_args = self._split_direct_call_arguments(
+                self._extract_call_content(stripped, 'page.click'),
+                expected_parts=1,
+            )
+            if direct_click_args:
+                parsed_steps.append({
+                    'action_type': 'click',
+                    'locator': self._build_selector_locator(direct_click_args[0]),
+                    'description': '录制生成的点击步骤',
+                })
+                continue
+
+            click_match = re.search(r"(page\.[^\n]+?)\.click\(", stripped)
+            if click_match:
+                locator_info = self._extract_locator_info(click_match.group(1))
+                parsed_steps.append({
+                    'action_type': 'click',
+                    'locator': locator_info,
+                    'description': '录制生成的点击步骤',
+                })
+                continue
+
+            url_assert_match = re.search(r"expect\(page\)\.to_have_url\((['\"])(.*?)\1\)", stripped)
+            if url_assert_match:
+                parsed_steps.append({
+                    'action_type': 'assert',
+                    'assert_type': 'urlContains',
+                    'assert_value': url_assert_match.group(2),
+                    'description': '录制生成的 URL 断言',
+                })
+                continue
+
+            text_assert_match = re.search(r"expect\((page\.[^\n]+?)\)\.to_contain_text\((['\"])(.*?)\2\)", stripped)
+            if text_assert_match:
+                parsed_steps.append({
+                    'action_type': 'assert',
+                    'locator': self._extract_locator_info(text_assert_match.group(1)),
+                    'assert_type': 'textContains',
+                    'assert_value': text_assert_match.group(3),
+                    'description': '录制生成的文本断言',
+                })
+                continue
+
+            visible_assert_match = re.search(r"expect\((page\.[^\n]+?)\)\.to_be_visible\(", stripped)
+            if visible_assert_match:
+                parsed_steps.append({
+                    'action_type': 'assert',
+                    'locator': self._extract_locator_info(visible_assert_match.group(1)),
+                    'assert_type': 'isVisible',
+                    'assert_value': 'true',
+                    'description': '录制生成的可见性断言',
+                })
+
+        return parsed_steps
+
+    def _normalize_locator_strategy(self, strategy):
+        normalized = str(strategy or '').strip().lower()
+        strategy_map = {
+            'css selector': 'css',
+            'css': 'css',
+            'testid': 'test-id',
+            'test-id': 'test-id',
+        }
+        return strategy_map.get(normalized, normalized)
+
+    def _parse_role_name_locator_value(self, value):
+        match = re.fullmatch(r'([^\[]+)\[name=(.+)\]', str(value or '').strip())
+        if not match:
+            return None
+
+        return {
+            'role': match.group(1).strip(),
+            'name': match.group(2).strip(),
+        }
+
+    def _collect_element_locators(self, element):
+        locators = [{
+            'strategy': self._normalize_locator_strategy(element.locator_strategy.name),
+            'value': str(element.locator_value or '').strip(),
+        }]
+
+        for backup_locator in element.backup_locators or []:
+            locators.append({
+                'strategy': self._normalize_locator_strategy(backup_locator.get('strategy', '')),
+                'value': str(backup_locator.get('value', '')).strip(),
+            })
+
+        return locators
+
+    def _match_role_name_locator(self, project, strategy, value):
+        if strategy != 'role':
+            return None
+
+        role_name_locator = self._parse_role_name_locator_value(value)
+        if role_name_locator is None:
+            return None
+
+        candidate_elements = Element.objects.filter(project=project).select_related('locator_strategy')
+        name_strategies = {'text', 'label', 'title', 'placeholder'}
+
+        for element in candidate_elements:
+            locators = self._collect_element_locators(element)
+            has_matching_role = any(
+                locator['strategy'] == 'role' and locator['value'] in [
+                    value,
+                    role_name_locator['role'],
+                ]
+                for locator in locators
+            )
+            has_matching_name = any(
+                locator['strategy'] in name_strategies and locator['value'] == role_name_locator['name']
+                for locator in locators
+            )
+
+            if has_matching_role and has_matching_name:
+                return element
+
+        return None
+
+    def _match_existing_element(self, project, locator_info):
+        if not locator_info:
+            return None
+
+        strategy = self._normalize_locator_strategy(locator_info.get('strategy', ''))
+        value = str(locator_info.get('value', '')).strip()
+        if not strategy or not value:
+            return None
+
+        primary_match = Element.objects.filter(
+            project=project,
+            locator_strategy__name__iexact=strategy,
+            locator_value=value,
+        ).first()
+        if primary_match is not None:
+            return primary_match
+
+        semantic_role_match = self._match_role_name_locator(project, strategy, value)
+        if semantic_role_match is not None:
+            return semantic_role_match
+
+        candidate_elements = Element.objects.filter(
+            project=project,
+            backup_locators__isnull=False,
+        ).select_related('locator_strategy')
+
+        for element in candidate_elements:
+            for backup_locator in element.backup_locators or []:
+                backup_strategy = self._normalize_locator_strategy(backup_locator.get('strategy', ''))
+                backup_value = str(backup_locator.get('value', '')).strip()
+                if backup_strategy == strategy and backup_value == value:
+                    return element
+
+        return None
+
+    def _extract_page_hint(self, url_or_path):
+        text = str(url_or_path or '').strip()
+        if not text:
+            return ''
+
+        if text.startswith('/'):
+            return text
+
+        parsed = urlparse(text)
+        return parsed.path or parsed.netloc or text
+
+    def _infer_element_type(self, action_type, locator_info):
+        locator_value = str((locator_info or {}).get('value', '')).lower()
+
+        if action_type == 'fill':
+            return 'INPUT'
+        if 'input' in locator_value or 'textarea' in locator_value:
+            return 'INPUT'
+        if 'img' in locator_value:
+            return 'IMAGE'
+        if 'svg' in locator_value or 'path' in locator_value:
+            return 'ICON'
+
+        return 'BUTTON'
+
+    def _get_or_create_recording_element(self, recording, request, step_number, action_type, locator_info, page_hint):
+        if not locator_info:
+            return None
+
+        strategy = self._normalize_locator_strategy(locator_info.get('strategy', ''))
+        value = str(locator_info.get('value', '')).strip()
+        if not strategy or not value:
+            return None
+
+        matched_element = self._match_existing_element(recording.project, locator_info)
+        if matched_element is not None:
+            return matched_element, False
+
+        locator_strategy = LocatorStrategy.objects.filter(name__iexact=strategy).first()
+        if locator_strategy is None:
+            return None, False
+
+        page_value = page_hint or self._extract_page_hint(recording.base_url)
+        generated_name = f"录制导入_步骤{step_number}_{strategy}"
+
+        generated_element = Element.objects.create(
+            project=recording.project,
+            name=generated_name,
+            description='录制导入自动生成的占位元素',
+            element_type=self._infer_element_type(action_type, locator_info),
+            locator_strategy=locator_strategy,
+            locator_value=value,
+            page=page_value,
+            created_by=request.user,
+        )
+
+        return generated_element, True
+
+    def _create_test_case_from_recording(self, recording, request, name, description):
+        if not recording.parsed_steps:
+            raise ValueError('请先解析录制脚本，当前没有可导入的步骤')
+
+        test_case = TestCase.objects.create(
+            project=recording.project,
+            name=name,
+            description=description,
+            priority='medium',
+            status='draft',
+            created_by=request.user,
+        )
+
+        created_steps = 0
+        missing_elements = []
+        skipped_steps = []
+        auto_created_elements = []
+        supported_action_types = {choice[0] for choice in TestCaseStep.ACTION_TYPE_CHOICES}
+        current_page_hint = self._extract_page_hint(recording.base_url)
+
+        try:
+            for original_index, parsed_step in enumerate(recording.parsed_steps, start=1):
+                action_type = parsed_step.get('action_type', 'click')
+
+                if action_type == 'navigateTo':
+                    current_page_hint = self._extract_page_hint(parsed_step.get('target', current_page_hint))
+
+                if action_type not in supported_action_types:
+                    skipped_steps.append({
+                        'step_number': original_index,
+                        'action_type': action_type,
+                        'reason': '当前低代码测试用例暂不支持该步骤类型，已仅保留在脚本中',
+                    })
+                    continue
+
+                locator_info = parsed_step.get('locator')
+                matched_element = None
+
+                if locator_info:
+                    matched_element, auto_created = self._get_or_create_recording_element(
+                        recording=recording,
+                        request=request,
+                        step_number=original_index,
+                        action_type=action_type,
+                        locator_info=locator_info,
+                        page_hint=current_page_hint,
+                    )
+
+                    if matched_element is None:
+                        missing_elements.append({
+                            'step_number': original_index,
+                            'strategy': locator_info.get('strategy', ''),
+                            'value': locator_info.get('value', ''),
+                        })
+                    elif auto_created:
+                        auto_created_elements.append({
+                            'step_number': original_index,
+                            'element_id': matched_element.id,
+                            'element_name': matched_element.name,
+                            'page': matched_element.page,
+                        })
+
+                TestCaseStep.objects.create(
+                    test_case=test_case,
+                    step_number=created_steps + 1,
+                    action_type=action_type,
+                    element=matched_element,
+                    input_value=parsed_step.get('input_value', parsed_step.get('target', '')),
+                    wait_time=parsed_step.get('wait_time', 1000),
+                    assert_type=parsed_step.get('assert_type', ''),
+                    assert_value=parsed_step.get('assert_value', ''),
+                    description=parsed_step.get('description', ''),
+                )
+                created_steps += 1
+
+            log_operation('create', 'test_case', test_case.id, test_case.name, request.user)
+            return test_case, created_steps, missing_elements, skipped_steps, auto_created_elements
+        except Exception:
+            test_case.delete()
+            raise
+
+    @action(detail=True, methods=['post'])
+    def upload_script(self, request, pk=None):
+        """上传录制后的原始脚本"""
+        recording = self.get_object()
+        serializer = RecordingSessionUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        raw_script = serializer.validated_data.get('raw_script', '')
+        script_file = serializer.validated_data.get('script_file')
+
+        if script_file is not None:
+            try:
+                raw_script = script_file.read().decode('utf-8')
+            except UnicodeDecodeError:
+                return Response({'error': 'script_file 必须为 UTF-8 编码文本文件'}, status=status.HTTP_400_BAD_REQUEST)
+
+        recording.raw_script = raw_script
+        recording.status = 'uploaded'
+        recording.parsed_steps = []
+        recording.error_message = ''
+        recording.save(update_fields=['raw_script', 'status', 'parsed_steps', 'error_message', 'updated_at'])
+
+        return Response(RecordingSessionSerializer(recording).data)
+
+    @action(detail=True, methods=['post'])
+    def parse(self, request, pk=None):
+        """解析录制后的原始脚本"""
+        recording = self.get_object()
+
+        if not recording.raw_script.strip():
+            return Response({'error': '请先上传录制脚本'}, status=status.HTTP_400_BAD_REQUEST)
+
+        parsed_steps = self._parse_recorded_script(recording.raw_script)
+        recording.parsed_steps = parsed_steps
+        recording.status = 'parsed'
+        recording.error_message = ''
+        recording.save(update_fields=['parsed_steps', 'status', 'error_message', 'updated_at'])
+
+        return Response({
+            'id': recording.id,
+            'status': recording.status,
+            'parsed_steps': parsed_steps,
+            'parsed_count': len(parsed_steps),
+        })
+
+    @action(detail=True, methods=['post'])
+    def materialize(self, request, pk=None):
+        """将录制结果物化为 TestScript 或 TestCase 草稿"""
+        recording = self.get_object()
+        serializer = RecordingSessionMaterializeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if not recording.raw_script.strip():
+            return Response({'error': '请先上传录制脚本'}, status=status.HTTP_400_BAD_REQUEST)
+
+        script_name = serializer.validated_data.get('name') or recording.name
+        description = serializer.validated_data.get('description') or f'由录制会话 #{recording.id} 生成'
+
+        target = serializer.validated_data.get('target') or recording.import_target
+        created_script = None
+        created_test_case = None
+        created_steps = 0
+        missing_elements = []
+        skipped_steps = []
+        auto_created_elements = []
+
+        with transaction.atomic():
+            if target in ['script', 'both']:
+                created_script = TestScript.objects.create(
+                    project=recording.project,
+                    name=script_name,
+                    description=description,
+                    script_type='CODE',
+                    content=recording.raw_script,
+                    language=recording.target_language,
+                    framework=recording.framework,
+                )
+                log_operation('create', 'script', created_script.id, created_script.name, request.user)
+
+            if target in ['test_case', 'both']:
+                created_test_case, created_steps, missing_elements, skipped_steps, auto_created_elements = self._create_test_case_from_recording(
+                    recording=recording,
+                    request=request,
+                    name=script_name,
+                    description=description,
+                )
+
+        recording.status = 'imported'
+        recording.finished_at = timezone.now()
+        recording.error_message = ''
+        recording.save(update_fields=['status', 'finished_at', 'error_message', 'updated_at'])
+
+        return Response({
+            'recording_id': recording.id,
+            'status': recording.status,
+            'target': target,
+            'test_script': TestScriptSerializer(created_script).data if created_script else None,
+            'test_case': TestCaseSerializer(created_test_case).data if created_test_case else None,
+            'created_steps': created_steps,
+            'missing_elements': missing_elements,
+            'skipped_steps': skipped_steps,
+            'auto_created_elements': auto_created_elements,
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """取消录制会话"""
+        recording = self.get_object()
+
+        if recording.status == 'cancelled':
+            return Response({'message': '录制会话已取消'})
+
+        recording.status = 'cancelled'
+        recording.finished_at = timezone.now()
+        recording.save(update_fields=['status', 'finished_at', 'updated_at'])
+
+        return Response(RecordingSessionSerializer(recording).data)
 
 
 class OperationRecordViewSet(viewsets.ReadOnlyModelViewSet):

@@ -37,8 +37,6 @@
                 <el-switch
                   v-model="config.is_active"
                   @change="toggleActive(config)"
-                  :active-text="$t('configuration.common.enabled')"
-                  :inactive-text="$t('configuration.common.disabled')"
                   :loading="config.toggling"
                 />
                 <button class="test-btn" @click="testConnection(config)" :disabled="config.testing">

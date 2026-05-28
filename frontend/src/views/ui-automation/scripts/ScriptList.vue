@@ -6,6 +6,10 @@
         <el-select v-model="selectedProject" :placeholder="$t('uiAutomation.common.selectProject')" style="width: 200px; margin-right: 15px" @change="onProjectChange">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
+        <el-button @click="openRecordingDialog">
+          <el-icon><Upload /></el-icon>
+          录制导入
+        </el-button>
         <el-button type="primary" @click="goToScriptEditor">
           <el-icon><Plus /></el-icon>
           {{ $t('uiAutomation.script.newScript') }}
@@ -140,19 +144,105 @@
         <el-button type="primary" @click="saveEditedScript" :loading="saving">{{ $t('uiAutomation.script.save') }}</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showRecordingDialog" title="录制导入" width="820px" :close-on-click-modal="false">
+      <div class="recording-dialog">
+        <el-alert
+          title="当前入口用于承接 Playwright codegen 录制结果。先创建录制会话，再粘贴录制脚本进行解析和导入。"
+          type="info"
+          :closable="false"
+          style="margin-bottom: 16px"
+        />
+
+        <el-form :model="recordingForm" label-width="120px">
+          <el-form-item label="录制名称" required>
+            <el-input v-model="recordingForm.name" placeholder="请输入录制名称" />
+          </el-form-item>
+          <el-form-item label="入口 URL" required>
+            <el-input v-model="recordingForm.base_url" placeholder="请输入录制入口 URL" />
+          </el-form-item>
+          <el-form-item label="导入目标">
+            <el-radio-group v-model="recordingForm.target">
+              <el-radio value="script">仅脚本</el-radio>
+              <el-radio value="test_case">仅测试用例</el-radio>
+              <el-radio value="both">脚本和测试用例</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="录制脚本">
+            <el-input
+              v-model="recordingForm.raw_script"
+              type="textarea"
+              :rows="14"
+              placeholder="将 playwright codegen 生成的 Python 脚本粘贴到这里"
+            />
+          </el-form-item>
+        </el-form>
+
+        <div v-if="recordingSession" class="recording-meta" style="margin-bottom: 16px; color: #606266; line-height: 1.8;">
+          <div>会话 ID：{{ recordingSession.id }}</div>
+          <div>当前状态：{{ recordingSession.status_display || recordingSession.status }}</div>
+        </div>
+
+        <div v-if="parsedSteps.length > 0" class="parsed-steps-preview">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <h4 style="margin: 0;">解析结果预览</h4>
+            <span style="color: #909399;">共 {{ parsedSteps.length }} 步</span>
+          </div>
+          <el-table :data="parsedSteps" stripe max-height="260">
+            <el-table-column type="index" label="#" width="60" />
+            <el-table-column label="动作" width="120">
+              <template #default="{ row }">
+                {{ getParsedActionText(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="目标/定位器" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ getParsedTargetText(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="输入值" min-width="160" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ getParsedInputText(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="断言类型" width="120">
+              <template #default="{ row }">
+                {{ getParsedAssertTypeText(row) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="断言值" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.assert_value || '-' }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="handleCloseRecordingDialog">{{ $t('uiAutomation.common.cancel') }}</el-button>
+        <el-button type="primary" :loading="recordingCreating" @click="createRecording">创建会话</el-button>
+        <el-button :loading="recordingParsing" :disabled="!recordingSession" @click="uploadAndParseRecording">上传并解析</el-button>
+        <el-button type="success" :loading="recordingMaterializing" :disabled="!recordingSession || parsedSteps.length === 0" @click="materializeRecording">导入结果</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, View, Edit, Delete, EditPen } from '@element-plus/icons-vue'
+import { Plus, View, Edit, Delete, EditPen, Upload } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 
 import {
   getUiProjects,
   getTestScripts,
+  createRecordingSession,
+  uploadRecordingScript,
+  parseRecordingSession,
+  materializeRecordingSession,
+  cancelRecordingSession,
   updateTestScript,
   deleteTestScript
 } from '@/api/ui_automation'
@@ -172,16 +262,29 @@ const total = ref(0)
 const showDetailDialog = ref(false)
 const showRenameDialog = ref(false)
 const showEditDialog = ref(false)
+const showRecordingDialog = ref(false)
 
 // 当前操作的脚本
 const currentScript = ref(null)
 const editingScript = ref(null)
 const saving = ref(false)
+const recordingSession = ref(null)
+const parsedSteps = ref([])
+const recordingCreating = ref(false)
+const recordingParsing = ref(false)
+const recordingMaterializing = ref(false)
 
 // 重命名表单
 const renameForm = reactive({
   scriptId: null,
   newName: ''
+})
+
+const recordingForm = reactive({
+  name: '',
+  base_url: '',
+  target: 'both',
+  raw_script: ''
 })
 
 // 加载项目列表
@@ -244,6 +347,213 @@ const handleCurrentChange = async () => {
 // 跳转到脚本编辑器
 const goToScriptEditor = () => {
   router.push('/ui-automation/scripts/editor')
+}
+
+/**
+ * @typedef {Object} ParsedStep
+ * @property {string} [action_type]
+ * @property {{ strategy?: string, value?: string }} [locator]
+ * @property {string} [input_value]
+ * @property {string} [target]
+ * @property {string} [assert_type]
+ * @property {string} [assert_value]
+ * @property {string} [description]
+ */
+
+/** @param {ParsedStep | null | undefined} step */
+const getParsedActionText = (step) => {
+  /** @type {Record<string, string>} */
+  const actionMap = {
+    navigateTo: '页面跳转',
+    fill: '填写内容',
+    click: '点击元素',
+    assert: '结果校验'
+  }
+
+  const actionKey = step?.action_type || ''
+
+  return actionMap[actionKey] || actionKey || '-'
+}
+
+/** @param {ParsedStep | null | undefined} step */
+const getParsedTargetText = (step) => {
+  if (step?.action_type === 'navigateTo') {
+    return step.target || '-'
+  }
+
+  if (step?.action_type === 'assert' && step?.assert_type === 'urlContains') {
+    return '当前页面 URL'
+  }
+
+  if (step?.locator) {
+    return `${step.locator.strategy}=${step.locator.value}`
+  }
+
+  return '-'
+}
+
+/** @param {ParsedStep | null | undefined} step */
+const getParsedInputText = (step) => {
+  if (step?.action_type === 'navigateTo') {
+    return step.description || '-'
+  }
+
+  if (step?.input_value) {
+    return step.input_value
+  }
+
+  if (step?.description) {
+    return step.description
+  }
+
+  return '-'
+}
+
+/** @param {ParsedStep | null | undefined} step */
+const getParsedAssertTypeText = (step) => {
+  /** @type {Record<string, string>} */
+  const assertTypeMap = {
+    urlContains: 'URL包含',
+    textContains: '文本包含',
+    isVisible: '可见'
+  }
+
+  const assertKey = step?.assert_type || ''
+
+  return assertTypeMap[assertKey] || assertKey || '-'
+}
+
+const openRecordingDialog = () => {
+  if (!selectedProject.value) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+
+  const currentProject = projects.value.find(project => project.id === selectedProject.value)
+  recordingForm.name = currentProject ? `${currentProject.name}_录制导入` : '录制导入'
+  recordingForm.base_url = currentProject?.base_url || ''
+  recordingForm.target = 'both'
+  recordingForm.raw_script = ''
+  recordingSession.value = null
+  parsedSteps.value = []
+  showRecordingDialog.value = true
+}
+
+const createRecording = async () => {
+  if (!selectedProject.value) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+
+  if (!recordingForm.name.trim() || !recordingForm.base_url.trim()) {
+    ElMessage.warning('请先填写录制名称和入口 URL')
+    return
+  }
+
+  try {
+    recordingCreating.value = true
+    const response = await createRecordingSession({
+      project: selectedProject.value,
+      name: recordingForm.name,
+      base_url: recordingForm.base_url,
+      browser: 'chromium',
+      target_language: 'python',
+      framework: 'playwright',
+      import_target: recordingForm.target
+    })
+
+    recordingSession.value = response.data
+    ElMessage.success('录制会话已创建')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '创建录制会话失败')
+    console.error('创建录制会话失败:', error)
+  } finally {
+    recordingCreating.value = false
+  }
+}
+
+const uploadAndParseRecording = async () => {
+  if (!recordingSession.value) {
+    ElMessage.warning('请先创建录制会话')
+    return
+  }
+
+  if (!recordingForm.raw_script.trim()) {
+    ElMessage.warning('请先粘贴录制脚本')
+    return
+  }
+
+  try {
+    recordingParsing.value = true
+
+    await uploadRecordingScript(recordingSession.value.id, {
+      raw_script: recordingForm.raw_script
+    })
+
+    const parseResponse = await parseRecordingSession(recordingSession.value.id)
+    parsedSteps.value = parseResponse.data?.parsed_steps || []
+    recordingSession.value = {
+      ...recordingSession.value,
+      status: parseResponse.data?.status || 'parsed',
+      status_display: '已解析'
+    }
+
+    ElMessage.success(`解析成功，共 ${parsedSteps.value.length} 步`)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '上传并解析失败')
+    console.error('上传并解析失败:', error)
+  } finally {
+    recordingParsing.value = false
+  }
+}
+
+const materializeRecording = async () => {
+  if (!recordingSession.value) {
+    ElMessage.warning('请先创建录制会话')
+    return
+  }
+
+  if (parsedSteps.value.length === 0) {
+    ElMessage.warning('请先解析录制脚本')
+    return
+  }
+
+  try {
+    recordingMaterializing.value = true
+    const response = await materializeRecordingSession(recordingSession.value.id, {
+      name: recordingForm.name,
+      description: `由脚本录制导入生成，目标: ${recordingForm.target}`,
+      target: recordingForm.target
+    })
+
+    recordingSession.value = {
+      ...recordingSession.value,
+      status: response.data?.status || 'imported',
+      status_display: '已导入'
+    }
+
+    ElMessage.success('录制结果导入成功')
+    await loadScripts()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '导入录制结果失败')
+    console.error('导入录制结果失败:', error)
+  } finally {
+    recordingMaterializing.value = false
+  }
+}
+
+const handleCloseRecordingDialog = async () => {
+  if (recordingSession.value && ['created', 'uploaded', 'parsed'].includes(recordingSession.value.status)) {
+    try {
+      await cancelRecordingSession(recordingSession.value.id)
+    } catch (error) {
+      console.error('取消录制会话失败:', error)
+    }
+  }
+
+  showRecordingDialog.value = false
+  recordingSession.value = null
+  parsedSteps.value = []
 }
 
 // 查看脚本详情

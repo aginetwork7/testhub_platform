@@ -471,15 +471,31 @@ export default {
     taskInput: '任务输入',
     taskDescription: '任务描述',
     executionBackend: '执行后端',
+    caseMode: '用例模式',
+    caseModeTip: '自由描述适合现有 Browser/Hermes 模式，结构化步骤适合 planner_v2。',
+    hybridCaseModeTip: '混合步骤允许自然语言步骤与系统直执行步骤并存，适合逐步编排测试用例。',
+    plannerV2Tip: 'planner_v2 当前按结构化或混合步骤执行，请填写步骤列表。',
     taskPlaceholder: '请用自然语言描述要执行的任务，例如：\n1. 访问 https://www.baidu.com\n2. 搜索 \'TestHub\'\n3. 点击第一条搜索结果',
     gifRecording: 'GIF录制',
     on: '开启',
     off: '关闭',
     gifTip: '开启后将录制执行过程并生成GIF文件，保存到 ai_agent_history 目录',
     hermesGifTip: 'Hermes 模式暂不生成浏览器 GIF。',
+    nonBrowserGifTip: '当前执行模式不生成浏览器 GIF。',
     startExecution: '开始执行',
     stopExecution: '停止执行',
     saveAsCase: '保存为用例',
+    structuredSteps: '结构化步骤',
+    hybridSteps: '混合步骤',
+    structuredStep: '步骤',
+    addStructuredStep: '新增步骤',
+    addDirectStep: '新增直执行步骤',
+    stepDescriptionPlaceholder: '步骤描述，例如：打开登录页',
+    aiStepPlaceholder: '请用自然语言描述这一步，例如：打开登录页并点击右上角头像菜单',
+    stepUrlPlaceholder: '请输入目标 URL',
+    stepSelectorPlaceholder: '请输入 CSS/XPath 选择器',
+    stepValuePlaceholder: '请输入填写内容或按键值',
+    stepExpectedPlaceholder: '请输入期望文本或 URL 片段',
     tip: '提示',
     tipContent1: 'AI 模式使用"配置中心-AI智能模式配置"中的模型（如未添加模型，请前往添加）。',
     tipContent2: '支持中英文任务描述，任务描述越详细，执行效果越好。',
@@ -497,7 +513,27 @@ export default {
     },
     backends: {
       browser: 'Browser',
-      hermes: 'Hermes'
+      hermes: 'Hermes',
+      plannerV2: 'Planner V2'
+    },
+    caseModes: {
+      freeform: '自由描述',
+      hybrid: '混合步骤',
+      structured: '结构化步骤'
+    },
+    stepModes: {
+      ai: 'AI自然语言',
+      direct: '系统直执行'
+    },
+    stepActions: {
+      navigate: '跳转 URL',
+      click: '点击元素',
+      fill: '填写内容',
+      press: '按下按键',
+      select: '选择选项',
+      wait: '等待',
+      assertUrlContains: '断言 URL 包含',
+      assertTextContains: '断言文本包含'
     },
     messages: {
       initAgent: '正在初始化 AI Agent...\n',
@@ -509,16 +545,26 @@ export default {
       taskStopped: '任务已停止',
       executionFailed: '执行失败',
       saveSuccess: '保存成功',
-      saveFailed: '保存失败'
+      saveFailed: '保存失败',
+      structuredStepsRequired: '请至少填写一个结构化步骤',
+      stepDescriptionRequired: '请填写步骤描述',
+      stepActionRequired: '请选择步骤动作',
+      stepUrlRequired: '请填写 URL',
+      stepSelectorRequired: '请填写选择器',
+      stepValueRequired: '请填写输入值',
+      stepExpectedRequired: '请填写断言期望值'
     },
     // AI用例列表
     caseList: {
       title: 'AI 用例管理',
       newCase: '新建AI用例',
       executionBackend: '执行后端',
+      disableCache: '禁用 Cache',
       searchPlaceholder: '搜索用例名称或描述',
       caseName: '用例名称',
       taskDescription: '任务描述',
+      expandTaskDescription: '展开',
+      collapseTaskDescription: '收起',
       runCount: '执行次数',
       createCase: '新建 AI 用例',
       editCase: '编辑 AI 用例',
@@ -535,7 +581,9 @@ export default {
         deleteSuccess: '删除成功',
         deleteFailed: '删除AI用例失败',
         runSuccess: '用例开始执行',
-        runFailed: '执行AI用例失败'
+        runFailed: '执行AI用例失败',
+        structuredCasePlannerModeRequired: '结构化或混合步骤用例请使用 Planner V2 执行',
+        hybridCaseExecutionPending: '混合步骤用例已支持新建和维护，混合执行链路仍在接入中'
       }
     },
     // AI执行记录
@@ -547,6 +595,7 @@ export default {
       executionMode: '执行模式',
       browserMode: 'Browser',
       hermesMode: 'Hermes',
+      plannerV2Mode: 'Planner V2',
       adhocExecution: '临时执行',
       caseExecution: '用例执行',
       status: '状态',
@@ -574,6 +623,17 @@ export default {
     // AI执行报告
     executionReport: {
       title: 'AI测试执行报告',
+      plannerTrace: '规划追踪',
+      cacheStats: '缓存统计',
+      artifacts: '执行产物',
+      finalCapture: '最终截图',
+      viewOriginal: '查看原图',
+      previewArtifact: '页面查看',
+      reportHtml: 'HTML 报告',
+      reportJsonl: '原始 JSONL 报告',
+      loadingArtifact: '正在加载产物预览...',
+      noArtifactPreview: '当前产物暂不支持预览',
+      rawArtifacts: '原始产物数据',
       backToList: '返回列表',
       basicInfo: '基本信息',
       caseName: '用例名称',

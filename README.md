@@ -454,6 +454,9 @@ python manage.py createsuperuser
 ```bash
 # 根目录执行
 python manage.py init_locator_strategies
+
+# 导入 Alpha Vision 登录演示项目、元素和用例（可重复执行）
+python manage.py init_alpha_vision_login_case --owner <你的用户名或邮箱>
 ```
 
 7. **初始化app自动化组件库**（只需执行一次）
@@ -626,7 +629,7 @@ npm run build
 - **[数据工厂快速开始](backend/docs/docs/数据工厂快速开始.md)**: 数据工厂快速上手指南
 - **[数据工厂功能说明](backend/docs/docs/数据工厂功能说明.md)**: 数据工厂功能详细说明
 - **[数据工厂API接口文档](backend/docs/docs/数据工厂API接口文档.md)**: 数据工厂 API 接口文档
-- **[UI自动化测试执行说明](backend/docs/docs/UI自动化测试执行说明.md)**: UI 自动化测试执行指南
+- **[UI自动化测试执行说明](backend/docs/docs/UI自动化测试执行说明.md)**: UI 自动化测试执行指南、locator 获取方法、模板库与批量铺设 SOP
 - **[WebDriver驱动管理优化说明](backend/docs/docs/WebDriver驱动管理优化说明.md)**: WebDriver 驱动管理优化说明
 - **[用例评审管理功能说明](backend/docs/docs/用例评审管理功能说明.md)**: 用例评审管理功能说明
 - **[问题排查指南](backend/docs/docs/问题排查指南.md)**: 常见问题排查指南
@@ -656,6 +659,17 @@ npm run build
     - 支持 Firefox (GeckoDriver)
     - 支持 Edge (EdgeDriver)
     - 自动缓存，后续使用更快
+
+- `UI测试用例批量导入`: 在 UI 自动化测试用例页面支持粘贴 JSON 批量导入
+    - 适合快速生成一批母版或场景骨架
+    - 步骤元素支持 `element_id` 和 `element_name` 两种引用方式
+    - 弹窗支持一键载入四类标准母版
+    - 样例模板文件：`backend/docs/examples/ui_automation_batch_import_template.json`
+
+- `init_alpha_vision_login_case`: 初始化 Alpha Vision 登录演示数据
+    - 幂等创建 UI 自动化项目、登录页元素和测试用例
+    - 默认目标地址为 https://test-web-2.agi7.ai/login
+    - 可通过 `--owner` 指定项目归属用户，通过 `--dry-run` 预览导入计划
 
 **数据模型**:
 

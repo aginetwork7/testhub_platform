@@ -74,6 +74,7 @@ services:
     volumes:
       - ./expand:/expand
       - ./logs:/app/logs
+      - ./media:/media
       - ./config.yaml:/app/config.yaml:ro
       - ${HERMES_API_KEY_FILE_HOST:-$HOME/.secrets/hermes_api_key}:/run/secrets/hermes_api_key:ro
 
@@ -111,6 +112,7 @@ services:
     volumes:
       - ./expand:/expand
       - ./logs:/app/logs
+      - ./media:/media
       - ./config.yaml:/app/config.yaml:ro
       - ${HERMES_API_KEY_FILE_HOST:-$HOME/.secrets/hermes_api_key}:/run/secrets/hermes_api_key:ro
 
@@ -122,6 +124,8 @@ services:
     container_name: testhub_frontend
     ports:
       - "5173:3000"
+    environment:
+      - VITE_API_BASE_URL=http://backend:8000
     volumes:
       # sync-config.js 解析路径为 /config.yaml，挂载根目录配置文件
       - ./config.yaml:/config.yaml:ro

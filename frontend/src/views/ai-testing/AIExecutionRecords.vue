@@ -274,12 +274,18 @@ const getExecutionModeText = (executionMode) => {
   if (executionMode === 'hermes') {
     return t('uiAutomation.ai.executionRecords.hermesMode')
   }
+  if (executionMode === 'planner_v2') {
+    return t('uiAutomation.ai.executionRecords.plannerV2Mode')
+  }
   return t('uiAutomation.ai.executionRecords.browserMode')
 }
 
 const getExecutionModeTag = (executionMode) => {
   if (executionMode === 'hermes') {
     return 'success'
+  }
+  if (executionMode === 'planner_v2') {
+    return 'warning'
   }
   return 'info'
 }

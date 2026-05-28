@@ -471,15 +471,31 @@ export default {
     taskInput: 'Task Input',
     taskDescription: 'Task Description',
     executionBackend: 'Execution Backend',
+    caseMode: 'Case Mode',
+    caseModeTip: 'Freeform fits the current Browser/Hermes modes, while structured steps fit planner_v2.',
+    hybridCaseModeTip: 'Hybrid steps let natural-language AI steps and system-direct steps coexist in one case.',
+    plannerV2Tip: 'planner_v2 currently executes structured or hybrid steps. Please provide step entries.',
     taskPlaceholder: 'Describe the task in natural language, e.g.:\n1. Visit https://www.baidu.com\n2. Search \'TestHub\'\n3. Click the first search result',
     gifRecording: 'GIF Recording',
     on: 'On',
     off: 'Off',
     gifTip: 'When enabled, the execution process will be recorded as a GIF file and saved to ai_agent_history directory',
     hermesGifTip: 'GIF generation is not available in Hermes mode.',
+    nonBrowserGifTip: 'The current execution mode does not generate browser GIFs.',
     startExecution: 'Start Execution',
     stopExecution: 'Stop Execution',
     saveAsCase: 'Save as Case',
+    structuredSteps: 'Structured Steps',
+    hybridSteps: 'Hybrid Steps',
+    structuredStep: 'Step',
+    addStructuredStep: 'Add Step',
+    addDirectStep: 'Add Direct Step',
+    stepDescriptionPlaceholder: 'Step description, e.g. Open login page',
+    aiStepPlaceholder: 'Describe this step in natural language, e.g. Open the login page and click the avatar menu',
+    stepUrlPlaceholder: 'Enter target URL',
+    stepSelectorPlaceholder: 'Enter CSS/XPath selector',
+    stepValuePlaceholder: 'Enter input value or key name',
+    stepExpectedPlaceholder: 'Enter expected text or URL fragment',
     tip: 'Tips',
     tipContent1: 'AI mode uses models from "Config Center - AI Mode Config" (please add models if not configured).',
     tipContent2: 'Supports Chinese and English task descriptions. More detailed descriptions yield better results.',
@@ -497,7 +513,27 @@ export default {
     },
     backends: {
       browser: 'Browser',
-      hermes: 'Hermes'
+      hermes: 'Hermes',
+      plannerV2: 'Planner V2'
+    },
+    caseModes: {
+      freeform: 'Freeform',
+      hybrid: 'Hybrid Steps',
+      structured: 'Structured Steps'
+    },
+    stepModes: {
+      ai: 'AI Natural Language',
+      direct: 'System Direct'
+    },
+    stepActions: {
+      navigate: 'Navigate URL',
+      click: 'Click Element',
+      fill: 'Fill Value',
+      press: 'Press Key',
+      select: 'Select Option',
+      wait: 'Wait',
+      assertUrlContains: 'Assert URL Contains',
+      assertTextContains: 'Assert Text Contains'
     },
     messages: {
       initAgent: 'Initializing AI Agent...\n',
@@ -509,16 +545,26 @@ export default {
       taskStopped: 'Task stopped',
       executionFailed: 'Execution failed',
       saveSuccess: 'Saved successfully',
-      saveFailed: 'Failed to save'
+      saveFailed: 'Failed to save',
+      structuredStepsRequired: 'Please add at least one structured step',
+      stepDescriptionRequired: 'Please enter a step description',
+      stepActionRequired: 'Please select a step action',
+      stepUrlRequired: 'Please enter a URL',
+      stepSelectorRequired: 'Please enter a selector',
+      stepValueRequired: 'Please enter an input value',
+      stepExpectedRequired: 'Please enter an expected value'
     },
     // AI Case List
     caseList: {
       title: 'AI Case Management',
       newCase: 'New AI Case',
       executionBackend: 'Execution Backend',
+      disableCache: 'Disable Cache',
       searchPlaceholder: 'Search case name or description',
       caseName: 'Case Name',
       taskDescription: 'Task Description',
+      expandTaskDescription: 'Expand',
+      collapseTaskDescription: 'Collapse',
       runCount: 'Run Count',
       createCase: 'Create AI Case',
       editCase: 'Edit AI Case',
@@ -535,7 +581,9 @@ export default {
         deleteSuccess: 'Deleted successfully',
         deleteFailed: 'Failed to delete AI case',
         runSuccess: 'Case execution started',
-        runFailed: 'Failed to execute AI case'
+        runFailed: 'Failed to execute AI case',
+        structuredCasePlannerModeRequired: 'Structured or hybrid-step cases must run with Planner V2',
+        hybridCaseExecutionPending: 'Hybrid-step cases can now be created and maintained, but mixed execution is still being wired in'
       }
     },
     // AI Execution Records
@@ -547,6 +595,7 @@ export default {
       executionMode: 'Execution Mode',
       browserMode: 'Browser',
       hermesMode: 'Hermes',
+      plannerV2Mode: 'Planner V2',
       adhocExecution: 'Adhoc Execution',
       caseExecution: 'Case Execution',
       status: 'Status',
@@ -574,6 +623,17 @@ export default {
     // AI Execution Report
     executionReport: {
       title: 'AI Test Execution Report',
+      plannerTrace: 'Planner Trace',
+      cacheStats: 'Cache Stats',
+      artifacts: 'Artifacts',
+      finalCapture: 'Final Screenshot',
+      viewOriginal: 'Open Original',
+      previewArtifact: 'Preview',
+      reportHtml: 'HTML Report',
+      reportJsonl: 'Raw JSONL Report',
+      loadingArtifact: 'Loading artifact preview...',
+      noArtifactPreview: 'This artifact cannot be previewed here',
+      rawArtifacts: 'Raw Artifact Data',
       backToList: 'Back to List',
       basicInfo: 'Basic Info',
       caseName: 'Case Name',

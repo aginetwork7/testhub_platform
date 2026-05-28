@@ -180,6 +180,60 @@ export function deleteTestScript(id) {
   })
 }
 
+// 录制会话相关API
+export function getRecordingSessions(params) {
+  return request({
+    url: '/ui-automation/recordings/',
+    method: 'get',
+    params
+  })
+}
+
+export function createRecordingSession(data) {
+  return request({
+    url: '/ui-automation/recordings/',
+    method: 'post',
+    data
+  })
+}
+
+export function getRecordingSessionDetail(id) {
+  return request({
+    url: `/ui-automation/recordings/${id}/`,
+    method: 'get'
+  })
+}
+
+export function uploadRecordingScript(id, data) {
+  return request({
+    url: `/ui-automation/recordings/${id}/upload_script/`,
+    method: 'post',
+    data
+  })
+}
+
+export function parseRecordingSession(id) {
+  return request({
+    url: `/ui-automation/recordings/${id}/parse/`,
+    method: 'post'
+  })
+}
+
+export function materializeRecordingSession(id, data) {
+  return request({
+    url: `/ui-automation/recordings/${id}/materialize/`,
+    method: 'post',
+    data
+  })
+}
+
+export function cancelRecordingSession(id) {
+  return request({
+    url: `/ui-automation/recordings/${id}/cancel/`,
+    method: 'post'
+  })
+}
+
 // 测试套件相关API
 
 // 获取测试套件列表
@@ -724,6 +778,16 @@ export function copyTestCase(id) {
   return request({
     url: `/ui-automation/test-cases/${id}/copy_case/`,
     method: 'post'
+  })
+}
+
+// 批量导入测试用例
+export function batchImportTestCases(data) {
+  return request({
+    url: '/ui-automation/test-cases/batch-import/',
+    method: 'post',
+    data,
+    timeout: 300000
   })
 }
 

@@ -67,6 +67,16 @@
           </div>
         </div>
 
+        <div v-if="reportData.planner_trace && Object.keys(reportData.planner_trace).length > 0" class="report-section">
+          <h3 class="section-title">{{ $t('uiAutomation.ai.executionReport.plannerTrace') }}</h3>
+          <div class="json-block">{{ formatJson(reportData.planner_trace) }}</div>
+        </div>
+
+        <div v-if="reportData.cache_stats && Object.keys(reportData.cache_stats).length > 0" class="report-section">
+          <h3 class="section-title">{{ $t('uiAutomation.ai.executionReport.cacheStats') }}</h3>
+          <div class="json-block">{{ formatJson(reportData.cache_stats) }}</div>
+        </div>
+
         <!-- 任务统计 -->
         <div class="report-section" v-if="reportData.statistics">
           <h3 class="section-title">{{ $t('uiAutomation.ai.executionReport.taskStatistics') }}</h3>
@@ -131,31 +141,90 @@
 
       <!-- 详细步骤报告 -->
       <div v-else-if="currentReportType === 'detailed'" class="report-content">
-        <!-- 步骤列表 -->
-        <div class="report-section">
-          <h3 class="section-title">{{ $t('uiAutomation.ai.executionReport.stepDetails') }}</h3>
-          <div class="steps-list">
-            <el-card v-for="step in reportData.detailed_steps" :key="step.step_number" class="step-card">
-              <div class="step-header">
-                <span class="step-number">{{ $t('uiAutomation.ai.executionReport.step') }} {{ step.step_number }}</span>
-                <el-tag :type="getStepStatusType(step.status)" size="small">
-                  {{ step.status }}
-                </el-tag>
+        <el-collapse v-model="detailedExpandedSections" class="detail-sections-collapse">
+          <el-collapse-item :title="$t('uiAutomation.ai.executionReport.stepDetails')" name="stepDetails">
+            <div class="steps-list collapse-section-body">
+              <el-card v-for="step in reportData.detailed_steps" :key="step.step_number" class="step-card">
+                <div class="step-header">
+                  <span class="step-number">{{ $t('uiAutomation.ai.executionReport.step') }} {{ step.step_number }}</span>
+                  <el-tag :type="getStepStatusType(step.status)" size="small">
+                    {{ step.status }}
+                  </el-tag>
+                </div>
+                <div class="step-content">
+                  <div class="step-action">
+                    <strong>{{ $t('uiAutomation.ai.executionReport.action') }}:</strong> {{ step.action || '-' }}
+                  </div>
+                  <div v-if="step.element" class="step-element">
+                    <strong>{{ $t('uiAutomation.ai.executionReport.element') }}:</strong> {{ step.element }}
+                  </div>
+                  <div v-if="step.thinking" class="step-thinking">
+                    <strong>{{ $t('uiAutomation.ai.executionReport.thinking') }}:</strong> {{ step.thinking }}
+                  </div>
+                </div>
+              </el-card>
+            </div>
+          </el-collapse-item>
+
+          <el-collapse-item
+            v-if="reportData.artifacts && reportData.artifacts.length > 0"
+            :title="$t('uiAutomation.ai.executionReport.artifacts')"
+            name="artifacts"
+          >
+            <div class="report-section collapse-section-body artifacts-collapse-body">
+              <div v-if="imageArtifacts.length > 0" class="artifact-gallery">
+                <div v-for="(artifact, index) in imageArtifacts" :key="`${artifact.path}-${index}`" class="artifact-card">
+                  <el-image
+                    :src="artifact.url"
+                    :preview-src-list="imagePreviewUrls"
+                    :initial-index="index"
+                    fit="cover"
+                    class="artifact-image"
+                    preview-teleported
+                  />
+                  <div class="artifact-meta">
+                    <div class="artifact-title">
+                      {{ artifact.type === 'final_screenshot' ? $t('uiAutomation.ai.executionReport.finalCapture') : `${$t('uiAutomation.ai.executionReport.step')} ${artifact.step || '-'}` }}
+                    </div>
+                    <div class="artifact-subtitle">{{ artifact.status || artifact.type }}</div>
+                    <a :href="artifact.url" target="_blank" rel="noopener noreferrer" class="artifact-link">
+                      {{ $t('uiAutomation.ai.executionReport.viewOriginal') }}
+                    </a>
+                  </div>
+                </div>
               </div>
-              <div class="step-content">
-                <div class="step-action">
-                  <strong>{{ $t('uiAutomation.ai.executionReport.action') }}:</strong> {{ step.action || '-' }}
-                </div>
-                <div v-if="step.element" class="step-element">
-                  <strong>{{ $t('uiAutomation.ai.executionReport.element') }}:</strong> {{ step.element }}
-                </div>
-                <div v-if="step.thinking" class="step-thinking">
-                  <strong>{{ $t('uiAutomation.ai.executionReport.thinking') }}:</strong> {{ step.thinking }}
+
+              <div v-if="fileArtifacts.length > 0" class="artifact-file-list">
+                <div v-for="(artifact, index) in fileArtifacts" :key="`file-${artifact.path}-${index}`" class="artifact-file-item">
+                  <div>
+                    <div class="artifact-title">{{ getArtifactTitle(artifact) }}</div>
+                    <div class="artifact-subtitle">{{ artifact.path }}</div>
+                  </div>
+                  <div class="artifact-file-actions">
+                    <el-button size="small" type="primary" @click="previewArtifact(artifact)">
+                      {{ $t('uiAutomation.ai.executionReport.previewArtifact') }}
+                    </el-button>
+                    <el-button size="small" @click="openArtifactInNewTab(artifact)">
+                      {{ $t('uiAutomation.ai.executionReport.viewOriginal') }}
+                    </el-button>
+                  </div>
                 </div>
               </div>
-            </el-card>
-          </div>
-        </div>
+
+              <div v-if="nonImageArtifacts.length > 0" class="artifact-metadata-list">
+                <div v-for="(artifact, index) in nonImageArtifacts" :key="`meta-${index}`" class="artifact-metadata-item">
+                  <div class="artifact-title">{{ artifact.type || '-' }}</div>
+                  <div class="artifact-subtitle">{{ formatJson(artifact) }}</div>
+                </div>
+              </div>
+
+              <div class="raw-artifact-block">
+                <div class="raw-artifact-title">{{ $t('uiAutomation.ai.executionReport.rawArtifacts') }}</div>
+                <div class="json-block">{{ formatJson(reportData.artifacts) }}</div>
+              </div>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
 
         <!-- 错误信息 -->
         <div v-if="reportData.errors && reportData.errors.length > 0" class="report-section">
@@ -248,6 +317,26 @@
         <img :src="gifUrl" alt="Execution GIF" class="gif-image" />
       </div>
     </el-dialog>
+
+    <el-dialog
+      v-model="showArtifactPreviewDialog"
+      :title="artifactPreviewTitle"
+      width="900px"
+      append-to-body
+    >
+      <div v-if="artifactPreviewLoading" class="report-loading artifact-preview-loading">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span>{{ $t('uiAutomation.ai.executionReport.loadingArtifact') }}</span>
+      </div>
+      <iframe
+        v-else-if="artifactPreviewType === 'html'"
+        :src="artifactPreviewUrl"
+        class="artifact-preview-frame"
+        sandbox="allow-same-origin"
+      />
+      <pre v-else-if="artifactPreviewType === 'text'" class="json-block artifact-preview-text">{{ artifactPreviewContent }}</pre>
+      <el-empty v-else :description="$t('uiAutomation.ai.executionReport.noArtifactPreview')" />
+    </el-dialog>
   </el-dialog>
 </template>
 
@@ -279,6 +368,13 @@ const loading = ref(false)
 const reportData = ref(null)
 const currentReportType = ref('summary')
 const showGifDialog = ref(false)
+const showArtifactPreviewDialog = ref(false)
+const artifactPreviewTitle = ref('')
+const artifactPreviewType = ref('')
+const artifactPreviewUrl = ref('')
+const artifactPreviewContent = ref('')
+const artifactPreviewLoading = ref(false)
+const detailedExpandedSections = ref([])
 const pieChartRef = ref(null)
 const barChartRef = ref(null)
 let pieChart = null
@@ -297,16 +393,105 @@ const reportTypeDisplay = computed(() => {
 // GIF URL
 const gifUrl = computed(() => {
   if (reportData.value && reportData.value.gif_path) {
-    // gif_path格式：media/ai_recording/xxx.gif
-    const path = reportData.value.gif_path
-    // 如果路径已经包含media/，直接使用；否则添加media/
-    if (path.startsWith('media/')) {
-      return `/${path}`
-    } else {
-      return `/media/${path}`
-    }
+    return buildMediaUrl(reportData.value.gif_path)
   }
   return ''
+})
+
+const formatJson = (value) => JSON.stringify(value, null, 2)
+
+const buildMediaUrl = (path) => {
+  if (!path) {
+    return ''
+  }
+  if (String(path).startsWith('http://') || String(path).startsWith('https://')) {
+    return path
+  }
+  if (String(path).startsWith('/media/')) {
+    return path
+  }
+  if (String(path).startsWith('media/')) {
+    return `/${path}`
+  }
+  return `/media/${path}`
+}
+
+const getArtifactTitle = (artifact) => {
+  if (artifact?.type === 'report_html') {
+    return t('uiAutomation.ai.executionReport.reportHtml')
+  }
+  if (artifact?.type === 'report_jsonl') {
+    return t('uiAutomation.ai.executionReport.reportJsonl')
+  }
+  return artifact?.type || '-'
+}
+
+const getArtifactPreviewType = (artifact) => {
+  const path = String(artifact?.path || '').toLowerCase()
+  if (artifact?.type === 'report_html' || path.endsWith('.html')) {
+    return 'html'
+  }
+  if (artifact?.type === 'report_jsonl' || path.endsWith('.jsonl') || path.endsWith('.json') || path.endsWith('.txt') || path.endsWith('.log')) {
+    return 'text'
+  }
+  return ''
+}
+
+const openArtifactInNewTab = (artifact) => {
+  if (!artifact?.url) {
+    return
+  }
+  window.open(artifact.url, '_blank', 'noopener,noreferrer')
+}
+
+const previewArtifact = async (artifact) => {
+  artifactPreviewTitle.value = getArtifactTitle(artifact)
+  artifactPreviewType.value = getArtifactPreviewType(artifact)
+  artifactPreviewUrl.value = artifact?.url || ''
+  artifactPreviewContent.value = ''
+  showArtifactPreviewDialog.value = true
+
+  if (artifactPreviewType.value !== 'text' || !artifactPreviewUrl.value) {
+    return
+  }
+
+  artifactPreviewLoading.value = true
+  try {
+    const response = await fetch(artifactPreviewUrl.value, { credentials: 'same-origin' })
+    artifactPreviewContent.value = await response.text()
+  } catch (error) {
+    console.error('加载产物预览失败:', error)
+    artifactPreviewContent.value = t('uiAutomation.ai.executionReport.noArtifactPreview')
+  } finally {
+    artifactPreviewLoading.value = false
+  }
+}
+
+const imageArtifacts = computed(() => {
+  const artifacts = Array.isArray(reportData.value?.artifacts) ? reportData.value.artifacts : []
+  return artifacts
+    .filter(artifact => ['screenshot', 'final_screenshot'].includes(artifact?.type) && artifact?.path)
+    .map(artifact => ({
+      ...artifact,
+      url: buildMediaUrl(artifact.path)
+    }))
+})
+
+const imagePreviewUrls = computed(() => imageArtifacts.value.map(artifact => artifact.url))
+
+const fileArtifacts = computed(() => {
+  const artifacts = Array.isArray(reportData.value?.artifacts) ? reportData.value.artifacts : []
+  return artifacts
+    .filter(artifact => !['screenshot', 'final_screenshot'].includes(artifact?.type) && artifact?.path)
+    .map(artifact => ({
+      ...artifact,
+      url: buildMediaUrl(artifact.path)
+    }))
+})
+
+const nonImageArtifacts = computed(() => {
+  const artifacts = Array.isArray(reportData.value?.artifacts) ? reportData.value.artifacts : []
+  return artifacts.filter(artifact => !['screenshot', 'final_screenshot'].includes(artifact?.type) && !artifact?.path)
 })
 
 // 监听 modelValue 变化
@@ -314,6 +499,7 @@ watch(() => props.modelValue, (newVal) => {
   visible.value = newVal
   if (newVal && props.recordId) {
     currentReportType.value = 'summary'  // 确保设置为summary
+    detailedExpandedSections.value = []
     loadReport('summary')
   }
 })
@@ -614,6 +800,18 @@ const handleClose = () => {
   margin-bottom: 30px;
 }
 
+.detail-sections-collapse {
+  border-top: 0;
+}
+
+.collapse-section-body {
+  padding-top: 8px;
+}
+
+.artifacts-collapse-body {
+  margin-bottom: 0;
+}
+
 .section-title {
   font-size: 16px;
   font-weight: 600;
@@ -812,6 +1010,133 @@ const handleClose = () => {
 .report-error {
   padding: 40px 0;
   text-align: center;
+}
+
+.json-block {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #111827;
+  color: #F3F4F6;
+  font-family: 'Consolas', 'Monaco', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.artifact-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.artifact-card {
+  overflow: hidden;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  background: #FFFFFF;
+}
+
+.artifact-image {
+  width: 100%;
+  height: 160px;
+  background: #F3F4F6;
+}
+
+.artifact-meta {
+  padding: 12px;
+}
+
+.artifact-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.artifact-subtitle {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6B7280;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.artifact-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: #2563EB;
+  text-decoration: none;
+}
+
+.artifact-link:hover {
+  text-decoration: underline;
+}
+
+.artifact-metadata-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.artifact-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.artifact-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  background: #FFFFFF;
+}
+
+.artifact-file-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.artifact-metadata-item {
+  padding: 12px;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  background: #F9FAFB;
+}
+
+.raw-artifact-block {
+  margin-top: 16px;
+}
+
+.raw-artifact-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.artifact-preview-loading {
+  min-height: 200px;
+}
+
+.artifact-preview-frame {
+  width: 100%;
+  min-height: 620px;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+}
+
+.artifact-preview-text {
+  min-height: 320px;
+  max-height: 620px;
+  overflow: auto;
 }
 
 /* 自定义滚动条 */

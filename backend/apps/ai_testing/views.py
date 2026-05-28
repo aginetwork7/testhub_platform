@@ -21,6 +21,66 @@ logger = logging.getLogger(__name__)
 # 全局字典，用于存储停止信号
 STOP_SIGNALS = {}
 
+
+def parse_request_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'false', '0', 'off', 'no'}:
+            return False
+        if normalized in {'true', '1', 'on', 'yes'}:
+            return True
+    return bool(value)
+
+
+def extract_screenshot_sequence(artifacts):
+    if not isinstance(artifacts, list):
+        return []
+
+    screenshot_paths = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        if artifact.get('type') not in {'screenshot', 'final_screenshot'}:
+            continue
+        path = artifact.get('path')
+        if path:
+            screenshot_paths.append(path)
+
+    return screenshot_paths
+
+
+def extract_step_info(step, step_index):
+    """提取步骤信息，兼容 browser_use 风格对象和 planner_v2 字典结果。"""
+    if isinstance(step, dict):
+        return {
+            'step': step_index,
+            'action': step.get('action'),
+            'status': step.get('status'),
+            'element': step.get('element'),
+            'thinking': step.get('thinking'),
+            'duration_seconds': step.get('duration_seconds'),
+            'error': step.get('error'),
+        }
+
+
+    step_info = {'step': step_index}
+    if hasattr(step, 'action'):
+        step_info['action'] = getattr(step, 'action')
+    elif hasattr(step, 'model_output'):
+        step_info['action'] = getattr(step, 'model_output')
+    else:
+        step_info['action'] = str(step)
+
+    for key in ['status', 'element', 'thinking', 'duration_seconds', 'error']:
+        if hasattr(step, key):
+            step_info[key] = getattr(step, key)
+
+    return step_info
+
 class AiProjectViewSet(viewsets.ModelViewSet):
     queryset = AiProject.objects.all()
     permission_classes = [IsAuthenticated]
@@ -75,6 +135,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
         """执行 AI 用例"""
         ai_case = self.get_object()
         execution_mode = request.data.get('execution_mode', 'text')
+        use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
@@ -192,6 +253,9 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_mode=execution_mode,
                     enable_gif=(execution_mode == 'text'),
                     case_name=ai_case.name,
+                    case_mode=ai_case.case_mode,
+                    task_steps=ai_case.task_steps,
+                    use_cache=use_cache,
                 )
 
                 # 检查是否是手动停止
@@ -230,6 +294,13 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 if history:
                     if hasattr(history, 'steps'):
                         steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
+                    if hasattr(history, 'planner_trace'):
+                        execution_record.planner_trace = history.planner_trace or {}
+                    if hasattr(history, 'artifacts'):
+                        execution_record.artifacts = history.artifacts or []
+                        execution_record.screenshots_sequence = extract_screenshot_sequence(execution_record.artifacts)
+                    if hasattr(history, 'cache_stats'):
+                        execution_record.cache_stats = history.cache_stats or {}
 
                 execution_record.steps_completed = steps
 
@@ -734,6 +805,9 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         task_description = request.data.get('task_description')
         execution_mode = request.data.get('execution_mode', 'text')  # 默认文本模式
         enable_gif = request.data.get('enable_gif', True)  # GIF录制开关，默认开启
+        case_mode = request.data.get('case_mode', 'freeform')
+        task_steps = request.data.get('task_steps') or []
+        use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
 
         if not task_description:
             return Response({'error': '缺少任务描述参数'}, status=status.HTTP_400_BAD_REQUEST)
@@ -893,7 +967,10 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     should_stop=should_stop_async,  # 传递异步版本
                     execution_mode=execution_mode,
                     enable_gif=enable_gif,  # 传递GIF录制开关
-                    case_name=task_description[:50] if task_description else "Adhoc Task"  # 传递用例名称用于GIF文件命名
+                    case_name=task_description[:50] if task_description else "Adhoc Task",  # 传递用例名称用于GIF文件命名
+                    case_mode=case_mode,
+                    task_steps=task_steps,
+                    use_cache=use_cache,
                 )
 
                 # 检查是否是手动停止 (使用同步版本)
@@ -943,6 +1020,13 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 if history:
                     if hasattr(history, 'steps'):
                         steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
+                    if hasattr(history, 'planner_trace'):
+                        execution_record.planner_trace = history.planner_trace or {}
+                    if hasattr(history, 'artifacts'):
+                        execution_record.artifacts = history.artifacts or []
+                        execution_record.screenshots_sequence = extract_screenshot_sequence(execution_record.artifacts)
+                    if hasattr(history, 'cache_stats'):
+                        execution_record.cache_stats = history.cache_stats or {}
 
                 execution_record.steps_completed = steps
 
@@ -1145,9 +1229,35 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 errors.append({'type': error_type, 'message': normalized})
         return errors[-20:]
 
+    def _report_step_records(self, execution_record):
+        recorded_steps = execution_record.steps_completed or []
+        if recorded_steps:
+            return recorded_steps
+
+        planner_trace = execution_record.planner_trace or {}
+        case_report = planner_trace.get('case_report') if isinstance(planner_trace, dict) else None
+        fallback_steps = case_report.get('steps') if isinstance(case_report, dict) else None
+        if not isinstance(fallback_steps, list):
+            return []
+
+        normalized_steps = []
+        for step in fallback_steps:
+            if not isinstance(step, dict):
+                continue
+            normalized_steps.append({
+                'action': step.get('step_description') or step.get('action') or '-',
+                'status': 'completed' if step.get('result') else 'failed',
+                'thinking': step.get('source'),
+                'duration_seconds': None,
+                'error': step.get('error'),
+                'element': None,
+            })
+        return normalized_steps
+
     def _build_execution_report(self, execution_record, report_type='summary'):
         stats = self._get_task_statistics(execution_record)
-        total_steps = len(execution_record.steps_completed or [])
+        report_steps = self._report_step_records(execution_record)
+        total_steps = len(report_steps)
         completion_rate = round((stats['completed'] / stats['total']) * 100, 2) if stats['total'] else (100 if execution_record.status == 'passed' else 0)
 
         overview = {
@@ -1172,7 +1282,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
         detailed_steps = []
         step_durations = []
-        for index, step in enumerate(execution_record.steps_completed or [], start=1):
+        for index, step in enumerate(report_steps, start=1):
             action_text = self._extract_step_action_text(step if isinstance(step, dict) else {})
             step_status = str((step or {}).get('status', 'completed')) if isinstance(step, dict) else 'completed'
             duration = self._extract_step_duration(step)
@@ -1188,7 +1298,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             })
 
         action_distribution = {}
-        for step in execution_record.steps_completed or []:
+        for step in report_steps:
             action_name = self._extract_step_action_name(step if isinstance(step, dict) else {})
             action_distribution[action_name] = action_distribution.get(action_name, 0) + 1
 
@@ -1233,7 +1343,10 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             'action_distribution': action_distribution,
             'bottlenecks': bottlenecks,
             'recommendations': recommendations,
-            'gif_path': execution_record.gif_path
+            'gif_path': execution_record.gif_path,
+            'planner_trace': execution_record.planner_trace or {},
+            'artifacts': execution_record.artifacts or [],
+            'cache_stats': execution_record.cache_stats or {},
         }
 
         if report_type == 'summary':
