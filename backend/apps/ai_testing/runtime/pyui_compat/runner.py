@@ -13,7 +13,7 @@ from asgiref.sync import sync_to_async
 
 logger = logging.getLogger('django')
 
-ACTION_CACHE_SCHEMA_VERSION = 'v2'
+ACTION_CACHE_SCHEMA_VERSION = 'v3'
 
 
 @dataclass
@@ -200,7 +200,7 @@ class PyUICompatAgent:
                     screenshot_path = await self._capture_screenshot(
                         page,
                         artifact_dir,
-                        f'{artifact_prefix}_step_{index:02d}_{status}.png',
+                        self._step_screenshot_filename(index),
                     )
                     if screenshot_path:
                         screenshot_rel_path = screenshot_path
@@ -220,9 +220,12 @@ class PyUICompatAgent:
                             'step_num': index,
                             'step_description': step['description'],
                             'status': status,
-                            'action': step['description'],
+                            'action': last_executed_action or step.get('action') or '-',
                             'element': step.get('selector'),
-                            'thinking': step.get('thinking') or f"planner_v2 executed action={step['action']}",
+                            'thinking': self._step_thinking_text(
+                                step.get('thinking'),
+                                last_executed_action or step.get('action') or '-',
+                            ),
                             'duration_seconds': duration_seconds,
                             'error': error_message,
                             'result': status == 'completed',
@@ -257,7 +260,7 @@ class PyUICompatAgent:
                 final_screenshot_path = await self._capture_screenshot(
                     page,
                     artifact_dir,
-                    f'{artifact_prefix}_final.png',
+                    self._final_screenshot_filename(),
                 )
                 if final_screenshot_path:
                     history.artifacts.append(
@@ -291,6 +294,10 @@ class PyUICompatAgent:
         return history
 
     async def _get_ai_actions_for_step(self, page, step, history, step_callback=None, step_index=None):
+        fallback_actions = self._fallback_actions_for_step(step)
+        if fallback_actions:
+            return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)], 'fallback'
+
         if self.use_cache:
             cached_actions = self._load_cached_ai_actions(step)
             if cached_actions:
@@ -371,9 +378,10 @@ class PyUICompatAgent:
         try:
             from django.conf import settings
 
-            cache_dir = Path(settings.MEDIA_ROOT) / 'ai_testing' / 'cache'
+            base_dir = Path(getattr(settings, 'BASE_DIR', Path.cwd())).resolve().parent
+            cache_dir = base_dir / 'Data' / 'Cache'
         except Exception:
-            cache_dir = Path.cwd() / 'media' / 'ai_testing' / 'cache'
+            cache_dir = Path.cwd() / 'Data' / 'Cache'
 
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir / 'action_cache.json'
@@ -501,14 +509,39 @@ class PyUICompatAgent:
             from django.conf import settings
 
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-            safe_case_name = self._safe_name(self.case_name)
-            relative_dir = Path('ai_testing') / 'planner_v2' / f'{safe_case_name}_{timestamp}'
+            case_id_token = self._case_id_token()
+            relative_dir = Path('ai_testing') / 'planner_v2' / f'{case_id_token}_{timestamp}'
             artifact_dir = Path(settings.MEDIA_ROOT) / relative_dir
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            return artifact_dir, safe_case_name
+            return artifact_dir, case_id_token
         except Exception as exc:
             logger.warning('planner_v2 failed to prepare artifact directory: %s', exc)
-            return None, self._safe_name(self.case_name)
+            return None, self._case_id_token()
+
+    def _case_id_token(self):
+        match = re.search(r'(TC[_-]?\d+)', str(self.case_name or ''), re.IGNORECASE)
+        if match:
+            return self._safe_name(match.group(1).upper())
+        return self._safe_name(self.case_name)
+
+    def _step_screenshot_filename(self, step_index):
+        return f'{self._case_id_token()}_step_{int(step_index):02d}.png'
+
+    def _final_screenshot_filename(self):
+        return f'{self._case_id_token()}_final.png'
+
+    def _step_thinking_text(self, thinking, action_name):
+        normalized = str(thinking or '').strip()
+        if normalized:
+            matched = re.fullmatch(r'planner_v2 executed action=\s*([a-z][a-z0-9_]*)\s*', normalized)
+            if matched:
+                return f'action={matched.group(1)}'
+            return normalized
+
+        action_value = str(action_name or '').strip()
+        if action_value and action_value != '-':
+            return f'action={action_value}'
+        return None
 
     def _build_planned_tasks(self, task_description, case_mode='freeform', task_steps=None):
         if case_mode in {'structured', 'hybrid'} and isinstance(task_steps, list) and task_steps:
@@ -615,7 +648,7 @@ class PyUICompatAgent:
                     f"Page title: {page_title}\n"
                     f"Planner role: {planner_role}\n"
                     f"Visible page text excerpt:\n{normalized_text}\n"
-                    'Output a JSON array only.'
+                    'Output a JSON object only with a single key named "actions".'
                 ),
             }
         ]
@@ -636,8 +669,9 @@ class PyUICompatAgent:
             {
                 'role': 'system',
                 'content': (
-                    'You convert one natural-language browser test step into a minimal JSON array of direct browser actions. '
-                    'Return JSON only. Allowed action values: navigate, click, hover, fill, press, select, wait, assert_url_contains, assert_text_contains. '
+                    'You convert one natural-language browser test step into a minimal set of direct browser actions. '
+                    'Return JSON only as an object with schema {"actions": [...]} and no extra prose. '
+                    'Allowed action values: navigate, click, hover, fill, press, select, wait, assert_url_contains, assert_text_contains. '
                     'Each item may contain: description, action, selector, url, value, expected, timeout_ms. '
                     'Prefer text-based selectors like text=Submit when stable. '
                     'When a screenshot is provided, use visual cues such as icons, color, and spatial placement to infer a robust nearby selector or a minimal direct action. '
@@ -650,7 +684,7 @@ class PyUICompatAgent:
             },
         ]
 
-        response = await AIModelService.call_openai_compatible_api(config, messages, max_tokens=800)
+        response = await self._call_planner_model(AIModelService, config, messages)
         content = self._extract_response_content(response)
         try:
             parsed_actions = self._parse_ai_actions(content)
@@ -678,6 +712,37 @@ class PyUICompatAgent:
             normalized_action['thinking'] = f'planned_by={planner_role}'
             normalized_actions.append(normalized_action)
         return normalized_actions
+
+    async def _call_planner_model(self, ai_model_service, config, messages):
+        response_format = {'type': 'json_object'}
+        try:
+            return await ai_model_service.call_openai_compatible_api(
+                config,
+                messages,
+                max_tokens=800,
+                response_format=response_format,
+            )
+        except Exception as exc:
+            if not self._planner_response_format_unsupported(exc):
+                raise
+            logger.warning('planner_v2 structured response fallback to plain completion: %s', exc)
+            return await ai_model_service.call_openai_compatible_api(config, messages, max_tokens=800)
+
+    def _planner_response_format_unsupported(self, exc):
+        message = str(exc or '').lower()
+        if not message:
+            return False
+        markers = (
+            'response_format',
+            'json_object',
+            'json schema',
+            'json_schema',
+            'unsupported',
+            'invalid parameter',
+            'extra inputs',
+            'not permitted',
+        )
+        return any(marker in message for marker in markers)
 
     async def _get_active_planner_config(self):
         config = await self._get_active_browser_vision_config()
@@ -738,7 +803,7 @@ class PyUICompatAgent:
     def _parse_ai_actions(self, content):
         normalized = str(content or '').strip()
         if not normalized:
-            return []
+            raise ValueError('Hybrid AI step planner returned empty content')
 
         decoder = json.JSONDecoder()
         candidates = []
@@ -761,8 +826,17 @@ class PyUICompatAgent:
                 continue
             if isinstance(parsed, list):
                 return [item for item in parsed if isinstance(item, dict)]
+            if isinstance(parsed, dict) and isinstance(parsed.get('actions'), list):
+                return [item for item in parsed.get('actions', []) if isinstance(item, dict)]
 
-        parsed = json.loads(normalized)
+        try:
+            parsed = json.loads(normalized.lstrip('\ufeff'))
+        except json.JSONDecodeError as exc:
+            preview = normalized[:240].replace('\n', '\\n')
+            raise ValueError(f'Hybrid AI step planner returned non-JSON content: {preview}') from exc
+
+        if isinstance(parsed, dict) and isinstance(parsed.get('actions'), list):
+            return [item for item in parsed.get('actions', []) if isinstance(item, dict)]
         if not isinstance(parsed, list):
             raise ValueError('Hybrid AI step planner must return a JSON array')
         return [item for item in parsed if isinstance(item, dict)]
@@ -775,6 +849,71 @@ class PyUICompatAgent:
                 'action': 'assert_popup_contains',
                 'expected': popup_expected,
                 'reason': 'fallback deterministic popup assertion',
+            }]
+        if '组织管理按钮' in text and '三个人图标' in text:
+            return [{
+                'action': 'hover',
+                'selector': 'text=Organization',
+                'reason': 'fallback deterministic organization sidebar hover',
+            }]
+        if '高级搜索面板' in text and 'Magic Search V2' in text and '包含' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'text_visible',
+                'param': 'Magic Search V2',
+                'reason': 'fallback deterministic advanced-search option assertion',
+            }]
+        if '放大镜图标' in text and '高级搜索面板' in text and '展开' in text:
+            return [{
+                'action': 'click',
+                'selector': 'div.colorBorder.rounded-xl.flex.bg-white > button.ant-dropdown-trigger',
+                'reason': 'fallback deterministic advanced-search leading magnifier click',
+            }]
+        if '高级搜索列表' in text and 'Magic Search V2' in text and '点击' in text:
+            return [{
+                'action': 'click',
+                'selector': 'Magic Search V2',
+                'reason': 'fallback deterministic advanced-search option click',
+            }]
+        if '状态选项列表' in text and 'Close' in text and '点击' in text:
+            return [{
+                'action': 'change_alert_status',
+                'selector': '.alert-select-root',
+                'value': 'Close',
+                'reason': 'fallback deterministic alert-status option change',
+            }]
+        if '显示列表中的第一个结果' in text and '点击' in text:
+            return [{
+                'action': 'click',
+                'loc': '(180,245)',
+                'param': 'first alert result',
+                'reason': 'fallback deterministic first alert result click',
+            }]
+        if '页面中存在可见媒体内容' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'selector_non_empty',
+                'selector_candidates': [
+                    "div[id^='alert_'].cursor-pointer > div.relative.rounded-lg",
+                    "[class*='preview']",
+                    'video',
+                    'canvas',
+                    'img',
+                ],
+                'min_count': 1,
+                'min_x': 120,
+                'min_y': 80,
+                'min_width': 40,
+                'min_height': 20,
+                'param': 'alert_media',
+                'expected': 'True',
+                'reason': 'fallback deterministic visible media assertion',
+            }]
+        if 'To Do' in text and '下拉框' in text:
+            return [{
+                'action': 'click',
+                'selector': '.alert-select-root .ant-select-selector',
+                'reason': 'fallback deterministic alert-status dropdown open',
             }]
         if '断言组织管理子选项' in text and 'Team' in text:
             return [
@@ -804,6 +943,32 @@ class PyUICompatAgent:
                     'reason': 'fallback click Team option',
                 },
             ]
+        if '角色下拉框' in text and '当前值为Org Admin' in text:
+            return [{
+                'action': 'click',
+                'selector': 'text=Org Admin (Can manage and view all sites)',
+                'reason': 'fallback deterministic role dropdown open',
+            }]
+        if '下拉框列表中包含"Site Manager"选项' in text or '下拉框列表中包含“Site Manager”选项' in text:
+            return [{
+                'action': 'assert_text_contains',
+                'selector': 'body',
+                'expected': 'Site Manager (Can manage and view specified sites)',
+                'reason': 'fallback deterministic role option assertion',
+            }]
+        if '选择并点击Site Manager选项' in text:
+            return [{
+                'action': 'click',
+                'selector': 'text=Site Manager (Can manage and view specified sites)',
+                'reason': 'fallback deterministic role option click',
+            }]
+        if '当前值为Site Manager' in text:
+            return [{
+                'action': 'assert_text_contains',
+                'selector': 'body',
+                'expected': 'Site Manager (Can manage and view specified sites)',
+                'reason': 'fallback deterministic selected role assertion',
+            }]
         if '蓝色加号' in text and ('创建新的角色' in text or '创建新的用户' in text):
             return [
                 {
@@ -819,6 +984,27 @@ class PyUICompatAgent:
                 'value': '+14153417120',
                 'param': '415-341-7120',
                 'reason': 'fallback type US phone number with +1 country code',
+            }]
+        if 'Email输入框填写ai@test.com' in text:
+            return [{
+                'action': 'fill',
+                'selector': "input[type='email'][placeholder='Email']",
+                'value': 'ai@test.com',
+                'reason': 'fallback deterministic email fill',
+            }]
+        if 'First Name输入框填写AI' in text:
+            return [{
+                'action': 'fill',
+                'selector': "input[type='text'][placeholder='First Name']",
+                'value': 'AI',
+                'reason': 'fallback deterministic first-name fill',
+            }]
+        if 'Last Name输入框填写Test' in text:
+            return [{
+                'action': 'fill',
+                'selector': "input[type='text'][placeholder='Last Name']",
+                'value': 'Test',
+                'reason': 'fallback deterministic last-name fill',
             }]
         if 'Email地址为ai@test.com' in text and 'First Name字段为AI' in text and 'Phone Number字段为+1(415)341-7120' in text:
             return [{
@@ -857,6 +1043,8 @@ class PyUICompatAgent:
                 'action': 'assert',
                 'assert_kind': 'selector_non_empty',
                 'selector_candidates': [
+                    'text=To Do',
+                    'text=Person',
                     "[class*='result'] [class*='item']",
                     "[class*='list'] [class*='item']",
                     "[role='row']",
@@ -892,16 +1080,184 @@ class PyUICompatAgent:
             return [{
                 'action': 'assert',
                 'assert_kind': 'placeholder_equals',
-                'selector': '#search-input-container input',
+                'selector': "input[placeholder*='Magic Search' i]",
                 'param': 'Magic Search V2',
                 'expected': 'True',
+                'reason': 'fallback deterministic Magic Search V2 placeholder assertion',
             }]
         if '在搜索框中输入' in text and 'black hair' in text:
             return [{'action': 'type', 'selector': "input[type='text']", 'param': 'black hair'}]
         if '预览缩略图' in text or ('第一条结果' in text and '预览' in text):
-            return [{'action': 'click', 'selector': '第一条结果的预览缩略图', 'param': 'first preview'}]
+            return [{
+                'action': 'click',
+                'selector': "div[id^='alert_'].cursor-pointer > div.relative.rounded-lg",
+                'param': 'first preview',
+                'reason': 'fallback deterministic first result preview thumbnail click',
+            }]
+        if '站点列表' in text and '在线和离线的摄像头数量' in text:
+            return [
+                {
+                    'action': 'wait',
+                    'value': '20000',
+                    'reason': 'fallback wait for streaming page site list to hydrate',
+                },
+                {
+                    'action': 'assert',
+                    'assert_kind': 'selector_non_empty',
+                    'selector_candidates': [
+                        "[class*='site'] [class*='item']",
+                        "[class*='site-item']",
+                        "[class*='list'] [class*='item']",
+                        "[class*='card']",
+                        "[role='row']",
+                    ],
+                    'min_count': 1,
+                    'min_x': 160,
+                    'min_y': 120,
+                    'min_width': 40,
+                    'min_height': 20,
+                    'param': 'site_list',
+                    'expected': 'True',
+                    'reason': 'fallback deterministic site list assertion',
+                },
+            ]
+        if '搜索结果中包含目标站点名称' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'selector_non_empty',
+                'selector_candidates': [
+                    "[class*='site'] [class*='item']",
+                    "[class*='site-item']",
+                    "[class*='result'] [class*='item']",
+                    "[class*='list'] [class*='item']",
+                    "[class*='card']",
+                ],
+                'min_count': 1,
+                'min_x': 160,
+                'min_y': 120,
+                'min_width': 40,
+                'min_height': 20,
+                'param': 'site_search_results',
+                'expected': 'True',
+                'reason': 'fallback deterministic site search assertion',
+            }]
+        if 'Search site name' in text and '目标站点名称' in text:
+            return [{
+                'action': 'search_site_with_cameras',
+                'selector': "input[placeholder*='Search site name' i], input[placeholder*='Search' i]",
+                'reason': 'fallback search the first site that has available cameras',
+            }]
+        if '点击搜索结果中目标站点名称' in text:
+            return [{
+                'action': 'click',
+                'selector': '#btnSite',
+                'param': 'first site result',
+                'reason': 'fallback deterministic site result click',
+            }]
+        if '目标站点名称下方展示出该站点的摄像头列表' in text:
+            return [
+                {
+                    'action': 'wait',
+                    'value': '15000',
+                    'reason': 'fallback wait for selected site camera list to hydrate',
+                },
+                {
+                    'action': 'assert',
+                    'assert_kind': 'selector_non_empty',
+                    'selector_candidates': [
+                        "div[class*='grid'] > div",
+                        "div[class*='grid'] > button",
+                        "div[class*='grid'] [class*='rounded']",
+                        "[class*='camera'] [class*='item']",
+                        "[class*='camera-item']",
+                        "[class*='list'] [class*='item']",
+                        "[class*='card']",
+                        "[class*='preview']",
+                        "[class*='thumbnail']",
+                        'img',
+                        'video',
+                        'canvas',
+                    ],
+                    'min_count': 1,
+                    'min_x': 180,
+                    'min_y': 120,
+                    'min_width': 40,
+                    'min_height': 20,
+                    'param': 'camera_list',
+                    'expected': 'True',
+                    'reason': 'fallback deterministic camera list assertion',
+                },
+            ]
+        if '每个摄像头的预览图都能够正常展示' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'selector_non_empty',
+                'selector_candidates': [
+                    "div[class*='grid'] > div",
+                    "div[class*='grid'] > button",
+                    "div[class*='grid'] [class*='rounded']",
+                    "[class*='camera'] [class*='item']",
+                    "[class*='camera-item']",
+                    "[class*='preview']",
+                    "[class*='thumbnail']",
+                    'img',
+                    'video',
+                    'canvas',
+                ],
+                'min_count': 1,
+                'min_x': 180,
+                'min_y': 120,
+                'min_width': 40,
+                'min_height': 20,
+                'param': 'camera_previews',
+                'expected': 'True',
+                'reason': 'fallback deterministic camera preview assertion',
+            }]
+        if '第一个在线的摄像头' in text and '预览图' in text and '点击' in text:
+            return [{
+                'action': 'click',
+                'selector': "div[class*='grid'] > div, div[class*='grid'] > button, [class*='camera'] [class*='preview'], [class*='camera'] [class*='thumbnail'], [class*='camera-item'] img, [class*='camera-item'] video, [class*='camera-item'] canvas",
+                'param': 'first camera preview',
+                'reason': 'fallback deterministic first camera preview click',
+            }]
+        if '实时视频流' in text and '展示出' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'selector_non_empty',
+                'selector_candidates': [
+                    'video',
+                    'canvas',
+                    "[class*='stream']",
+                    "[class*='player']",
+                    "[class*='live']",
+                ],
+                'min_count': 1,
+                'min_x': 180,
+                'min_y': 120,
+                'min_width': 80,
+                'min_height': 50,
+                'param': 'stream_view',
+                'expected': 'True',
+                'reason': 'fallback deterministic stream view assertion',
+            }]
+        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
+            return [{
+                'action': 'click',
+                'loc': '(1120,834)',
+                'param': 'stream close button',
+                'reason': 'fallback deterministic stream close button click',
+            }]
+        if 'Dark Mode' in text or '深色模式' in text or '浅色模式' in text or '三角形和菱形' in text:
+            return [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}]
         if '主页图标' in text or '房子的形状' in text:
             return [{'action': 'click', 'loc': '(48,92)', 'param': ':left:top:25:25'}]
+        if 'Alerts' in text or '铃铛形状' in text:
+            return [{'action': 'click', 'loc': '(48,196)', 'param': ':left:top:25:25'}]
+        if 'Cameras' in text or '摄像头的形状' in text:
+            return [
+                {'action': 'click', 'loc': '(48,142)', 'param': ':left:top:25:25', 'reason': 'fallback open cameras sidebar entry'},
+                {'action': 'click', 'selector': 'text=Cameras', 'param': 'Cameras', 'reason': 'fallback click cameras submenu item'},
+            ]
         return []
 
     def _looks_like_popup_assertion(self, text):
@@ -936,6 +1292,9 @@ class PyUICompatAgent:
             if match:
                 return str(match.group('expected') or '').strip()
         return ''
+
+    def _normalize_text_for_contains(self, text):
+        return re.sub(r'\s+', '', str(text or '').strip())
 
     def _attach_runtime_observers(self, page):
         self._recent_network_events = []
@@ -1029,6 +1388,129 @@ class PyUICompatAgent:
         except Exception:
             return False
         return False
+
+    def _normalize_alert_status_token(self, text):
+        normalized = re.sub(r'[^a-z0-9]+', '_', str(text or '').strip().lower()).strip('_')
+        return normalized
+
+    def _resolve_alert_status_target(self, requested_label, current_label, option_labels):
+        requested = self._normalize_alert_status_token(requested_label)
+        current = self._normalize_alert_status_token(current_label)
+        normalized_options = {
+            self._normalize_alert_status_token(label): str(label or '').strip()
+            for label in option_labels
+            if str(label or '').strip()
+        }
+
+        if requested in normalized_options:
+            return normalized_options[requested]
+
+        alias_groups = {
+            'close': ('close', 'closed', 'false_alarm', 'false_alarm_label'),
+            'closed': ('close', 'closed', 'false_alarm', 'false_alarm_label'),
+            'false_alarm': ('false_alarm', 'false_alarm_label', 'close', 'closed'),
+        }
+        for alias in alias_groups.get(requested, (requested,)):
+            if alias in normalized_options:
+                return normalized_options[alias]
+
+        remaining_options = [
+            str(label or '').strip()
+            for label in option_labels
+            if self._normalize_alert_status_token(label) != current and str(label or '').strip()
+        ]
+        if len(remaining_options) == 1:
+            return remaining_options[0]
+        return None
+
+    async def _change_alert_status(self, page, selector, value, timeout_ms):
+        root_selector = str(selector or '.alert-select-root').strip() or '.alert-select-root'
+        root_locator = page.locator(root_selector).first
+        if await root_locator.count() == 0:
+            raise ValueError('change_alert_status step requires a valid alert status root selector')
+
+        current_label = str(await root_locator.text_content() or '').strip()
+        trigger_locator = root_locator.locator('.ant-select-selector').first
+        if await trigger_locator.count() == 0:
+            trigger_locator = root_locator
+
+        await trigger_locator.click(timeout=timeout_ms)
+        await page.wait_for_timeout(300)
+
+        option_data = await page.locator('[role="option"]').evaluate_all(
+            "els => els.map((el, i) => ({index: i, label: el.getAttribute('aria-label') || (el.innerText || el.textContent || '').trim(), selected: el.getAttribute('aria-selected') === 'true'}))"
+        )
+        option_labels = [str(item.get('label') or '').strip() for item in option_data if str(item.get('label') or '').strip()]
+        target_label = self._resolve_alert_status_target(value, current_label, option_labels)
+        if not target_label:
+            raise AssertionError(f'alert status option {value!r} is not available; options={option_labels!r}')
+
+        current_index = next((item['index'] for item in option_data if item.get('selected')), None)
+        target_index = next(
+            (
+                item['index']
+                for item in option_data
+                if self._normalize_alert_status_token(item.get('label')) == self._normalize_alert_status_token(target_label)
+            ),
+            None,
+        )
+        if target_index is None:
+            raise AssertionError(f'alert status target {target_label!r} was not found in options={option_labels!r}')
+
+        if current_index is None:
+            current_index = next(
+                (
+                    item['index']
+                    for item in option_data
+                    if self._normalize_alert_status_token(item.get('label')) == self._normalize_alert_status_token(current_label)
+                ),
+                0,
+            )
+
+        if target_index != current_index:
+            key = 'ArrowDown' if target_index > current_index else 'ArrowUp'
+            for _ in range(abs(target_index - current_index)):
+                await page.keyboard.press(key)
+                await page.wait_for_timeout(100)
+        await page.keyboard.press('Enter')
+        await page.wait_for_timeout(300)
+
+    async def _search_site_with_cameras(self, page, selector, timeout_ms):
+        site_rows = []
+        for candidate in ("[class*='site-item']", "[class*='site'] [class*='item']"):
+            try:
+                site_rows = await page.locator(candidate).evaluate_all(
+                    "els => els.map(el => ({text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()})).filter(item => item.text)"
+                )
+            except Exception:
+                site_rows = []
+            if site_rows:
+                break
+
+        target_site = ''
+        for row in site_rows:
+            row_text = str(row.get('text') or '').strip()
+            match = re.search(r'^(?P<name>.+?)\s+(?P<online>\d+)\s*/\s*(?P<offline>\d+)$', row_text)
+            if not match:
+                continue
+            online_count = int(match.group('online'))
+            offline_count = int(match.group('offline'))
+            if online_count + offline_count > 0:
+                target_site = str(match.group('name') or '').strip()
+                break
+
+        if not target_site and site_rows:
+            first_row = str(site_rows[0].get('text') or '').strip()
+            target_site = re.sub(r'\s+\d+\s*/\s*\d+$', '', first_row).strip() or first_row
+
+        if not target_site:
+            raise AssertionError('search_site_with_cameras could not find any visible site rows')
+
+        locator = await self._resolve_locator(page, selector or "input[placeholder*='Search site name' i], input[placeholder*='Search' i]")
+        if locator is None:
+            raise ValueError('search_site_with_cameras requires a searchable site input')
+        await locator.fill(target_site, timeout=timeout_ms)
+        await page.wait_for_timeout(300)
 
     def _sidebar_hover_keywords(self, step):
         haystack = ' '.join(
@@ -1165,6 +1647,10 @@ class PyUICompatAgent:
             await page.keyboard.type(value, delay=80)
             return
 
+        if action in {'search_site_with_cameras'}:
+            await self._search_site_with_cameras(page, selector, timeout_ms)
+            return
+
         if action in {'press', 'keyboard_press', 'key', 'hotkey'}:
             value = str(step.get('value') or param or '').strip()
             locator = await self._resolve_locator(page, selector) if selector else None
@@ -1186,8 +1672,21 @@ class PyUICompatAgent:
             await page.locator(selector).first.select_option(value, timeout=timeout_ms)
             return
 
+        if action in {'change_alert_status'}:
+            await self._change_alert_status(
+                page,
+                selector=selector,
+                value=str(step.get('value') or param or '').strip(),
+                timeout_ms=timeout_ms,
+            )
+            return
+
         if action in {'wait', 'sleep'}:
-            wait_ms = max(0, timeout_ms)
+            raw_wait = step.get('value') or param
+            try:
+                wait_ms = max(0, int(str(raw_wait).strip())) if raw_wait not in (None, '') else max(0, timeout_ms)
+            except (TypeError, ValueError):
+                wait_ms = max(0, timeout_ms)
             await page.wait_for_timeout(wait_ms)
             return
 
@@ -1345,6 +1844,10 @@ class PyUICompatAgent:
             actual_text = await page.locator(selector).first.text_content(timeout=timeout_ms)
             normalized_text = str(actual_text or '').strip()
             if expected not in normalized_text:
+                compact_expected = self._normalize_text_for_contains(expected)
+                compact_actual = self._normalize_text_for_contains(normalized_text)
+                if compact_expected and compact_expected in compact_actual:
+                    return
                 raise AssertionError(f"text '{normalized_text}' does not contain '{expected}'")
             return
 

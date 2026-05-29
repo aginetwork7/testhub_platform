@@ -135,7 +135,7 @@ class AIExecutionRecordSerializer(serializers.Serializer):
     screenshots_sequence = serializers.JSONField(read_only=True)
 
     def get_project_name(self, obj):
-        return obj.project.name if obj.project else ''
+        return obj.project.name if obj.project else '未归档'
 
     def get_ai_case_name(self, obj):
         return obj.ai_case.name if obj.ai_case else ''

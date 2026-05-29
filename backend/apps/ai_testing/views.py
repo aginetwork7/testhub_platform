@@ -1,6 +1,9 @@
 import logging
 import threading
 import os
+import re
+from pathlib import Path
+from django.conf import settings
 from asgiref.sync import sync_to_async
 from django.db import connection, DatabaseError
 from django.utils import timezone
@@ -81,6 +84,111 @@ def extract_step_info(step, step_index):
 
     return step_info
 
+
+def normalize_step_thinking(value):
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if re.fullmatch(r'planner_v2 executed action=\s*', text):
+        return None
+
+    matched_action = re.fullmatch(r'planner_v2 executed action=\s*([a-z][a-z0-9_]*)\s*', text)
+    if matched_action:
+        return f'action={matched_action.group(1)}'
+
+    return text
+
+
+def normalize_planner_artifact_path(value):
+    if value is None:
+        return None
+
+    text = str(value)
+    text = re.sub(
+        r'ai_testing/planner_v2/([A-Za-z0-9_]+)__[^/]+_(\d{14})/',
+        r'ai_testing/planner_v2/\1_\2/',
+        text,
+    )
+    text = re.sub(
+        r'([A-Za-z0-9_]+)__[^/]+_step_(\d+)_completed\.png',
+        r'\1_step_\2.png',
+        text,
+    )
+    text = re.sub(
+        r'([A-Za-z0-9_]+)__[^/]+_final\.png',
+        r'\1_final.png',
+        text,
+    )
+    text = re.sub(
+        r'([A-Za-z0-9_]+)__[^/]+_report\.(jsonl|html)',
+        r'\1_report.\2',
+        text,
+    )
+    return text
+
+
+def normalize_planner_payload(value):
+    if isinstance(value, str):
+        return normalize_planner_artifact_path(value)
+    if isinstance(value, list):
+        return [normalize_planner_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: normalize_planner_payload(item) for key, item in value.items()}
+    return value
+
+
+def extract_machine_action_name(step):
+    if not isinstance(step, dict):
+        return None
+
+    for key in ['report_action', 'runtime_action', 'action']:
+        candidate = str(step.get(key) or '').strip()
+        if re.fullmatch(r'[a-z][a-z0-9_]*', candidate):
+            return candidate
+    return None
+
+
+def build_step_thinking(step):
+    if not isinstance(step, dict):
+        return None
+
+    normalized = normalize_step_thinking(step.get('thinking'))
+    if normalized:
+        return normalized
+
+    source = str(step.get('source') or '').strip()
+    action = extract_machine_action_name(step) or str(step.get('action') or '').strip()
+    if source and action and action != '-':
+        return f'source={source}; action={action}'
+    if source:
+        return f'source={source}'
+    if action and action != '-':
+        return f'action={action}'
+    return None
+
+
+def build_accessible_ai_project_queryset(user):
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return AiProject.objects.none()
+
+    return AiProject.objects.filter(
+        models.Q(unified_meta_project__owner=user)
+        | models.Q(unified_meta_project__members__user=user)
+        | models.Q(unified_meta_project__isnull=True, created_by=user)
+    ).distinct()
+
+
+def _is_relative_to(path, base_path):
+    try:
+        path.relative_to(base_path)
+        return True
+    except ValueError:
+        return False
+
 class AiProjectViewSet(viewsets.ModelViewSet):
     queryset = AiProject.objects.all()
     permission_classes = [IsAuthenticated]
@@ -90,12 +198,7 @@ class AiProjectViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        user = self.request.user
-        return AiProject.objects.filter(
-            models.Q(unified_meta_project__owner=user) | 
-            models.Q(unified_meta_project__members__user=user) |
-            models.Q(unified_meta_project__isnull=True)
-        ).distinct()
+        return build_accessible_ai_project_queryset(self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -111,14 +214,10 @@ class AICaseViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        user = self.request.user
-        accessible_projects = AiProject.objects.filter(
-            models.Q(unified_meta_project__owner=user) | 
-            models.Q(unified_meta_project__members__user=user) |
-            models.Q(unified_meta_project__isnull=True)  # 允许访问没有关联元项目的 AiProject（例如默认迁移项目）
-        ).distinct()
+        accessible_projects = build_accessible_ai_project_queryset(self.request.user)
         return AICase.objects.filter(
-            models.Q(project__in=accessible_projects) | models.Q(project__isnull=True)
+            models.Q(project__in=accessible_projects)
+            | models.Q(project__isnull=True, created_by=self.request.user)
         ).distinct()
 
     def perform_create(self, serializer):
@@ -752,17 +851,83 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
     ordering = ['-start_time']
 
     def get_queryset(self):
-        user = self.request.user
-        accessible_projects = AiProject.objects.filter(
-            models.Q(unified_meta_project__owner=user) | 
-            models.Q(unified_meta_project__members__user=user) |
-            models.Q(unified_meta_project__isnull=True)  # 允许访问没有关联元项目的 AiProject（例如默认迁移项目）
-        ).distinct()
-        return AIExecutionRecord.objects.filter(
-            models.Q(project__in=accessible_projects) | models.Q(project__isnull=True)
+        accessible_projects = build_accessible_ai_project_queryset(self.request.user)
+        queryset = AIExecutionRecord.objects.filter(
+            models.Q(project__in=accessible_projects)
+            | models.Q(project__isnull=True, executed_by=self.request.user)
         ).distinct()
 
+        query_params = getattr(self.request, 'query_params', None)
+        if query_params is None:
+            query_params = getattr(self.request, 'GET', {})
+        project_scope = str(query_params.get('project_scope') or '').strip().lower()
+        if project_scope == 'unarchived':
+            return queryset.filter(project__isnull=True)
+
+        return queryset
+
+    def _execution_record_artifact_paths(self, execution_record):
+        paths = set()
+
+        gif_path = str(getattr(execution_record, 'gif_path', '') or '').strip()
+        if gif_path:
+            paths.add(gif_path)
+
+        for screenshot in getattr(execution_record, 'screenshots_sequence', []) or []:
+            screenshot_path = str(screenshot or '').strip()
+            if screenshot_path:
+                paths.add(screenshot_path)
+
+        for artifact in getattr(execution_record, 'artifacts', []) or []:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_path = str(artifact.get('path') or '').strip()
+            if artifact_path:
+                paths.add(artifact_path)
+
+        return sorted(paths)
+
+    def _resolve_execution_artifact_path(self, artifact_path):
+        raw_path = str(artifact_path or '').strip()
+        if not raw_path:
+            return None
+
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = (media_root / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+
+        if not _is_relative_to(candidate, media_root):
+            logger.warning('skip deleting artifact outside MEDIA_ROOT: %s', candidate)
+            return None
+
+        return candidate
+
+    def _delete_execution_record_artifacts(self, execution_record):
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        removable_dirs = set()
+
+        for artifact_path in self._execution_record_artifact_paths(execution_record):
+            resolved_path = self._resolve_execution_artifact_path(artifact_path)
+            if resolved_path is None or not resolved_path.exists() or not resolved_path.is_file():
+                continue
+
+            removable_dirs.add(resolved_path.parent)
+            resolved_path.unlink(missing_ok=True)
+
+        for directory in sorted(removable_dirs, key=lambda item: len(item.parts), reverse=True):
+            current = directory
+            while _is_relative_to(current, media_root) and current != media_root:
+                try:
+                    current.rmdir()
+                except OSError:
+                    break
+                current = current.parent
+
     def perform_destroy(self, instance):
+        self._delete_execution_record_artifacts(instance)
         instance.delete()
 
     @action(detail=False, methods=['post'])
@@ -788,10 +953,12 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 return Response({'error': '未找到可删除的记录或没有权限删除'}, status=status.HTTP_404_NOT_FOUND)
 
             # 获取可删除记录的ID列表，避免对distinct()后的queryset调用delete()
-            deletable_ids = list(records_to_delete.values_list('id', flat=True))
-
-            # 使用ID列表直接删除，避免distinct()的问题
-            deleted_count = AIExecutionRecord.objects.filter(id__in=deletable_ids).delete()[0]
+            deletable_records = list(records_to_delete)
+            deleted_count = 0
+            for record in deletable_records:
+                self._delete_execution_record_artifacts(record)
+                record.delete()
+                deleted_count += 1
 
             return Response({'message': f'成功删除 {deleted_count} 条记录', 'deleted_count': deleted_count})
         except Exception as e:
@@ -1173,6 +1340,12 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         return color_map.get(str(status_value or '').strip().lower(), 'info')
 
     def _extract_step_action_text(self, step):
+        if isinstance(step, dict):
+            for key in ['step_description', 'description', 'task_description']:
+                candidate = str(step.get(key) or '').strip()
+                if candidate:
+                    return candidate
+
         action = step.get('action') if isinstance(step, dict) else None
         if isinstance(action, str):
             return action
@@ -1229,29 +1402,67 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 errors.append({'type': error_type, 'message': normalized})
         return errors[-20:]
 
+    def _merge_report_step(self, recorded_step, case_report_step):
+        merged = dict(recorded_step or {})
+        planner_step = case_report_step if isinstance(case_report_step, dict) else {}
+
+        step_description = str(planner_step.get('step_description') or planner_step.get('description') or '').strip()
+        if step_description and not merged.get('step_description'):
+            merged['step_description'] = step_description
+
+        report_action = str(planner_step.get('action') or '').strip()
+        if report_action:
+            merged['report_action'] = report_action
+        if not merged.get('source') and planner_step.get('source'):
+            merged['source'] = planner_step.get('source')
+
+        step_screenshot = normalize_planner_artifact_path(
+            merged.get('step_screenshot') or planner_step.get('step_screenshot')
+        )
+        if step_screenshot:
+            merged['step_screenshot'] = step_screenshot
+
+        fail_screenshot = normalize_planner_artifact_path(planner_step.get('fail_screenshot'))
+        if fail_screenshot:
+            merged['fail_screenshot'] = fail_screenshot
+
+        if not merged.get('error') and planner_step.get('error'):
+            merged['error'] = planner_step.get('error')
+
+        return merged
+
     def _report_step_records(self, execution_record):
         recorded_steps = execution_record.steps_completed or []
-        if recorded_steps:
-            return recorded_steps
-
         planner_trace = execution_record.planner_trace or {}
         case_report = planner_trace.get('case_report') if isinstance(planner_trace, dict) else None
         fallback_steps = case_report.get('steps') if isinstance(case_report, dict) else None
         if not isinstance(fallback_steps, list):
+            fallback_steps = []
+
+        if recorded_steps:
+            normalized_recorded_steps = []
+            for index, step in enumerate(recorded_steps):
+                if not isinstance(step, dict):
+                    continue
+                planner_step = fallback_steps[index] if index < len(fallback_steps) else {}
+                normalized_recorded_steps.append(self._merge_report_step(step, planner_step))
+            return normalized_recorded_steps
+
+        if not fallback_steps:
             return []
 
         normalized_steps = []
         for step in fallback_steps:
             if not isinstance(step, dict):
                 continue
-            normalized_steps.append({
+            normalized_steps.append(self._merge_report_step({
                 'action': step.get('step_description') or step.get('action') or '-',
                 'status': 'completed' if step.get('result') else 'failed',
-                'thinking': step.get('source'),
+                'thinking': build_step_thinking(step),
                 'duration_seconds': None,
                 'error': step.get('error'),
                 'element': None,
-            })
+            }, step))
         return normalized_steps
 
     def _build_execution_report(self, execution_record, report_type='summary'):
@@ -1293,7 +1504,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 'status': step_status,
                 'action': action_text,
                 'element': (step or {}).get('element') if isinstance(step, dict) else None,
-                'thinking': (step or {}).get('thinking') if isinstance(step, dict) else None,
+                'thinking': build_step_thinking(step if isinstance(step, dict) else {}),
                 'duration': duration
             })
 
@@ -1344,8 +1555,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             'bottlenecks': bottlenecks,
             'recommendations': recommendations,
             'gif_path': execution_record.gif_path,
-            'planner_trace': execution_record.planner_trace or {},
-            'artifacts': execution_record.artifacts or [],
+            'planner_trace': normalize_planner_payload(execution_record.planner_trace or {}),
+            'artifacts': normalize_planner_payload(execution_record.artifacts or []),
             'cache_stats': execution_record.cache_stats or {},
         }
 

@@ -5,22 +5,23 @@ from apps.users.models import User
 from apps.projects.models import Project
 import json
 import os
+import re
 from pathlib import Path
 import httpx
-from typing import Dict, Any, List, AsyncIterator
+from typing import Dict, Any, List, AsyncIterator, Optional
 from asgiref.sync import sync_to_async
 
 from django.core.files.storage import FileSystemStorage
 from backend.log_config import get_logger
 
-# 自定义存储类，用于存储需求文档到expand/document目录
+# 自定义存储类，用于存储需求文档到项目根目录下的 Data/PRD
 class RequirementDocsStorage(FileSystemStorage):
-    """自定义存储类，将需求文档存储在expand/document目录下"""
+    """自定义存储类，将需求文档存储在 Data/PRD 目录下。"""
     def __init__(self, *args, **kwargs):
         # 获取项目根目录
         project_root = Path(__file__).resolve().parent.parent.parent.parent
-        # 设置存储位置为expand/document目录
-        location = os.path.join(project_root, 'expand', 'document')
+        # 设置存储位置为 Data/PRD 目录
+        location = os.path.join(project_root, 'Data', 'PRD')
         # 设置URL前缀
         base_url = '/media/'
         super().__init__(location=location, base_url=base_url)
@@ -28,15 +29,105 @@ class RequirementDocsStorage(FileSystemStorage):
 # 创建存储实例
 requirement_docs_storage = RequirementDocsStorage()
 
+
+def normalize_prd_directory_name(value: str) -> str:
+    text = str(value or '').strip()
+    text = re.sub(r'[\\/:*?"<>|]+', '_', text)
+    text = re.sub(r'\s+', ' ', text).strip().strip('.')
+    if not text or not re.sub(r'[_\-\.\s]+', '', text):
+        return 'untitled'
+    return text or 'untitled'
+
+
+def get_prd_storage_root() -> Path:
+    return Path(requirement_docs_storage.location).resolve()
+
+
+def resolve_prd_date_token(created_at=None) -> str:
+    if created_at is not None:
+        return created_at.strftime('%Y%m%d')
+
+    from datetime import datetime
+
+    return datetime.now().strftime('%Y%m%d')
+
+
+def requirement_document_relative_dir(instance, filename: str = '') -> str:
+    date_token = resolve_prd_date_token(getattr(instance, 'created_at', None))
+    title = str(getattr(instance, 'title', '') or '').strip()
+    fallback_name = Path(str(filename or 'document')).stem
+    directory_name = normalize_prd_directory_name(title or fallback_name)
+    return f'{date_token}/{directory_name}'
+
+
+def build_prd_artifact_relative_path(title: str, created_at, artifact_name: str) -> str:
+    directory_name = normalize_prd_directory_name(title)
+    safe_artifact_name = Path(str(artifact_name or 'artifact.txt')).name
+    return f'{resolve_prd_date_token(created_at)}/{directory_name}/{safe_artifact_name}'
+
+
+def write_prd_text_artifact(title: str, created_at, artifact_name: str, content: str) -> Path | None:
+    text = str(content or '').strip()
+    if not text:
+        return None
+
+    relative_path = build_prd_artifact_relative_path(title, created_at, artifact_name)
+    target_path = get_prd_storage_root() / relative_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(text, encoding='utf-8')
+    return target_path
+
+
+def write_prd_json_artifact(title: str, created_at, artifact_name: str, payload) -> Path | None:
+    if payload in (None, '', [], {}):
+        return None
+
+    relative_path = build_prd_artifact_relative_path(title, created_at, artifact_name)
+    target_path = get_prd_storage_root() / relative_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    return target_path
+
+
+def sync_requirement_document_artifacts(document) -> None:
+    write_prd_text_artifact(document.title, document.created_at, 'extracted_text.txt', document.extracted_text)
+
+
+def sync_requirement_analysis_artifacts(analysis) -> None:
+    write_prd_text_artifact(analysis.document.title, analysis.document.created_at, 'analysis_report.md', analysis.analysis_report)
+
+
+def sync_business_requirements_artifact(analysis) -> None:
+    requirements_payload = list(
+        analysis.requirements.order_by('requirement_id', 'id').values(
+            'requirement_id',
+            'requirement_name',
+            'requirement_type',
+            'module',
+            'requirement_level',
+            'reviewer',
+            'estimated_hours',
+            'description',
+            'acceptance_criteria',
+        )
+    )
+    write_prd_json_artifact(analysis.document.title, analysis.document.created_at, 'requirements.json', requirements_payload)
+
+
+def sync_testcase_generation_task_artifacts(task) -> None:
+    write_prd_text_artifact(task.title, task.created_at, 'requirement_text.txt', task.requirement_text)
+    write_prd_text_artifact(task.title, task.created_at, 'generated_test_cases.md', task.generated_test_cases)
+    write_prd_text_artifact(task.title, task.created_at, 'review_feedback.md', task.review_feedback)
+    write_prd_text_artifact(task.title, task.created_at, 'final_test_cases.md', task.final_test_cases)
+    write_prd_text_artifact(task.title, task.created_at, 'generation_log.txt', task.generation_log)
+    write_prd_text_artifact(task.title, task.created_at, 'error_message.txt', task.error_message)
+
 # 自定义上传路径处理函数
 def requirement_docs_upload_path(instance, filename):
-    """自定义上传路径，将需求文档存储在requirement_docs/%Y/%m/子目录下"""
-    # 手动处理日期格式化
-    from datetime import datetime
-    now = datetime.now()
-    year = now.strftime('%Y')
-    month = now.strftime('%m')
-    return f'requirement_docs/{year}/{month}/{filename}'
+    """自定义上传路径，将需求文档存储在 Data/PRD/YYYYMMDD/需求文档名/ 子目录下。"""
+    relative_dir = requirement_document_relative_dir(instance, filename)
+    safe_filename = Path(str(filename or 'document')).name
+    return f'{relative_dir}/{safe_filename}'
 
 logger = get_logger(__name__)
 
@@ -79,6 +170,10 @@ class RequirementDocument(models.Model):
     def __str__(self):
         return f"{self.title} - {self.get_status_display()}"
 
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        sync_requirement_document_artifacts(self)
+
 
 class RequirementAnalysis(models.Model):
     """需求分析记录"""
@@ -98,6 +193,10 @@ class RequirementAnalysis(models.Model):
 
     def __str__(self):
         return f"{self.document.title} - 分析报告"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        sync_requirement_analysis_artifacts(self)
 
 
 class BusinessRequirement(models.Model):
@@ -142,6 +241,10 @@ class BusinessRequirement(models.Model):
 
     def __str__(self):
         return f"{self.requirement_id} - {self.requirement_name}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        sync_business_requirements_artifact(self.analysis)
 
 
 class GeneratedTestCase(models.Model):
@@ -450,6 +553,10 @@ class TestCaseGenerationTask(models.Model):
     def __str__(self):
         return f"{self.title} - {self.get_status_display()}"
 
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        sync_testcase_generation_task_artifacts(self)
+
 
 class AIModelService:
     """AI模型服务类"""
@@ -500,7 +607,8 @@ class AIModelService:
             config: AIModelConfig,
             messages: List[Dict[str, str]],
             max_tokens: int,
-            stream: bool
+            stream: bool,
+            response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             'model': config.model_name,
@@ -514,13 +622,17 @@ class AIModelService:
         if config.model_type == 'qwen':
             data['chat_template_kwargs'] = {'enable_thinking': False}
 
+        if response_format is not None and not stream:
+            data['response_format'] = response_format
+
         return data
 
     @staticmethod
     async def call_openai_compatible_api(
             config: AIModelConfig,
             messages: List[Dict[str, str]],
-            max_tokens: int = None
+            max_tokens: int = None,
+            response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         调用OpenAI兼容格式的API
@@ -546,6 +658,7 @@ class AIModelService:
             messages=messages,
             max_tokens=actual_max_tokens,
             stream=False,
+            response_format=response_format,
         )
 
         # 确保base_url不以/结尾

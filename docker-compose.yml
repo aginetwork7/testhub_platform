@@ -72,6 +72,9 @@ services:
       echo 'Starting Django...';
       python manage.py runserver 0.0.0.0:8000"
     volumes:
+      # 开发态直接挂载 backend 源码，避免每次改 Python 后都需要 docker cp
+      - ./backend:/app
+      - ./Data:/Data
       - ./expand:/expand
       - ./logs:/app/logs
       - ./media:/media
@@ -110,6 +113,9 @@ services:
       - "host.docker.internal:host-gateway"
     command: python manage.py qcluster
     volumes:
+      # Worker 与 backend 使用同一份宿主机源码，避免异步任务继续跑旧代码
+      - ./backend:/app
+      - ./Data:/Data
       - ./expand:/expand
       - ./logs:/app/logs
       - ./media:/media
@@ -127,6 +133,9 @@ services:
     environment:
       - VITE_API_BASE_URL=http://backend:8000
     volumes:
+      # 开发态直接挂载 frontend 源码，避免页面改动仍停留在旧镜像
+      - ./frontend:/app
+      - /app/node_modules
       # sync-config.js 解析路径为 /config.yaml，挂载根目录配置文件
       - ./config.yaml:/config.yaml:ro
     depends_on:

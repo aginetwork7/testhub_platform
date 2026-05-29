@@ -25,8 +25,6 @@ static_files/img/
 !../expand/media/allure-reports/.gitkeep
 ../expand/media/allure-results/*
 !../expand/media/allure-results/.gitkeep
-../expand/media/requirement_docs/*
-!../expand/media/requirement_docs/.gitkeep
 ../expand/media/ai_recording/*
 !../expand/media/ai_recording/.gitkeep
 

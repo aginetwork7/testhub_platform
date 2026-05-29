@@ -700,6 +700,14 @@ npm run build
 - 基于需求自动生成测试用例
 - 支持多种 AI 模型配置
 
+**存储说明**:
+
+- 需求文档运行时存储目录为 `Data/PRD/<YYYYMMDD>/<需求文档名称>/`
+- 每个新功能对应一个独立目录，目录名默认与需求文档名称一致；该 PRD 的原始文档及后续相关文件产物应统一落在同一目录下
+- 当前会自动落盘到该目录的文本产物包括：`extracted_text.txt`、`analysis_report.md`、`requirements.json`、`requirement_text.txt`、`generated_test_cases.md`、`review_feedback.md`、`final_test_cases.md`
+- Docker 部署时需要为后端和 worker 挂载 `./Data:/Data`，否则容器内 `/Data/PRD` 不会持久化
+- 当前 `docker-compose.yml` 已为 `backend` 和 `worker` 挂载 `./backend:/app`，后端 Python 源码无需再手动 `docker cp`；其中 `backend` 的 `runserver` 会自动重载，`worker` 修改后仍需重启进程以加载新代码
+
 **数据模型**:
 
 - `RequirementDocument`: 需求文档
