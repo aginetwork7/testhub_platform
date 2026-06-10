@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,10 @@ from asgiref.sync import sync_to_async
 logger = logging.getLogger('django')
 
 ACTION_CACHE_SCHEMA_VERSION = 'v3'
+
+
+def _is_false_like(value):
+    return str(value or '').strip().lower() in {'false', '0', 'no'}
 
 
 @dataclass
@@ -43,6 +48,28 @@ class PyUICompatAgent:
         if callback is not None:
             await self._emit(callback, {'type': 'log', 'content': 'planner_v2 runtime bootstrap: executor not implemented yet\n'})
         return tasks
+
+    def _resolve_browser_executable(self):
+        """Return a Chromium executable that can decode live camera streams.
+
+        Playwright's bundled Chromium is the open-source build without the
+        proprietary H.264/H.265 codecs required to play camera streams, so a
+        live-stream player stays stuck on a loading state forever. A system
+        Chromium (Debian package) ships those codecs via system ffmpeg, so prefer
+        it when available. Falls back to Playwright's bundled browser when no
+        codec-capable system browser is found.
+        """
+        configured = os.environ.get('PLAYWRIGHT_CHROMIUM_PATH', '').strip()
+        candidates = [configured] if configured else []
+        candidates.extend([
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/google-chrome',
+        ])
+        for path in candidates:
+            if path and os.path.exists(path):
+                return path
+        return None
 
     async def run_full_process(self, task_description, analysis_callback=None, step_callback=None, should_stop=None, case_mode='freeform', task_steps=None):
         planned_tasks = self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -107,7 +134,14 @@ class PyUICompatAgent:
         artifact_dir, artifact_prefix = self._prepare_artifact_dir()
 
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
+            launch_kwargs = {
+                'headless': True,
+                'args': ['--use-gl=swiftshader', '--ignore-gpu-blocklist', '--no-sandbox'],
+            }
+            browser_executable = self._resolve_browser_executable()
+            if browser_executable:
+                launch_kwargs['executable_path'] = browser_executable
+            browser = await playwright.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
                 viewport={'width': 1440, 'height': 900},
             )
@@ -370,7 +404,7 @@ class PyUICompatAgent:
         for sub_index, ai_action in enumerate(ai_actions, start=1):
             await self._emit(
                 step_callback,
-                {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {ai_action.get('description') or ai_action.get('action')}\n"},
+                {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {self._describe_action(ai_action)}\n"},
             )
             await self._execute_step(page, ai_action, timeout_error=timeout_error)
 
@@ -570,6 +604,36 @@ class PyUICompatAgent:
             }
             for index, line in enumerate(normalized_lines, start=1)
         ]
+
+    def _describe_action(self, action):
+        """Build a human-readable one-line label for a planned sub-action.
+
+        Falls back from a meaningful author-provided description to a label
+        synthesised from the action kind and its primary target, so the log no
+        longer shows the generic placeholder '步骤 N' for deterministic actions.
+        """
+        if not isinstance(action, dict):
+            return str(action)
+
+        description = str(action.get('description') or action.get('name') or '').strip()
+        if description and not re.fullmatch(r'步骤\s*\d+', description):
+            return description
+
+        kind = str(action.get('action') or '').strip() or 'action'
+        assert_kind = str(action.get('assert_kind') or '').strip()
+        label = f'{kind} {assert_kind}'.strip() if assert_kind else kind
+
+        target = (
+            action.get('param')
+            or action.get('url')
+            or action.get('value')
+            or action.get('selector')
+            or action.get('loc')
+        )
+        target = str(target).strip() if target else ''
+        if len(target) > 60:
+            target = f'{target[:57]}...'
+        return f'{label} → {target}' if target else label
 
     def _normalize_step(self, raw_step, index):
         if not isinstance(raw_step, dict):
@@ -1105,16 +1169,14 @@ class PyUICompatAgent:
                     'action': 'assert',
                     'assert_kind': 'selector_non_empty',
                     'selector_candidates': [
-                        "[class*='site'] [class*='item']",
-                        "[class*='site-item']",
-                        "[class*='list'] [class*='item']",
-                        "[class*='card']",
-                        "[role='row']",
+                        '#btnSite',
+                        "button[id='btnSite']",
+                        "[id='btnSite']",
                     ],
                     'min_count': 1,
-                    'min_x': 160,
+                    'min_x': 80,
                     'min_y': 120,
-                    'min_width': 40,
+                    'min_width': 120,
                     'min_height': 20,
                     'param': 'site_list',
                     'expected': 'True',
@@ -1126,16 +1188,14 @@ class PyUICompatAgent:
                 'action': 'assert',
                 'assert_kind': 'selector_non_empty',
                 'selector_candidates': [
-                    "[class*='site'] [class*='item']",
-                    "[class*='site-item']",
-                    "[class*='result'] [class*='item']",
-                    "[class*='list'] [class*='item']",
-                    "[class*='card']",
+                    '#btnSite',
+                    "button[id='btnSite']",
+                    "[id='btnSite']",
                 ],
                 'min_count': 1,
-                'min_x': 160,
+                'min_x': 80,
                 'min_y': 120,
-                'min_width': 40,
+                'min_width': 120,
                 'min_height': 20,
                 'param': 'site_search_results',
                 'expected': 'True',
@@ -1220,7 +1280,22 @@ class PyUICompatAgent:
                 'param': 'first camera preview',
                 'reason': 'fallback deterministic first camera preview click',
             }]
-        if '实时视频流' in text and '展示出' in text:
+        if '实时视频流' in text and ('展示出' in text or '播放' in text):
+            return [{
+                'action': 'assert',
+                'assert_kind': 'stream_active',
+                'param': 'stream_view',
+                'expected': 'True',
+                'reason': 'fallback deterministic active stream assertion',
+            }]
+        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
+            return [{
+                'action': 'click',
+                'loc': '(1154,834)',
+                'param': 'stream close button',
+                'reason': 'fallback deterministic stream close button click',
+            }]
+        if '实时视频流页面关闭' in text:
             return [{
                 'action': 'assert',
                 'assert_kind': 'selector_non_empty',
@@ -1232,20 +1307,13 @@ class PyUICompatAgent:
                     "[class*='live']",
                 ],
                 'min_count': 1,
-                'min_x': 180,
-                'min_y': 120,
-                'min_width': 80,
-                'min_height': 50,
+                'min_x': 420,
+                'min_y': 140,
+                'min_width': 600,
+                'min_height': 320,
                 'param': 'stream_view',
-                'expected': 'True',
-                'reason': 'fallback deterministic stream view assertion',
-            }]
-        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
-            return [{
-                'action': 'click',
-                'loc': '(1120,834)',
-                'param': 'stream close button',
-                'reason': 'fallback deterministic stream close button click',
+                'expected': 'False',
+                'reason': 'fallback deterministic stream view closed assertion',
             }]
         if 'Dark Mode' in text or '深色模式' in text or '浅色模式' in text or '三角形和菱形' in text:
             return [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}]
@@ -1733,6 +1801,10 @@ class PyUICompatAgent:
             if assert_kind == 'selector_non_empty':
                 selector_candidates = step.get('selector_candidates') or []
                 min_count = int(step.get('min_count') or 1)
+                min_x = step.get('min_x')
+                min_y = step.get('min_y')
+                min_width = step.get('min_width')
+                min_height = step.get('min_height')
                 visible_count = 0
                 for candidate in selector_candidates:
                     try:
@@ -1740,14 +1812,32 @@ class PyUICompatAgent:
                         count = await locator.count()
                         for idx in range(min(count, 20)):
                             try:
-                                if await locator.nth(idx).is_visible(timeout=300):
-                                    visible_count += 1
+                                item = locator.nth(idx)
+                                if not await item.is_visible(timeout=300):
+                                    continue
+                                if any(value is not None for value in (min_x, min_y, min_width, min_height)):
+                                    box = await item.bounding_box()
+                                    if not isinstance(box, dict):
+                                        continue
+                                    if min_x is not None and float(box.get('x') or 0) < float(min_x):
+                                        continue
+                                    if min_y is not None and float(box.get('y') or 0) < float(min_y):
+                                        continue
+                                    if min_width is not None and float(box.get('width') or 0) < float(min_width):
+                                        continue
+                                    if min_height is not None and float(box.get('height') or 0) < float(min_height):
+                                        continue
+                                visible_count += 1
                             except Exception:
                                 continue
-                        if visible_count >= min_count:
+                        if not _is_false_like(expected) and visible_count >= min_count:
                             return
                     except Exception:
                         continue
+                if _is_false_like(expected):
+                    if visible_count > 0:
+                        raise AssertionError(f'selector_non_empty expected no visible matches, got {visible_count}')
+                    return
                 raise AssertionError(f'selector_non_empty failed: visible_count={visible_count}, min_count={min_count}')
 
             if assert_kind == 'field_values_match':
@@ -1820,6 +1910,10 @@ class PyUICompatAgent:
                     except Exception:
                         continue
                 raise AssertionError(f"video_visible failed for '{expected_video}'")
+
+            if assert_kind == 'stream_active':
+                await self._assert_stream_active(page, timeout_ms)
+                return
 
             raise ValueError(f'unsupported assert kind: {assert_kind}')
 
@@ -1929,6 +2023,127 @@ class PyUICompatAgent:
             raise AssertionError(f"no visible video element matched '{expected}'" if expected else 'no visible video element found')
 
         raise ValueError(f"unsupported planner_v2 action: {action}")
+
+    async def _assert_stream_active(self, page, timeout_ms):
+        loading_markers = ['Loading streaming...', 'No Signal', 'Reconnect', 'Stream unavailable']
+
+        async def visible_loading_marker():
+            for marker in loading_markers:
+                locator = page.get_by_text(marker, exact=False)
+                try:
+                    if await locator.count() and await locator.first.is_visible():
+                        return marker
+                except Exception:
+                    continue
+            return None
+
+        # Wait for the player to finish buffering before judging liveness. A live
+        # stream can briefly show a loading/reconnect placeholder right after the
+        # camera is opened; only treat it as failed if the marker is still present
+        # once the load budget is exhausted.
+        load_deadline = time.monotonic() + min(max(timeout_ms, 15000), 30000) / 1000.0
+        marker = await visible_loading_marker()
+        while marker and time.monotonic() < load_deadline:
+            await page.wait_for_timeout(1000)
+            marker = await visible_loading_marker()
+        if marker:
+            raise AssertionError(f"stream is not active: visible marker '{marker}'")
+
+        video_locator = page.locator('video')
+        video_count = await video_locator.count()
+        for idx in range(min(video_count, 5)):
+            target = video_locator.nth(idx)
+            try:
+                state = await target.evaluate(
+                    """
+                    el => ({
+                      currentTime: Number(el.currentTime || 0),
+                      paused: Boolean(el.paused),
+                      ended: Boolean(el.ended),
+                      readyState: Number(el.readyState || 0),
+                      videoWidth: Number(el.videoWidth || 0),
+                      videoHeight: Number(el.videoHeight || 0)
+                    })
+                    """
+                )
+            except Exception:
+                continue
+            if (
+                isinstance(state, dict)
+                and not bool(state.get('paused', True))
+                and not bool(state.get('ended', False))
+                and float(state.get('currentTime') or 0) > 0
+                and int(state.get('readyState') or 0) >= 2
+                and int(state.get('videoWidth') or 0) > 0
+                and int(state.get('videoHeight') or 0) > 0
+            ):
+                return
+
+        media_locator = page.locator('img, canvas, video')
+        media_count = await media_locator.count()
+        candidate_box = None
+        candidate_area = 0.0
+        for idx in range(min(media_count, 20)):
+            target = media_locator.nth(idx)
+            try:
+                if not await target.is_visible(timeout=300):
+                    continue
+                box = await target.bounding_box()
+                if not isinstance(box, dict):
+                    continue
+                width = float(box.get('width') or 0)
+                height = float(box.get('height') or 0)
+                if (
+                    float(box.get('x') or 0) >= 420
+                    and float(box.get('y') or 0) >= 140
+                    and width >= 600
+                    and height >= 320
+                ):
+                    area = width * height
+                    if area > candidate_area:
+                        candidate_area = area
+                        candidate_box = box
+            except Exception:
+                continue
+
+        if candidate_box is None:
+            raise AssertionError('stream is not active: no large visible media surface found')
+
+        # Confirm genuine playback by sampling the rendered media region for real
+        # motion. The loading markers are already gone at this point, so any
+        # animated loading spinner is no longer on screen; a live, decoding stream
+        # keeps producing new frames (its burned-in timestamp ticks every second),
+        # while a frozen single-frame snapshot, poster image, or stalled player
+        # yields identical samples. A clipped page screenshot is used because it
+        # composites GPU-backed canvas/video layers (an element screenshot can
+        # return a stale backing buffer). Network/websocket traffic is deliberately
+        # NOT used as a signal: data can keep arriving while buffering without the
+        # video ever decoding, which would be a false pass.
+        clip = {
+            'x': float(candidate_box.get('x') or 0),
+            'y': float(candidate_box.get('y') or 0),
+            'width': float(candidate_box.get('width') or 0),
+            'height': float(candidate_box.get('height') or 0),
+        }
+        sample_interval_ms = 1000
+        sample_deadline = time.monotonic() + min(max(timeout_ms, 12000), 20000) / 1000.0
+        hashes = set()
+        # Require several distinct frames so transient compression noise on an
+        # otherwise static image cannot be mistaken for live playback.
+        required_distinct = 3
+        while True:
+            screenshot_bytes = await page.screenshot(type='png', clip=clip)
+            hashes.add(hashlib.md5(screenshot_bytes).hexdigest())
+            if len(hashes) >= required_distinct:
+                return
+            if time.monotonic() >= sample_deadline:
+                break
+            await page.wait_for_timeout(sample_interval_ms)
+
+        raise AssertionError(
+            'stream is not active: rendered video did not advance '
+            f'(only {len(hashes)} distinct frame(s) across samples)'
+        )
 
     async def _bootstrap_pyuitest_session(self, page, step_callback):
         target_url, email, password = self._resolve_pyuitest_bootstrap()

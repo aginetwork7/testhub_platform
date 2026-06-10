@@ -62,6 +62,100 @@ class _TextPageStub:
         self.waited_ms = timeout
 
 
+class _VisibilityItemStub:
+    def __init__(self, visible: bool, box: dict[str, float] | None = None):
+        self._visible = visible
+        self._box = box
+
+    async def is_visible(self, timeout: int = 0) -> bool:
+        return self._visible
+
+    async def bounding_box(self) -> dict[str, float] | None:
+        return self._box
+
+
+class _VisibilityLocatorStub:
+    def __init__(self, items: list[_VisibilityItemStub]):
+        self._items = items
+
+    async def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> _VisibilityItemStub:
+        return self._items[index]
+
+
+class _VisibilityPageStub:
+    def __init__(self, mapping: dict[str, _VisibilityLocatorStub]):
+        self._mapping = mapping
+
+    def locator(self, selector: str) -> _VisibilityLocatorStub:
+        return self._mapping.get(selector, _VisibilityLocatorStub([]))
+
+
+class _TextMatchStub:
+    def __init__(self, count: int = 0, visible: bool = False):
+        self._count = count
+        self._visible = visible
+        self.first = self
+
+    async def count(self) -> int:
+        return self._count
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+
+class _StreamMediaItemStub:
+    def __init__(self, visible: bool, box: dict[str, float] | None = None, screenshot_bytes: list[bytes] | None = None, eval_result: dict | None = None):
+        self._visible = visible
+        self._box = box
+        self._screenshot_bytes = screenshot_bytes or [b'static']
+        self._eval_result = eval_result or {}
+        self._screenshot_index = 0
+
+    async def is_visible(self, timeout: int = 0) -> bool:
+        return self._visible
+
+    async def bounding_box(self) -> dict[str, float] | None:
+        return self._box
+
+    async def evaluate(self, _script: str):
+        return self._eval_result
+
+    async def screenshot(self, type: str = 'png') -> bytes:
+        result = self._screenshot_bytes[min(self._screenshot_index, len(self._screenshot_bytes) - 1)]
+        self._screenshot_index += 1
+        return result
+
+
+class _StreamLocatorStub:
+    def __init__(self, items: list[_StreamMediaItemStub]):
+        self._items = items
+
+    async def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> _StreamMediaItemStub:
+        return self._items[index]
+
+
+class _StreamPageStub:
+    def __init__(self, locator_mapping: dict[str, _StreamLocatorStub], text_mapping: dict[str, _TextMatchStub] | None = None):
+        self._locator_mapping = locator_mapping
+        self._text_mapping = text_mapping or {}
+        self.wait_calls: list[int] = []
+
+    def locator(self, selector: str) -> _StreamLocatorStub:
+        return self._locator_mapping.get(selector, _StreamLocatorStub([]))
+
+    def get_by_text(self, text: str, exact: bool = False) -> _TextMatchStub:
+        return self._text_mapping.get(text, _TextMatchStub())
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        self.wait_calls.append(timeout)
+
+
 class PyUICompatRuntimeTests(SimpleTestCase):
     def test_store_and_load_cached_ai_actions(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
@@ -636,16 +730,14 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                     'action': 'assert',
                     'assert_kind': 'selector_non_empty',
                     'selector_candidates': [
-                        "[class*='site'] [class*='item']",
-                        "[class*='site-item']",
-                        "[class*='list'] [class*='item']",
-                        "[class*='card']",
-                        "[role='row']",
+                        '#btnSite',
+                        "button[id='btnSite']",
+                        "[id='btnSite']",
                     ],
                     'min_count': 1,
-                    'min_x': 160,
+                    'min_x': 80,
                     'min_y': 120,
-                    'min_width': 40,
+                    'min_width': 120,
                     'min_height': 20,
                     'param': 'site_list',
                     'expected': 'True',
@@ -722,16 +814,165 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             ],
         )
         self.assertEqual(
+            agent._fallback_actions_for_step({'description': '断言当前页面展示出该摄像头的实时视频流'}),
+            [
+                {
+                    'action': 'assert',
+                    'assert_kind': 'stream_active',
+                    'param': 'stream_view',
+                    'expected': 'True',
+                    'reason': 'fallback deterministic active stream assertion',
+                }
+            ],
+        )
+        self.assertEqual(
             agent._fallback_actions_for_step({'description': '点击页面正下方的视频流关闭按钮, 该按钮为带盖垃圾桶形状'}),
             [
                 {
                     'action': 'click',
-                    'loc': '(1120,834)',
+                    'loc': '(1154,834)',
                     'param': 'stream close button',
                     'reason': 'fallback deterministic stream close button click',
                 }
             ],
         )
+        self.assertEqual(
+            agent._fallback_actions_for_step({'description': '断言实时视频流页面关闭'}),
+            [
+                {
+                    'action': 'assert',
+                    'assert_kind': 'selector_non_empty',
+                    'selector_candidates': [
+                        'video',
+                        'canvas',
+                        "[class*='stream']",
+                        "[class*='player']",
+                        "[class*='live']",
+                    ],
+                    'min_count': 1,
+                    'min_x': 420,
+                    'min_y': 140,
+                    'min_width': 600,
+                    'min_height': 320,
+                    'param': 'stream_view',
+                    'expected': 'False',
+                    'reason': 'fallback deterministic stream view closed assertion',
+                }
+            ],
+        )
+
+    def test_execute_step_selector_non_empty_applies_geometry_constraints(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_005')
+        page = _VisibilityPageStub(
+            {
+                'video': _VisibilityLocatorStub([
+                    _VisibilityItemStub(True, {'x': 120, 'y': 180, 'width': 180, 'height': 110}),
+                ]),
+                'canvas': _VisibilityLocatorStub([
+                    _VisibilityItemStub(True, {'x': 480, 'y': 180, 'width': 920, 'height': 520}),
+                ]),
+            }
+        )
+
+        asyncio.run(
+            agent._execute_step(
+                page,
+                {
+                    'action': 'assert',
+                    'assert_kind': 'selector_non_empty',
+                    'selector_candidates': ['video', 'canvas'],
+                    'min_count': 1,
+                    'min_x': 420,
+                    'min_y': 140,
+                    'min_width': 600,
+                    'min_height': 320,
+                    'expected': 'True',
+                },
+                timeout_error=TimeoutError,
+            )
+        )
+
+    def test_execute_step_selector_non_empty_supports_expected_false(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_005')
+        page = _VisibilityPageStub(
+            {
+                'video': _VisibilityLocatorStub([
+                    _VisibilityItemStub(True, {'x': 480, 'y': 180, 'width': 920, 'height': 520}),
+                ]),
+            }
+        )
+
+        with self.assertRaisesRegex(AssertionError, 'expected no visible matches'):
+            asyncio.run(
+                agent._execute_step(
+                    page,
+                    {
+                        'action': 'assert',
+                        'assert_kind': 'selector_non_empty',
+                        'selector_candidates': ['video'],
+                        'min_count': 1,
+                        'min_x': 420,
+                        'min_y': 140,
+                        'min_width': 600,
+                        'min_height': 320,
+                        'expected': 'False',
+                    },
+                    timeout_error=TimeoutError,
+                )
+            )
+
+    def test_assert_stream_active_rejects_static_preview(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_005')
+        page = _StreamPageStub(
+            {
+                'video': _StreamLocatorStub([
+                    _StreamMediaItemStub(
+                        visible=False,
+                        eval_result={
+                            'currentTime': 0,
+                            'paused': True,
+                            'ended': False,
+                            'readyState': 0,
+                            'videoWidth': 0,
+                            'videoHeight': 0,
+                        },
+                    )
+                ]),
+                'img, canvas, video': _StreamLocatorStub([
+                    _StreamMediaItemStub(
+                        visible=True,
+                        box={'x': 480, 'y': 180, 'width': 900, 'height': 500},
+                        screenshot_bytes=[b'same-frame', b'same-frame', b'same-frame'],
+                    )
+                ]),
+            }
+        )
+
+        with self.assertRaisesRegex(AssertionError, 'stream preview did not change'):
+            asyncio.run(agent._assert_stream_active(page, 4000))
+
+    def test_assert_stream_active_accepts_playing_video(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_005')
+        page = _StreamPageStub(
+            {
+                'video': _StreamLocatorStub([
+                    _StreamMediaItemStub(
+                        visible=False,
+                        eval_result={
+                            'currentTime': 1.25,
+                            'paused': False,
+                            'ended': False,
+                            'readyState': 4,
+                            'videoWidth': 1920,
+                            'videoHeight': 1080,
+                        },
+                    )
+                ]),
+                'img, canvas, video': _StreamLocatorStub([]),
+            }
+        )
+
+        asyncio.run(agent._assert_stream_active(page, 4000))
 
     def test_normalize_step_preserves_executor_fields(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')

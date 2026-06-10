@@ -696,15 +696,15 @@ export default {
         ElMessage.info(this.$t('generatedTestCases.generatingWait'))
         return
       }
-      
-      if (task.status === 'completed') {
-        // 在新标签页打开任务详情
-        const url = this.$router.resolve({
-          name: 'TaskDetail',
-          params: { taskId: task.task_id }
-        }).href
-        window.open(url, '_blank')
+
+      if (!task?.task_id) {
+        return
       }
+
+      this.$router.push({
+        name: 'TaskDetail',
+        params: { taskId: task.task_id }
+      })
     },
 
     async batchAdoptTask(task) {
