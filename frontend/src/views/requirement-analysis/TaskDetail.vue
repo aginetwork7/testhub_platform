@@ -126,9 +126,39 @@
             </div>
             <div class="body-cell">
               <div class="action-buttons">
-                <button class="view-btn" @click="viewCaseDetail(testCase, index)">{{ $t('taskDetail.viewDetail') }}</button>
-                <button class="adopt-btn" @click="adoptSingleCase(testCase, index)">{{ $t('taskDetail.adopt') }}</button>
-                <button class="discard-btn" @click="discardSingleCase(testCase, index)">{{ $t('taskDetail.discard') }}</button>
+                <el-tooltip :content="$t('taskDetail.viewDetail')" placement="top">
+                  <button
+                    class="view-btn icon-only-btn"
+                    :aria-label="$t('taskDetail.viewDetail')"
+                    @click="viewCaseDetail(testCase, index)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="action-icon">
+                      <path d="M12 5c5.23 0 9.27 4.11 10.6 6.12a1.5 1.5 0 0 1 0 1.76C21.27 14.89 17.23 19 12 19S2.73 14.89 1.4 12.88a1.5 1.5 0 0 1 0-1.76C2.73 9.11 6.77 5 12 5Zm0 2C8.12 7 4.9 9.88 3.45 12 4.9 14.12 8.12 17 12 17s7.1-2.88 8.55-5C19.1 9.88 15.88 7 12 7Zm0 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z" fill="currentColor"/>
+                    </svg>
+                  </button>
+                </el-tooltip>
+                <el-tooltip :content="$t('taskDetail.adopt')" placement="top">
+                  <button
+                    class="adopt-btn icon-only-btn"
+                    :aria-label="$t('taskDetail.adopt')"
+                    @click="adoptSingleCase(testCase, index)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="action-icon">
+                      <path d="M9.55 16.6 5.3 12.35l1.4-1.4 2.85 2.84 7.75-7.74 1.4 1.4-9.15 9.15Z" fill="currentColor"/>
+                    </svg>
+                  </button>
+                </el-tooltip>
+                <el-tooltip :content="$t('taskDetail.discard')" placement="top">
+                  <button
+                    class="discard-btn icon-only-btn"
+                    :aria-label="$t('taskDetail.discard')"
+                    @click="discardSingleCase(testCase, index)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="action-icon">
+                      <path d="M7 7h10v2H7V7Zm1 3h8l-.7 9.1A2 2 0 0 1 13.3 21h-2.6a2 2 0 0 1-1.99-1.9L8 10Zm2-5h4l1 1h4v2H5V6h4l1-1Z" fill="currentColor"/>
+                    </svg>
+                  </button>
+                </el-tooltip>
               </div>
             </div>
           </div>
@@ -1349,8 +1379,24 @@ export default {
 
 .action-buttons {
   display: flex;
-  gap: 5px;
+  gap: 8px;
+  align-items: center;
   flex-wrap: wrap;
+
+.icon-only-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.action-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
 }
 
 .view-btn, .adopt-btn, .discard-btn {

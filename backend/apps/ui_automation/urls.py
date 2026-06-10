@@ -15,6 +15,7 @@ from .views import (
     TestCaseViewSet,
     TestCaseStepViewSet,
     TestCaseExecutionViewSet,
+    RecordingSessionViewSet,
     OperationRecordViewSet,
     UiNotificationLogViewSet,
     dashboard_stats
@@ -33,6 +34,7 @@ router.register(r'test-executions', TestExecutionViewSet)
 router.register(r'test-cases', TestCaseViewSet)
 router.register(r'test-case-steps', TestCaseStepViewSet)
 router.register(r'test-case-executions', TestCaseExecutionViewSet)
+router.register(r'recordings', RecordingSessionViewSet)
 router.register(r'ui-notification-logs', UiNotificationLogViewSet)
 router.register(r'operation-records', OperationRecordViewSet)
 router.register(r'config/environment', EnvironmentConfigViewSet, basename='ui-environment-config')

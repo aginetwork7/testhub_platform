@@ -710,6 +710,56 @@ class TestCaseExecution(models.Model):
         return f"{self.test_case.name} - {self.created_at.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
+class RecordingSession(models.Model):
+    """Playwright codegen 录制会话模型"""
+
+    STATUS_CHOICES = [
+        ('created', '已创建'),
+        ('uploaded', '已上传'),
+        ('parsed', '已解析'),
+        ('imported', '已导入'),
+        ('cancelled', '已取消'),
+        ('failed', '失败'),
+    ]
+
+    IMPORT_TARGET_CHOICES = [
+        ('script', '仅脚本'),
+        ('test_case', '仅测试用例'),
+        ('both', '脚本和测试用例'),
+    ]
+
+    project = models.ForeignKey(UiProject, on_delete=models.CASCADE, related_name='recording_sessions', verbose_name='所属项目')
+    name = models.CharField(max_length=200, verbose_name='录制名称')
+    base_url = models.URLField(verbose_name='录制入口URL')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='created', verbose_name='录制状态')
+    browser = models.CharField(max_length=20, default='chromium', verbose_name='浏览器类型')
+    target_language = models.CharField(max_length=20, default='python', verbose_name='目标语言')
+    framework = models.CharField(max_length=20, default='playwright', verbose_name='执行框架')
+    import_target = models.CharField(max_length=20, choices=IMPORT_TARGET_CHOICES, default='both', verbose_name='导入目标')
+    raw_script = models.TextField(blank=True, verbose_name='原始录制脚本')
+    parsed_steps = models.JSONField(default=list, blank=True, verbose_name='解析后的步骤')
+    error_message = models.TextField(blank=True, verbose_name='错误信息')
+    started_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ui_recording_sessions', verbose_name='发起人')
+    started_at = models.DateTimeField(auto_now_add=True, verbose_name='发起时间')
+    finished_at = models.DateTimeField(null=True, blank=True, verbose_name='结束时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ui_recording_sessions'
+        verbose_name = 'UI录制会话'
+        verbose_name_plural = 'UI录制会话'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['project', '-created_at']),
+            models.Index(fields=['started_by', '-created_at']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.project.name} - {self.name}"
+
+
 class OperationRecord(models.Model):
     """操作记录模型"""
     OPERATION_TYPE_CHOICES = [

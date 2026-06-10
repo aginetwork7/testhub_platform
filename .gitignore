@@ -27,6 +27,8 @@ logs/*
 !logs/*/
 logs/*/*
 !logs/*/.gitkeep
+backend/backend/logs/*
+!backend/backend/logs/.gitkeep
 .sql
 .bak
 # 保留数据工厂静态文件目录、忽略内容
@@ -43,9 +45,13 @@ expand/media/allure-static/*
 expand/media/ai_recording/*
 !expand/media/ai_recording/.gitkeep
 
-# 忽略需求文档上传的文件，但保留.gitkeep
-expand/document/requirement_docs/*
-!expand/document/requirement_docs/.gitkeep
+# 忽略根目录 media 下的运行产物
+media/*
+!media/.gitkeep
+
+# 忽略 Data/PRD 下的归档文档，但保留.gitkeep
+Data/PRD/*
+!Data/PRD/.gitkeep
 
 # 忽略接口测试运行时产生的 Allure 报告文件，但保留.gitkeep文件
 expand/media/api_testing/allure-results/*
@@ -89,3 +95,5 @@ frontend/.DS_Store
 frontend/*.log
 frontend/dist/
 
+# reference:
+pyuitest/

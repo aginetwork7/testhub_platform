@@ -6,6 +6,10 @@
         <el-select v-model="projectId" :placeholder="t('uiAutomation.project.selectProject')" style="width: 200px; margin-right: 15px" @change="onProjectChange">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
+        <el-button @click="openImportDialog">
+          <el-icon><Upload /></el-icon>
+          批量导入
+        </el-button>
         <el-button type="primary" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
           {{ t('uiAutomation.testCase.newTestCase') }}
@@ -308,18 +312,23 @@
           <div v-if="executionResult" class="execution-result" v-show="!showSteps">
             <div class="result-header">
               <h4>{{ t('uiAutomation.testCase.executionResult') }}</h4>
-              <el-tag :type="executionResult.success ? 'success' : 'danger'">
-                {{ executionResult.success ? t('uiAutomation.testCase.executionSuccess') : t('uiAutomation.testCase.executionFailed') }}
+              <el-tag :type="getExecutionTagType(executionResult)">
+                {{ getExecutionStatusText(executionResult) }}
               </el-tag>
             </div>
             <div class="result-content">
               <el-tabs v-model="resultActiveTab">
                 <el-tab-pane :label="t('uiAutomation.testCase.executionLogs')" name="logs">
                   <div class="logs-container">
-                    <div v-if="parsedExecutionLogs.length > 0">
-                      <div v-for="(step, index) in parsedExecutionLogs" :key="index" class="log-item">
+                    <div v-if="timelineLogs.length > 0" class="timeline-container">
+                      <div v-for="(line, index) in timelineLogs" :key="`timeline-${index}`" class="timeline-line">
+                        {{ line }}
+                      </div>
+                    </div>
+                    <div v-if="displayStepLogs.length > 0">
+                      <div v-for="(step, index) in displayStepLogs" :key="index" class="log-item">
                         <div class="log-header">
-                          <el-tag :type="step.success ? 'success' : 'danger'" size="small">
+                          <el-tag :type="getStepTagType(step)" size="small">
                             {{ t('uiAutomation.testCase.step') }} {{ step.step_number }}
                           </el-tag>
                           <span class="log-action">{{ getActionText(step.action_type) }}</span>
@@ -331,7 +340,7 @@
                         </div>
                       </div>
                     </div>
-                    <el-empty :description="t('uiAutomation.testCase.noLogs')" />
+                    <el-empty v-if="timelineLogs.length === 0 && displayStepLogs.length === 0" :description="t('uiAutomation.testCase.noLogs')" />
                   </div>
                 </el-tab-pane>
                 <el-tab-pane :label="t('uiAutomation.testCase.failedScreenshots')" name="screenshots" v-if="executionResult.screenshots && executionResult.screenshots.length > 0">
@@ -518,6 +527,35 @@
       v-model="showDataFactorySelector"
       @select="handleDataFactorySelect"
     />
+
+    <el-dialog
+      v-model="showImportDialog"
+      title="批量导入测试用例"
+      width="760px"
+      :close-on-click-modal="false"
+    >
+      <div class="import-dialog">
+        <p style="margin-top: 0; color: #606266; line-height: 1.7;">
+          请输入 JSON 数组。每个用例至少包含 <code>name</code>，步骤中可使用 <code>element_id</code> 或 <code>element_name</code>。
+        </p>
+        <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+          <span style="color: #909399; font-size: 13px;">可先载入标准母版，再按项目实际元素名和断言值微调。</span>
+          <el-button text type="primary" @click="loadImportTemplate">载入示例模板</el-button>
+        </div>
+        <el-input
+          v-model="importJsonText"
+          type="textarea"
+          :rows="18"
+          :placeholder="batchImportTemplate"
+        />
+      </div>
+      <template #footer>
+        <span class="dialog-footer">
+          <el-button @click="showImportDialog = false">{{ t('uiAutomation.common.cancel') }}</el-button>
+          <el-button type="primary" :loading="importingCases" @click="submitBatchImport">开始导入</el-button>
+        </span>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -525,7 +563,7 @@
 import { ref, reactive, computed, onMounted, onActivated, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Search, Plus, Edit, Delete, Check, CaretRight, ArrowUp, ArrowDown, Rank, Picture, Warning, View, ZoomIn, Refresh, WarningFilled, MagicStick
+  Search, Plus, Edit, Delete, Check, CaretRight, ArrowUp, ArrowDown, Rank, Picture, Warning, View, ZoomIn, Refresh, WarningFilled, MagicStick, Upload
 } from '@element-plus/icons-vue'
 import draggable from 'vuedraggable'
 import DataFactorySelector from '@/components/DataFactorySelector.vue'
@@ -542,6 +580,7 @@ import {
   getTestCases,
   runTestCase as runTestCaseApi,
   copyTestCase as copyTestCaseApi,
+  batchImportTestCases,
   getLocatorStrategies
 } from '@/api/ui_automation'
 import { getVariableFunctions } from '@/api/data-factory'
@@ -565,7 +604,7 @@ const currentScreenshot = ref(null)
 const isRunning = ref(false)
 const selectedEngine = ref('playwright')  // 默认使用Playwright
 const selectedBrowser = ref('chrome')  // 默认使用Chrome
-const headlessMode = ref(false)  // 默认使用有头模式
+const headlessMode = ref(true)  // Docker 环境默认使用无头模式
 const showVariableHelper = ref(false)
 const currentEditingStep = ref(null)
 const currentEditingField = ref('')
@@ -574,6 +613,59 @@ const currentStepForDataFactory = ref(null)
 const currentFieldForDataFactory = ref('')
 const variableCategories = ref([])
 const loading = ref(false)
+const showImportDialog = ref(false)
+const importJsonText = ref('')
+const importingCases = ref(false)
+const batchImportTemplate = JSON.stringify([
+  {
+    name: '登录成功',
+    description: '使用标准账号登录并进入工作台',
+    priority: 'high',
+    steps: [
+      { action_type: 'waitFor', element_name: '登录页_账号输入框', wait_time: 10000 },
+      { action_type: 'fill', element_name: '登录页_账号输入框', input_value: 'demo@example.com' },
+      { action_type: 'fill', element_name: '登录页_密码输入框', input_value: '123456' },
+      { action_type: 'click', element_name: '登录页_登录按钮' },
+      { action_type: 'assert', assert_type: 'urlContains', assert_value: '/dashboard' }
+    ]
+  },
+  {
+    name: '列表查询',
+    description: '输入关键词并校验查询结果区域可见',
+    priority: 'medium',
+    steps: [
+      { action_type: 'waitFor', element_name: '用户列表页_查询输入框', wait_time: 10000 },
+      { action_type: 'fill', element_name: '用户列表页_查询输入框', input_value: '张三' },
+      { action_type: 'click', element_name: '用户列表页_查询按钮' },
+      { action_type: 'wait', wait_time: 1000 },
+      { action_type: 'assert', element_name: '用户列表页_结果区域', assert_type: 'isVisible', assert_value: 'true' }
+    ]
+  },
+  {
+    name: '表单新增',
+    description: '打开新增弹窗并提交表单',
+    priority: 'high',
+    steps: [
+      { action_type: 'click', element_name: '用户列表页_新增按钮' },
+      { action_type: 'waitFor', element_name: '用户编辑弹窗_姓名输入框', wait_time: 10000 },
+      { action_type: 'fill', element_name: '用户编辑弹窗_姓名输入框', input_value: '自动化新增用户' },
+      { action_type: 'fill', element_name: '用户编辑弹窗_手机号输入框', input_value: '13800138000' },
+      { action_type: 'click', element_name: '用户编辑弹窗_确认按钮' },
+      { action_type: 'assert', element_name: '全局_成功提示', assert_type: 'textContains', assert_value: '成功' }
+    ]
+  },
+  {
+    name: '列表删除',
+    description: '删除首行记录并校验成功提示',
+    priority: 'medium',
+    steps: [
+      { action_type: 'click', element_name: '用户列表页_首行删除按钮' },
+      { action_type: 'waitFor', element_name: '确认弹窗_确认按钮', wait_time: 10000 },
+      { action_type: 'click', element_name: '确认弹窗_确认按钮' },
+      { action_type: 'assert', element_name: '全局_成功提示', assert_type: 'textContains', assert_value: '成功' }
+    ]
+  }
+], null, 2)
 
 
 
@@ -595,16 +687,35 @@ const filteredTestCases = computed(() => {
 
 // 解析执行日志
 const parsedExecutionLogs = computed(() => {
-  if (!executionResult.value || !executionResult.value.logs) return []
+  if (!executionResult.value) return []
+  const logSource = executionResult.value.step_results || executionResult.value.logs
+  if (!logSource) return []
   try {
-    return typeof executionResult.value.logs === 'string'
-      ? JSON.parse(executionResult.value.logs)
-      : executionResult.value.logs
+    const parsedLogs = typeof logSource === 'string'
+      ? JSON.parse(logSource)
+      : logSource
+    return Array.isArray(parsedLogs) && parsedLogs.every(item => typeof item === 'object' && item !== null)
+      ? parsedLogs
+      : []
   } catch (e) {
     console.error('解析执行日志失败:', e)
     return []
   }
 })
+
+const timelineLogs = computed(() => {
+  if (!executionResult.value) return []
+  const source = executionResult.value.timeline_logs
+  if (Array.isArray(source)) {
+    return source
+  }
+  if (typeof source === 'string' && source.trim()) {
+    return source.split('\n')
+  }
+  return []
+})
+
+const displayStepLogs = computed(() => parsedExecutionLogs.value)
 
 // 获取所有不重复的页面列表（用于页面筛选）
 const uniquePages = computed(() => {
@@ -665,6 +776,18 @@ const onProjectChange = async () => {
     loadTestCases(),
     loadElements()
   ])
+}
+
+const openImportDialog = () => {
+  if (!projectId.value) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+  showImportDialog.value = true
+}
+
+const loadImportTemplate = () => {
+  importJsonText.value = batchImportTemplate
 }
 
 const selectTestCase = (testCase) => {
@@ -820,6 +943,30 @@ const runTestCase = async (testCase) => {
     const modeText = headlessMode.value ? t('uiAutomation.testCase.runMode.headless') : t('uiAutomation.testCase.runMode.headed')
     ElMessage.info(t('uiAutomation.testCase.run.start', { engine: selectedEngine.value.toUpperCase(), browser: selectedBrowser.value.toUpperCase(), mode: modeText }))
 
+    executionResult.value = {
+      status: 'running',
+      success: false,
+      timeline_logs: [
+        `开始执行用例: ${testCase.name}`,
+        `执行引擎: ${selectedEngine.value.toUpperCase()}`,
+        `浏览器: ${selectedBrowser.value.toUpperCase()}`,
+        `执行模式: ${modeText}`,
+        '正在初始化浏览器并加载页面...'
+      ],
+      step_results: currentSteps.value.map((step, index) => ({
+        step_number: index + 1,
+        action_type: step.action_type,
+        description: step.description || '',
+        success: null,
+        error: null
+      })),
+      screenshots: [],
+      execution_time: 0,
+      errors: []
+    }
+    resultActiveTab.value = 'logs'
+    showSteps.value = false
+
     const response = await runTestCaseApi(testCase.id, {
       project_id: projectId.value,
       engine: selectedEngine.value,
@@ -827,7 +974,10 @@ const runTestCase = async (testCase) => {
       headless: headlessMode.value
     })
 
-    executionResult.value = response.data
+    executionResult.value = {
+      ...response.data,
+      status: response.data.status || (response.data.success ? 'passed' : 'failed')
+    }
     resultActiveTab.value = 'logs'
     showSteps.value = false  // 自动切换到结果视图
 
@@ -858,8 +1008,11 @@ const runTestCase = async (testCase) => {
     }]
 
     executionResult.value = {
+      status: 'failed',
       success: false,
       logs: errorLogs,
+      timeline_logs: Array.isArray(errorLogs) ? errorLogs : String(errorLogs).split('\n'),
+      step_results: [],
       screenshots: error.response?.data?.screenshots || [],
       execution_time: 0,
       errors: errors
@@ -871,6 +1024,24 @@ const runTestCase = async (testCase) => {
   } finally {
     isRunning.value = false
   }
+}
+
+const getExecutionTagType = (result) => {
+  if (!result || result.status === 'failed') return 'danger'
+  if (result.status === 'running') return 'warning'
+  return 'success'
+}
+
+const getExecutionStatusText = (result) => {
+  if (!result) return t('uiAutomation.testCase.executionFailed')
+  if (result.status === 'running') return '执行中'
+  return result.success ? t('uiAutomation.testCase.executionSuccess') : t('uiAutomation.testCase.executionFailed')
+}
+
+const getStepTagType = (step) => {
+  if (step?.success === true) return 'success'
+  if (step?.success === false) return 'danger'
+  return 'info'
 }
 
 const toggleView = () => {
@@ -1169,6 +1340,64 @@ const saveTestCaseForm = async () => {
   } catch (error) {
     console.error('保存测试用例失败:', error)
     ElMessage.error(t('uiAutomation.testCase.save.failed'))
+  }
+}
+
+const submitBatchImport = async () => {
+  if (!projectId.value) {
+    ElMessage.warning('请先选择项目')
+    return
+  }
+
+  if (!importJsonText.value.trim()) {
+    ElMessage.warning('请输入要导入的测试用例 JSON')
+    return
+  }
+
+  let parsedCases = []
+  try {
+    parsedCases = JSON.parse(importJsonText.value)
+  } catch (error) {
+    ElMessage.error('JSON 格式无效，请检查后重试')
+    return
+  }
+
+  if (!Array.isArray(parsedCases) || parsedCases.length === 0) {
+    ElMessage.warning('导入内容必须是非空 JSON 数组')
+    return
+  }
+
+  importingCases.value = true
+  try {
+    const response = await batchImportTestCases({
+      project_id: projectId.value,
+      test_cases: parsedCases
+    })
+
+    const createdCount = response.data?.created_count || 0
+    const failedCount = response.data?.failed_count || 0
+
+    await loadTestCases()
+
+    if (createdCount > 0 && failedCount === 0) {
+      ElMessage.success(`成功导入 ${createdCount} 条测试用例`)
+    } else if (createdCount > 0 && failedCount > 0) {
+      const firstError = response.data?.failed_cases?.[0]?.error || '部分导入失败'
+      ElMessage.warning(`成功导入 ${createdCount} 条，失败 ${failedCount} 条。首个错误：${firstError}`)
+    } else {
+      const firstError = response.data?.failed_cases?.[0]?.error || '导入失败'
+      ElMessage.error(firstError)
+    }
+
+    if (createdCount > 0) {
+      showImportDialog.value = false
+      importJsonText.value = ''
+    }
+  } catch (error) {
+    console.error('批量导入测试用例失败:', error)
+    ElMessage.error(error.response?.data?.error || '批量导入失败')
+  } finally {
+    importingCases.value = false
   }
 }
 
@@ -1629,6 +1858,26 @@ onActivated(async () => {
   background: #f5f7fa;
   padding: 15px;
   border-radius: 4px;
+}
+
+.timeline-container {
+  margin-bottom: 15px;
+  padding: 12px;
+  background: #111827;
+  color: #e5e7eb;
+  border-radius: 6px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.timeline-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.timeline-line + .timeline-line {
+  margin-top: 4px;
 }
 
 .log-item {

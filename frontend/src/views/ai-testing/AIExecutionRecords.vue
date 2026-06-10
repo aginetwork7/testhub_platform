@@ -3,8 +3,8 @@
     <div class="page-header">
       <h1 class="page-title">{{ $t('uiAutomation.ai.executionRecords.title') }}</h1>
       <div class="header-actions">
-        <el-select v-model="projectId" :placeholder="$t('uiAutomation.project.selectProject')" style="width: 200px; margin-right: 15px" @change="onProjectChange">
-          <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+        <el-select v-model="projectId" placeholder="ALL" style="width: 220px; margin-right: 15px" @change="onProjectChange">
+          <el-option v-for="project in projectOptions" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
         <el-button
           type="danger"
@@ -33,6 +33,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="case_name" :label="$t('uiAutomation.ai.executionRecords.caseName')" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="project_name" label="项目" min-width="140" show-overflow-tooltip />
         <el-table-column label="执行模式" width="120">
           <template #default="{ row }">
             <el-tag :type="getExecutionModeTag(row.execution_mode)">
@@ -81,7 +82,12 @@
     </div>
 
     <!-- 详情对话框 -->
-    <el-dialog v-model="showDetailDialog" :title="$t('uiAutomation.ai.executionRecords.executionDetail')" width="800px">
+    <el-dialog
+      v-model="showDetailDialog"
+      :title="$t('uiAutomation.ai.executionRecords.executionDetail')"
+      width="800px"
+      @close="handleDetailDialogClose"
+    >
       <div v-if="currentRecord" class="record-detail">
         <div class="detail-item">
           <span class="label">{{ $t('uiAutomation.ai.executionRecords.caseName') }}:</span>
@@ -144,16 +150,18 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete } from '@element-plus/icons-vue'
-import { getAIExecutionRecords, batchDeleteAIExecutionRecords, getAiProjects } from '@/api/ai-testing'
+import { getAIExecutionRecord, getAIExecutionRecords, batchDeleteAIExecutionRecords, getAiProjects } from '@/api/ai-testing'
 import AIExecutionReport from './AIExecutionReport.vue'
 
 const { t } = useI18n()
 const projects = ref([])
-const projectId = ref('')
+const ALL_PROJECT_VALUE = '__ALL__'
+const UNARCHIVED_PROJECT_VALUE = '__UNARCHIVED__'
+const projectId = ref(ALL_PROJECT_VALUE)
 const records = ref([])
 const loading = ref(false)
 const total = ref(0)
@@ -165,6 +173,7 @@ const pagination = reactive({
 const showDetailDialog = ref(false)
 const currentRecord = ref(null)
 let pollTimer = null
+let detailPollTimer = null
 
 const selectedRecords = ref([])
 const isDeleting = ref(false)
@@ -173,6 +182,12 @@ const tableRef = ref(null)
 // 报告相关状态
 const showReportDialog = ref(false)
 const reportRecordId = ref(null)
+
+const projectOptions = computed(() => [
+  { id: ALL_PROJECT_VALUE, name: 'ALL' },
+  { id: UNARCHIVED_PROJECT_VALUE, name: '未归档' },
+  ...projects.value,
+])
 
 // 加载项目列表
 const loadProjects = async () => {
@@ -190,18 +205,24 @@ const onProjectChange = () => {
   loadRecords()
 }
 
-// 加载记录列表
-const loadRecords = async () => {
-  if (!projectId.value) {
-    records.value = []
-    total.value = 0
-    return
+const buildRecordQueryParams = () => {
+  if (projectId.value === UNARCHIVED_PROJECT_VALUE) {
+    return { project_scope: 'unarchived' }
   }
 
+  if (projectId.value && projectId.value !== ALL_PROJECT_VALUE) {
+    return { project: projectId.value }
+  }
+
+  return {}
+}
+
+// 加载记录列表
+const loadRecords = async () => {
   loading.value = true
   try {
     const response = await getAIExecutionRecords({
-      project: projectId.value,
+      ...buildRecordQueryParams(),
       page: pagination.currentPage,
       page_size: pagination.pageSize
     })
@@ -229,9 +250,67 @@ const handleCurrentChange = () => {
   loadRecords()
 }
 
-const viewDetail = (row) => {
+const syncRecordInList = (record) => {
+  const index = records.value.findIndex(item => item.id === record.id)
+  if (index >= 0) {
+    records.value[index] = {
+      ...records.value[index],
+      ...record
+    }
+  }
+}
+
+const loadRecordDetail = async (recordId, { silent = false } = {}) => {
+  try {
+    const response = await getAIExecutionRecord(recordId)
+    const record = response.data
+    currentRecord.value = record
+    syncRecordInList(record)
+    return record
+  } catch (error) {
+    if (!silent) {
+      console.error('获取执行记录详情失败:', error)
+      ElMessage.error(t('uiAutomation.ai.executionRecords.messages.loadFailed'))
+    }
+    return null
+  }
+}
+
+const stopDetailPolling = () => {
+  if (detailPollTimer) {
+    clearInterval(detailPollTimer)
+    detailPollTimer = null
+  }
+}
+
+const startDetailPolling = () => {
+  stopDetailPolling()
+
+  detailPollTimer = setInterval(async () => {
+    if (!showDetailDialog.value || !currentRecord.value?.id) {
+      stopDetailPolling()
+      return
+    }
+
+    const status = currentRecord.value.status
+    if (status !== 'running' && status !== 'pending') {
+      stopDetailPolling()
+      return
+    }
+
+    await loadRecordDetail(currentRecord.value.id, { silent: true })
+  }, 3000)
+}
+
+const viewDetail = async (row) => {
   currentRecord.value = row
   showDetailDialog.value = true
+  await loadRecordDetail(row.id, { silent: true })
+  startDetailPolling()
+}
+
+const handleDetailDialogClose = () => {
+  stopDetailPolling()
 }
 
 // 查看报告
@@ -274,12 +353,18 @@ const getExecutionModeText = (executionMode) => {
   if (executionMode === 'hermes') {
     return t('uiAutomation.ai.executionRecords.hermesMode')
   }
+  if (executionMode === 'planner_v2') {
+    return t('uiAutomation.ai.executionRecords.plannerV2Mode')
+  }
   return t('uiAutomation.ai.executionRecords.browserMode')
 }
 
 const getExecutionModeTag = (executionMode) => {
   if (executionMode === 'hermes') {
     return 'success'
+  }
+  if (executionMode === 'planner_v2') {
+    return 'warning'
   }
   return 'info'
 }
@@ -351,6 +436,7 @@ const startPolling = () => {
 
       // 静默刷新，不显示 loading
       getAIExecutionRecords({
+        ...buildRecordQueryParams(),
         page: 1,
         page_size: pagination.pageSize
       }).then(response => {
@@ -366,14 +452,12 @@ const startPolling = () => {
 
 onMounted(async () => {
   await loadProjects()
-  if (projects.value.length > 0) {
-    projectId.value = projects.value[0].id
-    loadRecords()
-  }
+  loadRecords()
   startPolling()
 })
 
 onUnmounted(() => {
+  stopDetailPolling()
   if (pollTimer) {
     clearInterval(pollTimer)
   }

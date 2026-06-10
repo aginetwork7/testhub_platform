@@ -3,13 +3,23 @@
     <div class="page-header">
       <h1 class="page-title">{{ $t('uiAutomation.ai.caseList.title') }}</h1>
       <div class="header-actions">
+        <el-button type="primary" style="margin-right: 15px" @click="openCreateDialog">
+          <el-icon><Plus /></el-icon>
+          {{ $t('uiAutomation.ai.caseList.newCase') }}
+        </el-button>
         <el-select v-model="projectId" :placeholder="$t('uiAutomation.project.selectProject')" style="width: 200px; margin-right: 15px" @change="onProjectChange">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
         <el-select v-model="executionMode" :placeholder="$t('uiAutomation.ai.caseList.executionBackend')" style="width: 140px;">
           <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
           <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
+          <el-option :label="$t('uiAutomation.ai.backends.plannerV2')" value="planner_v2" />
         </el-select>
+        <el-switch
+          v-model="disableCache"
+          class="cache-switch"
+          :active-text="$t('uiAutomation.ai.caseList.disableCache')"
+        />
       </div>
     </div>
 
@@ -30,23 +40,56 @@
 
       <el-table :data="cases" v-loading="loading" style="width: 100%">
         <el-table-column prop="name" :label="$t('uiAutomation.ai.caseList.caseName')" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="description" :label="$t('uiAutomation.common.description')" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="task_description" :label="$t('uiAutomation.ai.caseList.taskDescription')" min-width="300" show-overflow-tooltip />
-        <el-table-column prop="created_at" :label="$t('uiAutomation.common.createTime')" width="180" :formatter="formatDate" />
-        <el-table-column :label="$t('uiAutomation.common.operation')" width="200" fixed="right">
+        <el-table-column :label="$t('uiAutomation.ai.caseMode')" width="140">
           <template #default="{ row }">
-            <el-button size="small" type="success" @click="runCase(row)">
-              <el-icon><VideoPlay /></el-icon>
-              {{ $t('uiAutomation.common.run') }}
-            </el-button>
-            <el-button size="small" type="primary" @click="editCase(row)">
-              <el-icon><Edit /></el-icon>
-              {{ $t('uiAutomation.common.edit') }}
-            </el-button>
-            <el-button size="small" type="danger" @click="deleteCase(row.id)">
-              <el-icon><Delete /></el-icon>
-              {{ $t('uiAutomation.common.delete') }}
-            </el-button>
+            <el-tag :type="getCaseModeTag(row.case_mode)">
+              {{ getCaseModeText(row.case_mode) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column :label="$t('uiAutomation.ai.caseList.taskDescription')" min-width="340">
+          <template #default="{ row }">
+            <div class="task-description-cell">
+              <div
+                class="task-description-text"
+                :class="{ expanded: isTaskDescriptionExpanded(row.id) }"
+              >
+                {{ row.task_description || '-' }}
+              </div>
+              <el-button
+                v-if="shouldShowTaskDescriptionToggle(row.task_description)"
+                link
+                type="primary"
+                class="task-description-toggle"
+                @click="toggleTaskDescription(row.id)"
+              >
+                {{ isTaskDescriptionExpanded(row.id)
+                  ? $t('uiAutomation.ai.caseList.collapseTaskDescription')
+                  : $t('uiAutomation.ai.caseList.expandTaskDescription') }}
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" :label="$t('uiAutomation.common.createTime')" width="180" :formatter="formatDate" />
+        <el-table-column :label="$t('uiAutomation.common.operation')" width="140" fixed="right">
+          <template #default="{ row }">
+            <div class="action-buttons">
+              <el-tooltip :content="$t('uiAutomation.common.run')" placement="top">
+                <el-button circle size="small" type="success" @click="runCase(row)">
+                  <el-icon><VideoPlay /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip :content="$t('uiAutomation.common.edit')" placement="top">
+                <el-button circle size="small" type="primary" @click="editCase(row)">
+                  <el-icon><Edit /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip :content="$t('uiAutomation.common.delete')" placement="top">
+                <el-button circle size="small" type="danger" @click="deleteCase(row.id)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -65,7 +108,7 @@
     </div>
 
     <!-- 编辑对话框 -->
-    <el-dialog v-model="showEditDialog" :title="$t('uiAutomation.ai.caseList.editCase')" width="600px" :close-on-click-modal="false">
+    <el-dialog v-model="showEditDialog" :title="dialogTitle" width="720px" :close-on-click-modal="false">
       <el-form :model="editForm" :rules="formRules" ref="editFormRef" label-width="100px">
         <el-form-item :label="$t('uiAutomation.ai.caseList.caseName')" prop="name">
           <el-input v-model="editForm.name" :placeholder="$t('uiAutomation.ai.caseNamePlaceholder')" />
@@ -73,13 +116,91 @@
         <el-form-item :label="$t('uiAutomation.common.description')" prop="description">
           <el-input v-model="editForm.description" type="textarea" :placeholder="$t('uiAutomation.ai.caseDescPlaceholder')" />
         </el-form-item>
-        <el-form-item :label="$t('uiAutomation.ai.caseList.taskDescription')" prop="task_description">
+        <el-form-item :label="$t('uiAutomation.ai.caseMode')" prop="case_mode">
+          <el-select v-model="editForm.case_mode" style="width: 220px;">
+            <el-option :label="$t('uiAutomation.ai.caseModes.freeform')" value="freeform" />
+            <el-option :label="$t('uiAutomation.ai.caseModes.hybrid')" value="hybrid" />
+            <el-option :label="$t('uiAutomation.ai.caseModes.structured')" value="structured" />
+          </el-select>
+          <span class="case-mode-tip">
+            {{ caseModeTipText }}
+          </span>
+        </el-form-item>
+        <el-form-item v-if="editForm.case_mode === 'freeform'" :label="$t('uiAutomation.ai.caseList.taskDescription')" prop="task_description">
           <el-input
             v-model="editForm.task_description"
             type="textarea"
             :rows="6"
             :placeholder="$t('uiAutomation.ai.taskPlaceholder')"
           />
+        </el-form-item>
+        <el-form-item v-else :label="stepsSectionTitle" prop="task_steps">
+          <div class="structured-steps">
+            <div v-for="(step, index) in editForm.task_steps" :key="index" class="structured-step-card">
+              <div class="structured-step-header">
+                <span>{{ $t('uiAutomation.ai.structuredStep') }} {{ index + 1 }}</span>
+                <el-button text type="danger" @click="removeStructuredStep(index)">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </div>
+
+              <div v-if="editForm.case_mode === 'hybrid'" class="structured-step-grid hybrid-meta-grid">
+                <el-select v-model="step.step_mode">
+                  <el-option :label="$t('uiAutomation.ai.stepModes.ai')" value="ai" />
+                  <el-option :label="$t('uiAutomation.ai.stepModes.direct')" value="direct" />
+                </el-select>
+                <el-input-number v-model="step.timeout_ms" :min="1000" :step="1000" :controls="false" />
+              </div>
+
+              <div v-if="editForm.case_mode === 'hybrid' && step.step_mode === 'ai'" class="structured-step-grid single-line">
+                <el-input v-model="step.description" type="textarea" :rows="3" :placeholder="$t('uiAutomation.ai.aiStepPlaceholder')" />
+              </div>
+
+              <template v-else>
+                <div class="structured-step-grid">
+                  <el-input v-model="step.description" :placeholder="$t('uiAutomation.ai.stepDescriptionPlaceholder')" />
+                  <el-select v-model="step.action">
+                    <el-option v-for="option in stepActionOptions" :key="option.value" :label="option.label" :value="option.value" />
+                  </el-select>
+                  <el-input-number v-model="step.timeout_ms" :min="1000" :step="1000" :controls="false" />
+                </div>
+
+              <div v-if="step.action === 'navigate'" class="structured-step-grid single-line">
+                <el-input v-model="step.url" :placeholder="$t('uiAutomation.ai.stepUrlPlaceholder')" />
+              </div>
+
+              <div v-else-if="step.action === 'click'" class="structured-step-grid single-line">
+                <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+              </div>
+
+              <div v-else-if="['fill', 'press', 'select'].includes(step.action)" class="structured-step-grid">
+                <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                <el-input v-model="step.value" :placeholder="$t('uiAutomation.ai.stepValuePlaceholder')" />
+              </div>
+
+              <div v-else-if="step.action === 'assert_url_contains'" class="structured-step-grid single-line">
+                <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
+              </div>
+
+              <div v-else-if="step.action === 'assert_text_contains'" class="structured-step-grid">
+                <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
+              </div>
+              </template>
+            </div>
+
+            <div class="structured-actions">
+              <el-button plain type="primary" class="structured-add-btn" @click="addStructuredStep()">
+                <el-icon><Plus /></el-icon>
+                {{ $t('uiAutomation.ai.addStructuredStep') }}
+              </el-button>
+
+              <el-button v-if="editForm.case_mode === 'hybrid'" plain type="success" class="structured-add-btn" @click="addStructuredStep('direct')">
+                <el-icon><Plus /></el-icon>
+                {{ $t('uiAutomation.ai.addDirectStep') }}
+              </el-button>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -93,10 +214,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, VideoPlay, Edit, Delete } from '@element-plus/icons-vue'
+import { Search, VideoPlay, Edit, Delete, Plus } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { getAICases, createAICase, updateAICase, deleteAICase, executeAICase, getAiProjects } from '@/api/ai-testing'
 
@@ -108,6 +229,7 @@ const cases = ref([])
 const loading = ref(false)
 const searchText = ref('')
 const executionMode = ref('text')
+const disableCache = ref(false)
 const total = ref(0)
 const pagination = reactive({
   currentPage: 1,
@@ -117,17 +239,185 @@ const pagination = reactive({
 const showEditDialog = ref(false)
 const saving = ref(false)
 const currentCaseId = ref(null)
+const isCreateMode = ref(false)
+const expandedTaskDescriptionIds = ref([])
+
+const createStructuredStep = (stepMode = 'ai') => ({
+  step_mode: stepMode,
+  action: 'navigate',
+  description: '',
+  url: '',
+  selector: '',
+  value: '',
+  expected: '',
+  timeout_ms: 10000
+})
+
 const editForm = reactive({
   name: '',
   description: '',
-  task_description: ''
+  task_description: '',
+  case_mode: 'freeform',
+  task_steps: [createStructuredStep()]
 })
 const editFormRef = ref(null)
 
+const stepActionOptions = computed(() => [
+  { label: t('uiAutomation.ai.stepActions.navigate'), value: 'navigate' },
+  { label: t('uiAutomation.ai.stepActions.click'), value: 'click' },
+  { label: t('uiAutomation.ai.stepActions.fill'), value: 'fill' },
+  { label: t('uiAutomation.ai.stepActions.press'), value: 'press' },
+  { label: t('uiAutomation.ai.stepActions.select'), value: 'select' },
+  { label: t('uiAutomation.ai.stepActions.wait'), value: 'wait' },
+  { label: t('uiAutomation.ai.stepActions.assertUrlContains'), value: 'assert_url_contains' },
+  { label: t('uiAutomation.ai.stepActions.assertTextContains'), value: 'assert_text_contains' }
+])
+
+const dialogTitle = computed(() => isCreateMode.value ? t('uiAutomation.ai.caseList.createCase') : t('uiAutomation.ai.caseList.editCase'))
+
+const stepsSectionTitle = computed(() => editForm.case_mode === 'hybrid'
+  ? t('uiAutomation.ai.hybridSteps')
+  : t('uiAutomation.ai.structuredSteps'))
+
+const caseModeTipText = computed(() => {
+  if (editForm.case_mode === 'hybrid') {
+    return t('uiAutomation.ai.hybridCaseModeTip')
+  }
+  return t('uiAutomation.ai.caseModeTip')
+})
+
 const formRules = computed(() => ({
   name: [{ required: true, message: t('uiAutomation.ai.rules.nameRequired'), trigger: 'blur' }],
-  task_description: [{ required: true, message: t('uiAutomation.ai.caseList.rules.taskDescriptionRequired'), trigger: 'blur' }]
+  task_description: [{
+    validator: (_rule, value, callback) => {
+      if (editForm.case_mode === 'freeform' && !String(value || '').trim()) {
+        callback(new Error(t('uiAutomation.ai.caseList.rules.taskDescriptionRequired')))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur'
+  }]
 }))
+
+watch(
+  () => editForm.case_mode,
+  (mode) => {
+    if (mode === 'structured' && editForm.task_steps.length === 0) {
+      editForm.task_steps.push(createStructuredStep())
+    }
+  }
+)
+
+const normalizeStructuredStep = (step = {}, index = 0) => ({
+  step_mode: step.step_mode || (editForm.case_mode === 'hybrid' ? 'ai' : 'direct'),
+  action: step.action || 'navigate',
+  description: step.description || '',
+  url: step.url || '',
+  selector: step.selector || '',
+  value: step.value || '',
+  expected: step.expected || '',
+  timeout_ms: Number(step.timeout_ms) || 10000,
+  step_no: Number(step.step_no) || index + 1
+})
+
+const buildTaskStepsPayload = () => editForm.task_steps.map((step, index) => ({
+  ...normalizeStructuredStep(step, index),
+  step_no: index + 1
+}))
+
+const buildTaskDescriptionFromSteps = (taskSteps) => taskSteps.map((step, index) => {
+  const prefix = step.step_mode === 'direct' ? '[DIRECT]' : '[AI]'
+  return `${index + 1}. ${prefix} ${step.description || ''}`.trim()
+}).join('\n')
+
+const addStructuredStep = (stepMode = null) => {
+  const fallbackMode = editForm.case_mode === 'hybrid' ? 'ai' : 'direct'
+  editForm.task_steps.push(createStructuredStep(stepMode || fallbackMode))
+}
+
+const removeStructuredStep = (index) => {
+  if (editForm.task_steps.length === 1) {
+    editForm.task_steps.splice(0, 1, createStructuredStep(editForm.case_mode === 'hybrid' ? 'ai' : 'direct'))
+    return
+  }
+  editForm.task_steps.splice(index, 1)
+}
+
+const validateStructuredSteps = () => {
+  if (!Array.isArray(editForm.task_steps) || editForm.task_steps.length === 0) {
+    ElMessage.error(t('uiAutomation.ai.messages.structuredStepsRequired'))
+    return false
+  }
+
+  for (const [index, step] of editForm.task_steps.entries()) {
+    const label = `${t('uiAutomation.ai.structuredStep')} ${index + 1}`
+    if (!String(step.description || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepDescriptionRequired')}`)
+      return false
+    }
+    if (editForm.case_mode === 'hybrid' && step.step_mode === 'ai') {
+      continue
+    }
+    if (!String(step.action || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepActionRequired')}`)
+      return false
+    }
+    if (step.action === 'navigate' && !String(step.url || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepUrlRequired')}`)
+      return false
+    }
+    if (['click', 'fill', 'press', 'select', 'assert_text_contains'].includes(step.action) && !String(step.selector || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepSelectorRequired')}`)
+      return false
+    }
+    if (['fill', 'press', 'select'].includes(step.action) && !String(step.value || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepValueRequired')}`)
+      return false
+    }
+    if (['assert_url_contains', 'assert_text_contains'].includes(step.action) && !String(step.expected || '').trim()) {
+      ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepExpectedRequired')}`)
+      return false
+    }
+  }
+
+  return true
+}
+
+const resetEditForm = () => {
+  currentCaseId.value = null
+  editForm.name = ''
+  editForm.description = ''
+  editForm.task_description = ''
+  editForm.case_mode = 'freeform'
+  editForm.task_steps = [createStructuredStep('ai')]
+}
+
+const openCreateDialog = () => {
+  isCreateMode.value = true
+  resetEditForm()
+  showEditDialog.value = true
+}
+
+const getCaseModeText = (caseMode) => {
+  if (caseMode === 'hybrid') {
+    return t('uiAutomation.ai.caseModes.hybrid')
+  }
+  if (caseMode === 'structured') {
+    return t('uiAutomation.ai.caseModes.structured')
+  }
+  return t('uiAutomation.ai.caseModes.freeform')
+}
+
+const getCaseModeTag = (caseMode) => {
+  if (caseMode === 'hybrid') {
+    return 'success'
+  }
+  if (caseMode === 'structured') {
+    return 'warning'
+  }
+  return 'info'
+}
 
 // 加载项目列表
 const loadProjects = async () => {
@@ -177,6 +467,18 @@ const handleSearch = () => {
   loadCases()
 }
 
+const shouldShowTaskDescriptionToggle = (text) => String(text || '').trim().length > 90
+
+const isTaskDescriptionExpanded = (caseId) => expandedTaskDescriptionIds.value.includes(caseId)
+
+const toggleTaskDescription = (caseId) => {
+  if (isTaskDescriptionExpanded(caseId)) {
+    expandedTaskDescriptionIds.value = expandedTaskDescriptionIds.value.filter((id) => id !== caseId)
+    return
+  }
+  expandedTaskDescriptionIds.value = [...expandedTaskDescriptionIds.value, caseId]
+}
+
 const handleSizeChange = () => {
   pagination.currentPage = 1
   loadCases()
@@ -188,10 +490,15 @@ const handleCurrentChange = () => {
 
 // 编辑用例
 const editCase = (row) => {
+  isCreateMode.value = false
   currentCaseId.value = row.id
   editForm.name = row.name
   editForm.description = row.description
   editForm.task_description = row.task_description
+  editForm.case_mode = row.case_mode || 'freeform'
+  editForm.task_steps = Array.isArray(row.task_steps) && row.task_steps.length > 0
+    ? row.task_steps.map((step, index) => normalizeStructuredStep(step, index))
+    : [createStructuredStep(row.case_mode === 'hybrid' ? 'ai' : 'direct')]
   showEditDialog.value = true
 }
 
@@ -200,20 +507,38 @@ const confirmEdit = async () => {
 
   await editFormRef.value.validate(async (valid) => {
     if (valid) {
+      if (['structured', 'hybrid'].includes(editForm.case_mode) && !validateStructuredSteps()) {
+        return
+      }
+
       saving.value = true
       try {
-        await updateAICase(currentCaseId.value, {
+        const payload = {
           name: editForm.name,
           description: editForm.description,
-          task_description: editForm.task_description
-        })
+          task_description: editForm.case_mode === 'freeform'
+            ? editForm.task_description
+            : buildTaskDescriptionFromSteps(editForm.task_steps),
+          case_mode: editForm.case_mode,
+          task_steps: editForm.case_mode === 'freeform' ? [] : buildTaskStepsPayload(),
+          project_id: projectId.value || null,
+        }
 
-        ElMessage.success(t('uiAutomation.ai.caseList.messages.updateSuccess'))
+        if (isCreateMode.value) {
+          await createAICase(payload)
+          ElMessage.success(t('uiAutomation.ai.caseList.messages.createSuccess'))
+        } else {
+          await updateAICase(currentCaseId.value, payload)
+          ElMessage.success(t('uiAutomation.ai.caseList.messages.updateSuccess'))
+        }
+
         showEditDialog.value = false
         loadCases()
       } catch (error) {
         console.error('更新失败:', error)
-        ElMessage.error(t('uiAutomation.ai.caseList.messages.updateFailed'))
+        ElMessage.error(isCreateMode.value
+          ? t('uiAutomation.ai.caseList.messages.createFailed')
+          : t('uiAutomation.ai.caseList.messages.updateFailed'))
       } finally {
         saving.value = false
       }
@@ -248,7 +573,15 @@ const deleteCase = async (id) => {
 // 执行用例
 const runCase = async (row) => {
   try {
-    await executeAICase(row.id, { execution_mode: executionMode.value })
+    if (['structured', 'hybrid'].includes(row.case_mode) && executionMode.value !== 'planner_v2') {
+      ElMessage.warning(t('uiAutomation.ai.caseList.messages.structuredCasePlannerModeRequired'))
+      return
+    }
+
+    await executeAICase(row.id, {
+      execution_mode: executionMode.value,
+      use_cache: !disableCache.value,
+    })
     ElMessage.success(t('uiAutomation.ai.caseList.messages.runSuccess'))
     // 跳转到执行记录页面
     router.push('/ai-intelligent-mode/execution-records')
@@ -290,6 +623,12 @@ onMounted(async () => {
   }
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .card-container {
   background-color: #fff;
   border-radius: 4px;
@@ -299,6 +638,104 @@ onMounted(async () => {
 
 .filter-bar {
   margin-bottom: 20px;
+}
+
+.cache-switch {
+  margin-left: 4px;
+}
+
+.task-description-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.task-description-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-description-text.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
+.task-description-toggle {
+  align-self: flex-start;
+  padding: 0;
+}
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.case-mode-tip {
+  display: inline-block;
+  margin-left: 10px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.structured-steps {
+  width: 100%;
+}
+
+.structured-step-card {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid #EBEEF5;
+  border-radius: 8px;
+  background: #FAFAFA;
+}
+
+.structured-step-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-weight: 500;
+}
+
+.structured-step-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(96px, 120px);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.structured-step-grid > * {
+  min-width: 0;
+}
+
+.structured-step-grid :deep(.el-input),
+.structured-step-grid :deep(.el-select),
+.structured-step-grid :deep(.el-input-number) {
+  width: 100%;
+}
+
+.structured-step-grid.single-line {
+  grid-template-columns: 1fr;
+}
+
+.structured-add-btn {
+  flex: 1;
+}
+
+.structured-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.hybrid-meta-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 120px);
 }
 
 .pagination-container {

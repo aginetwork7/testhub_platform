@@ -22,10 +22,18 @@ class AiProject(models.Model):
 
 class AICase(models.Model):
     """AI测试用例"""
+    CASE_MODE_CHOICES = [
+        ('freeform', '自由描述'),
+        ('hybrid', '混合步骤'),
+        ('structured', '结构化步骤'),
+    ]
+
     project = models.ForeignKey(AiProject, on_delete=models.CASCADE, null=True, blank=True, verbose_name='所属项目')
     name = models.CharField(max_length=200, verbose_name='用例名称')
     description = models.TextField(blank=True, null=True, verbose_name='描述')
     task_description = models.TextField(verbose_name='任务描述', help_text='自然语言任务描述')
+    case_mode = models.CharField(max_length=20, choices=CASE_MODE_CHOICES, default='freeform', verbose_name='用例模式')
+    task_steps = models.JSONField(default=list, blank=True, verbose_name='结构化步骤')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='创建者', related_name='ai_testing_created_cases')
@@ -44,6 +52,7 @@ class AIExecutionRecord(models.Model):
     EXECUTION_MODE_CHOICES = [
         ('text', '文本模式'),
         ('hermes', 'Hermes模式'),
+        ('planner_v2', '结构化规划模式'),
     ]
 
     STATUS_CHOICES = [
@@ -66,6 +75,9 @@ class AIExecutionRecord(models.Model):
     logs = models.TextField(blank=True, default='', verbose_name='执行日志')
     steps_completed = models.JSONField(default=list, verbose_name='已完成步骤')
     planned_tasks = models.JSONField(default=list, verbose_name='规划任务') # 规划的任务列表 [{'id': 1, 'description': '...', 'status': 'pending'}]
+    planner_trace = models.JSONField(default=dict, blank=True, verbose_name='规划追踪数据')
+    artifacts = models.JSONField(default=list, blank=True, verbose_name='执行产物')
+    cache_stats = models.JSONField(default=dict, blank=True, verbose_name='缓存统计')
     executed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='执行人', related_name='ai_testing_executions')
     gif_path = models.CharField(max_length=500, null=True, blank=True, verbose_name='GIF录制路径')
     screenshots_sequence = models.JSONField(default=list, verbose_name='截图序列')

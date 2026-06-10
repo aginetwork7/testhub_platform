@@ -218,9 +218,20 @@ class PlaywrightTestEngine:
                     return False, f"❌ 跳转URL失败: {str(e)}", None
 
             elif action_type == 'assert' and step.assert_type == 'urlContains':
-                current_url = self.page.url or ''
                 if not resolved_assert_value:
                     return False, "✗ 断言失败: URL包含断言缺少期望值", None
+
+                timeout_ms = step.wait_time if step.wait_time else 5000
+                try:
+                    await self.page.wait_for_url(
+                        f"**{resolved_assert_value}**",
+                        wait_until='commit',
+                        timeout=timeout_ms,
+                    )
+                except PlaywrightTimeout:
+                    pass
+
+                current_url = self.page.url or ''
 
                 if resolved_assert_value in current_url:
                     execution_time = round(time.time() - start_time, 2)
@@ -228,6 +239,7 @@ class PlaywrightTestEngine:
                     if resolved_assert_value != step.assert_value:
                         log += f"  - 变量解析: '{step.assert_value}' => '{resolved_assert_value}'\n"
                     log += f"  - 当前URL: '{current_url}'\n"
+                    log += f"  - 等待超时: {timeout_ms / 1000}秒\n"
                     log += f"  - 执行时间: {execution_time}秒"
                     return True, log, None
 
@@ -798,8 +810,41 @@ class PlaywrightTestEngine:
             import platform
             is_linux = platform.system() == 'Linux'
 
-            # 使用 networkidle 等待页面加载完成
-            await self.page.goto(url, wait_until='networkidle', timeout=30000)
+            # 某些站点在自动化环境下不会稳定触发 domcontentloaded/load，
+            # 但 commit 已足够确认主文档已到达。
+            last_error = None
+            for attempt in range(1, 4):
+                try:
+                    await self.page.goto(url, wait_until='commit', timeout=90000)
+                    break
+                except PlaywrightTimeout as exc:
+                    last_error = exc
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(2 * attempt)
+            else:
+                if last_error is not None:
+                    raise last_error
+
+            dom_ready = True
+            load_completed = True
+            try:
+                await self.page.wait_for_load_state('domcontentloaded', timeout=10000)
+            except PlaywrightTimeout:
+                dom_ready = False
+
+            try:
+                await self.page.wait_for_load_state('load', timeout=10000)
+            except PlaywrightTimeout:
+                load_completed = False
+
+            page_title = ''
+            try:
+                page_title = await self.page.title()
+            except Exception:
+                page_title = ''
+
+            app_ready_log = await self._wait_for_application_ready(url)
 
             # 额外等待，确保动态内容加载（Vue/React等SPA应用）
             # 服务器无头模式需要更长的等待时间
@@ -807,11 +852,87 @@ class PlaywrightTestEngine:
             await asyncio.sleep(extra_wait)
 
             log = f"✓ 成功导航到: {url}\n"
-            log += f"  - 等待页面加载完成（networkidle + 额外{extra_wait}秒）"
+            if page_title:
+                log += f"  - 页面标题: {page_title}\n"
+            if dom_ready and load_completed:
+                log += f"  - 等待页面加载完成（commit + domcontentloaded + load + 额外{extra_wait}秒）"
+            elif dom_ready:
+                log += f"  - 等待页面加载完成（commit + domcontentloaded + 额外{extra_wait}秒，load 等待超时已跳过）"
+            else:
+                log += f"  - 等待页面加载完成（commit + 额外{extra_wait}秒，domcontentloaded/load 等待超时已跳过）"
+            if app_ready_log:
+                log += f"\n{app_ready_log}"
             return True, log
         except Exception as e:
             log = f"✗ 导航失败: {url}\n  - 错误: {str(e)}"
             return False, log
+
+    async def _wait_for_application_ready(self, url: str) -> str:
+        """在慢启动 SPA 页面上等待应用根节点完成挂载。"""
+        if self.page is None:
+            return ''
+
+        try:
+            has_root = await self.page.locator('#root').count() > 0
+        except Exception:
+            has_root = False
+
+        if not has_root:
+            return ''
+
+        is_root_empty = await self.page.evaluate(
+            """
+            () => {
+                const root = document.querySelector('#root');
+                if (!root) {
+                    return false;
+                }
+                return !root.children.length && !(root.textContent || '').trim();
+            }
+            """
+        )
+
+        if not is_root_empty:
+            return '  - 应用根节点已就绪'
+
+        start_time = time.time()
+        await self.page.wait_for_function(
+            """
+            () => {
+                const root = document.querySelector('#root');
+                if (!root) {
+                    return true;
+                }
+                const hasChildren = root.children.length > 0;
+                const hasText = Boolean((root.textContent || '').trim());
+                return hasChildren || hasText;
+            }
+            """,
+            timeout=180000,
+        )
+        ready_seconds = round(time.time() - start_time, 2)
+
+        selectors = [
+            '#login_email',
+            '#login_password',
+            'input[type="email"]',
+            'input[type="password"]',
+            'button:has-text("Log in")',
+        ]
+        matched_selectors = []
+        for selector in selectors:
+            try:
+                if await self.page.locator(selector).count() > 0:
+                    matched_selectors.append(selector)
+            except Exception:
+                continue
+
+        log = f'  - 应用根节点已挂载，额外等待 {ready_seconds}秒'
+        if matched_selectors:
+            log += f"\n  - 页面可用定位器: {', '.join(matched_selectors)}"
+        else:
+            log += f"\n  - 页面URL: {self.page.url or url}"
+        return log
 
     async def capture_screenshot(self) -> str:
         """

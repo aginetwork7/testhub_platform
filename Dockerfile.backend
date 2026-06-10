@@ -6,9 +6,12 @@ ARG TORCH_PACKAGES=""
 WORKDIR /app
 
 # 安装系统级依赖 (MySQL驱动编译依赖 + Playwright依赖)
+# chromium：Debian 系统版自带 H.264/H.265 编解码器（经 system ffmpeg），
+# 用于解码摄像头实时视频流；Playwright 自带的开源 Chromium 不含专有编解码器，
+# 直播流会一直卡在 Loading 无法播放。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential default-libmysqlclient-dev git curl netcat-openbsd \
-    android-tools-adb \
+    android-tools-adb chromium \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖（清华镜像加速，官方 PyPI 兜底）

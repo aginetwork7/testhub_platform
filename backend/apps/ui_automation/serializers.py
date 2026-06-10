@@ -4,7 +4,7 @@ from .models import (
     UiProject, LocatorStrategy, Element, TestScript, TestSuite,
     TestSuiteScript, TestSuiteTestCase, TestExecution, Screenshot,
     ElementGroup, PageObject, PageObjectElement, ScriptStep, ScriptElementUsage,
-    TestCase, TestCaseStep, TestCaseExecution, OperationRecord,
+    TestCase, TestCaseStep, TestCaseExecution, RecordingSession, OperationRecord,
     UiNotificationLog
 )
 from django.contrib.auth import get_user_model
@@ -730,6 +730,58 @@ class OperationRecordSerializer(serializers.ModelSerializer):
             'user', 'user_name', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+
+class RecordingSessionSerializer(serializers.ModelSerializer):
+    """录制会话序列化器"""
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    started_by_name = serializers.CharField(source='started_by.username', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    import_target_display = serializers.CharField(source='get_import_target_display', read_only=True)
+
+    class Meta:
+        model = RecordingSession
+        fields = [
+            'id', 'project', 'project_name', 'name', 'base_url', 'status', 'status_display',
+            'browser', 'target_language', 'framework', 'import_target', 'import_target_display',
+            'raw_script', 'parsed_steps', 'error_message', 'started_by', 'started_by_name',
+            'started_at', 'finished_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'status', 'raw_script', 'parsed_steps', 'error_message', 'started_by',
+            'started_at', 'finished_at', 'created_at', 'updated_at'
+        ]
+
+
+class RecordingSessionCreateSerializer(serializers.ModelSerializer):
+    """录制会话创建序列化器"""
+
+    class Meta:
+        model = RecordingSession
+        fields = ['project', 'name', 'base_url', 'browser', 'target_language', 'framework', 'import_target']
+
+    def validate_base_url(self, value):
+        if not value:
+            raise serializers.ValidationError('base_url 不能为空')
+        return value
+
+
+class RecordingSessionUploadSerializer(serializers.Serializer):
+    """录制脚本上传序列化器"""
+    raw_script = serializers.CharField(required=False, allow_blank=False)
+    script_file = serializers.FileField(required=False)
+
+    def validate(self, attrs):
+        if not attrs.get('raw_script') and not attrs.get('script_file'):
+            raise serializers.ValidationError('raw_script 或 script_file 至少需要一个')
+        return attrs
+
+
+class RecordingSessionMaterializeSerializer(serializers.Serializer):
+    """录制会话物化序列化器"""
+    name = serializers.CharField(required=False, allow_blank=True, max_length=200)
+    description = serializers.CharField(required=False, allow_blank=True)
+    target = serializers.ChoiceField(choices=['script', 'test_case', 'both'], required=False)
 
 
 class UiNotificationLogSerializer(serializers.ModelSerializer):
