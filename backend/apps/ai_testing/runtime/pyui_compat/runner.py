@@ -973,6 +973,22 @@ class PyUICompatAgent:
                 'expected': 'True',
                 'reason': 'fallback deterministic visible media assertion',
             }]
+        if '背景色' in text and '深色' in text and ('断言' in text or '期望断言结果' in text):
+            return [{
+                'action': 'assert',
+                'assert_kind': 'page_dark_theme',
+                'expected': 'True',
+                'param': 'page_background',
+                'reason': 'fallback deterministic page dark-theme assertion',
+            }]
+        if '背景色' in text and '浅色' in text and ('断言' in text or '期望断言结果' in text):
+            return [{
+                'action': 'assert',
+                'assert_kind': 'page_dark_theme',
+                'expected': 'False',
+                'param': 'page_background',
+                'reason': 'fallback deterministic page light-theme assertion',
+            }]
         if 'To Do' in text and '下拉框' in text:
             return [{
                 'action': 'click',
@@ -1914,6 +1930,63 @@ class PyUICompatAgent:
             if assert_kind == 'stream_active':
                 await self._assert_stream_active(page, timeout_ms)
                 return
+
+            if assert_kind == 'page_dark_theme':
+                    expected_true = not _is_false_like(expected)
+                    is_dark = await page.evaluate(
+                            """
+                            () => {
+                                const root = document.documentElement;
+                                const body = document.body;
+                                const darkClassPattern = /(dark|night|theme-dark)/i;
+
+                                const hasDarkClass =
+                                    (root && darkClassPattern.test(root.className || '')) ||
+                                    (body && darkClassPattern.test(body.className || ''));
+
+                                const parseRgb = (raw) => {
+                                    if (!raw) return null;
+                                    const match = String(raw).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+                                    if (!match) return null;
+                                    return [Number(match[1]), Number(match[2]), Number(match[3])];
+                                };
+
+                                const pickColor = (el) => {
+                                    if (!el) return null;
+                                    const c = window.getComputedStyle(el).backgroundColor;
+                                    const rgb = parseRgb(c);
+                                    if (!rgb) return null;
+                                    const [r, g, b] = rgb;
+                                    const isTransparent = r === 0 && g === 0 && b === 0 && /rgba\(0,\s*0,\s*0,\s*0\)/i.test(String(c));
+                                    return isTransparent ? null : rgb;
+                                };
+
+                                const rgb = pickColor(body) || pickColor(root);
+                                let luminance = null;
+                                let bgColor = null;
+                                if (rgb) {
+                                    const [r, g, b] = rgb;
+                                    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                                    bgColor = `rgb(${r}, ${g}, ${b})`;
+                                }
+
+                                const darkByColor = luminance !== null ? luminance < 110 : false;
+                                return {
+                                    isDark: Boolean(hasDarkClass || darkByColor),
+                                    hasDarkClass: Boolean(hasDarkClass),
+                                    bgColor,
+                                    luminance,
+                                };
+                            }
+                            """
+                    )
+                    actual_dark = bool((is_dark or {}).get('isDark'))
+                    if actual_dark != expected_true:
+                            raise AssertionError(
+                                    'page_dark_theme failed: '
+                                    f"expected_dark={expected_true}, actual_dark={actual_dark}, details={is_dark}"
+                            )
+                    return
 
             raise ValueError(f'unsupported assert kind: {assert_kind}')
 

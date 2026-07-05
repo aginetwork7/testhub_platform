@@ -60,6 +60,16 @@
             </div>
             <h1>{{ $t('assistant.title') }}</h1>
             <p>{{ $t('assistant.subtitle') }}</p>
+            <div class="welcome-mode-switch">
+              <span class="label">回答模式</span>
+              <el-switch
+                v-model="enableThinkingMode"
+                inline-prompt
+                active-text="思考"
+                inactive-text="直答"
+                size="small"
+              />
+            </div>
           </div>
           
           <div class="center-input-wrapper">
@@ -96,7 +106,23 @@
       <div v-else class="chat-screen">
         <div class="chat-header">
           <span class="chat-title">{{ currentSession?.title || $t('assistant.newChat') }}</span>
-          <span class="chat-time" v-if="currentSession">{{ formatDate(currentSession.updated_at) }}</span>
+          <div class="chat-header-actions">
+            <el-switch
+              v-model="enableThinkingMode"
+              inline-prompt
+              active-text="思考"
+              inactive-text="直答"
+              size="small"
+            />
+            <el-switch
+              v-model="showThinking"
+              inline-prompt
+              active-text="显"
+              inactive-text="隐"
+              size="small"
+            />
+            <span class="chat-time" v-if="currentSession">{{ formatDate(currentSession.updated_at) }}</span>
+          </div>
         </div>
         
         <div class="messages-container" ref="messagesContainer">
@@ -110,9 +136,38 @@
               <el-avatar v-else :size="36" :icon="Cpu" class="ai-avatar" />
             </div>
             <div class="message-bubble">
+              <details
+                v-if="showThinking && message.role === 'assistant' && message.thinking"
+                class="thinking-block"
+              >
+                <summary>思考过程</summary>
+                <div class="thinking-content">{{ message.thinking }}</div>
+              </details>
               <div class="message-content" v-html="formatMessageContent(message.content)"></div>
+              <div
+                v-if="message.role === 'assistant' && message.usage"
+                class="message-usage"
+              >
+                <span v-if="message.usage.total_tokens !== null && message.usage.total_tokens !== undefined">tokens: {{ message.usage.total_tokens }}</span>
+                <span v-if="message.usage.prompt_tokens !== null && message.usage.prompt_tokens !== undefined"> prompt: {{ message.usage.prompt_tokens }}</span>
+                <span v-if="message.usage.completion_tokens !== null && message.usage.completion_tokens !== undefined"> completion: {{ message.usage.completion_tokens }}</span>
+              </div>
+              <details
+                v-if="message.role === 'assistant' && (message.tool_contract_status || message.tool_call || message.tool_contract_error)"
+                class="tool-debug-block"
+              >
+                <summary>工具契约诊断</summary>
+                <div class="tool-debug-content">
+                  <div v-if="message.tool_contract_status">status: {{ message.tool_contract_status }}</div>
+                  <div v-if="message.tool_contract_error">
+                    error: {{ message.tool_contract_error.code }} - {{ message.tool_contract_error.message }}
+                  </div>
+                  <div v-if="message.tool_call">tool_call: {{ formatCompactJson(message.tool_call) }}</div>
+                  <div v-if="message.tool_result">tool_result: {{ formatCompactJson(message.tool_result) }}</div>
+                </div>
+              </details>
               <div class="message-status" v-if="message.isPending">
-                <el-icon class="is-loading"><Loading /></el-icon> {{ $t('assistant.thinking') }}
+                <el-icon class="is-loading"><Loading /></el-icon> 生成中...
               </div>
             </div>
           </div>
@@ -140,6 +195,15 @@
             >
               <el-icon><Promotion /></el-icon>
             </el-button>
+            <el-button
+              v-if="sending"
+              type="danger"
+              plain
+              class="stop-btn"
+              @click="stopStreamingReply"
+            >
+              停止
+            </el-button>
           </div>
           <div class="footer-tip">{{ $t('assistant.aiDisclaimer') }}</div>
         </div>
@@ -149,7 +213,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useUserStore } from '@/stores/user'
@@ -161,6 +225,27 @@ const router = useRouter()
 const userStore = useUserStore()
 const { t, locale } = useI18n()
 
+const getStorageFlag = (key, defaultValue = true) => {
+  try {
+    const value = localStorage.getItem(key)
+    if (value === null) {
+      return defaultValue
+    }
+    return value !== '0'
+  } catch (error) {
+    console.warn('read localStorage failed:', error)
+    return defaultValue
+  }
+}
+
+const setStorageFlag = (key, value) => {
+  try {
+    localStorage.setItem(key, value ? '1' : '0')
+  } catch (error) {
+    console.warn('write localStorage failed:', error)
+  }
+}
+
 // 状态
 const historySessions = ref([])
 const currentSession = ref(null)
@@ -168,6 +253,9 @@ const messages = ref([])
 const inputMessage = ref('')
 const sending = ref(false)
 const messagesContainer = ref(null)
+const activeStreamController = ref(null)
+const enableThinkingMode = ref(getStorageFlag('assistant_enable_thinking_mode', true))
+const showThinking = ref(getStorageFlag('assistant_show_thinking', true))
 
 const handleCommand = (command) => {
   if (command === 'logout') {
@@ -221,6 +309,44 @@ const formatMessageContent = (content) => {
     .replace(/\n/g, '<br>')
     .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
+}
+
+const formatCompactJson = (value) => {
+  if (value === null || value === undefined) {
+    return ''
+  }
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch (error) {
+    return String(value)
+  }
+}
+
+const mergeThinkingChunk = (existing, incoming) => {
+  const current = String(existing || '')
+  const next = String(incoming || '').trim()
+  if (!next) {
+    return current
+  }
+
+  if (!current) {
+    return next
+  }
+
+  if (current.endsWith(next) || current.includes(`\n${next}`)) {
+    return current
+  }
+
+  if (next.startsWith(current)) {
+    return next
+  }
+
+  const joined = `${current}\n${next}`
+  const maxLen = 12000
+  if (joined.length <= maxLen) {
+    return joined
+  }
+  return joined.slice(joined.length - maxLen)
 }
 
 const scrollToBottom = () => {
@@ -282,6 +408,128 @@ const handleEnter = (e) => {
   }
 }
 
+const getStreamAuthToken = async () => {
+  if (userStore.isTokenExpired && userStore.refreshToken) {
+    await userStore.refreshAccessToken()
+  } else if (userStore.isTokenExpiringSoon && userStore.refreshToken) {
+    await userStore.refreshAccessToken()
+  }
+  return userStore.accessToken
+}
+
+const stopStreamingReply = () => {
+  if (activeStreamController.value) {
+    activeStreamController.value.abort()
+    activeStreamController.value = null
+  }
+}
+
+const parseSSEChunk = (rawChunk, onEvent) => {
+  const events = rawChunk.split('\n\n')
+  const remaining = events.pop() || ''
+
+  for (const eventBlock of events) {
+    const lines = eventBlock.split('\n')
+    const dataLines = lines
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trim())
+
+    if (dataLines.length === 0) {
+      continue
+    }
+
+    const payloadText = dataLines.join('')
+    if (!payloadText || payloadText === '[DONE]') {
+      continue
+    }
+
+    let payload = null
+    try {
+      payload = JSON.parse(payloadText)
+    } catch (error) {
+      console.error('SSE payload parse failed:', payloadText, error)
+      continue
+    }
+
+    onEvent(payload)
+  }
+
+  return remaining
+}
+
+const streamAssistantMessage = async ({ sessionId, message, onEvent, signal }) => {
+  const token = await getStreamAuthToken()
+  const response = await fetch('/api/assistant/chat/send_message_stream/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    signal,
+    body: JSON.stringify({
+      session_id: sessionId,
+      message,
+      thinking_mode: enableThinkingMode.value
+    })
+  })
+
+  if (!response.ok) {
+    let errorMessage = `HTTP ${response.status}`
+    try {
+      const errorPayload = await response.json()
+      errorMessage = errorPayload.error || errorPayload.detail || errorMessage
+    } catch (error) {
+      // ignore parse errors and fallback to HTTP status text
+      errorMessage = response.statusText || errorMessage
+    }
+    throw new Error(errorMessage)
+  }
+
+  if (!response.body) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let idleTimer = null
+
+  const resetIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+    }
+    idleTimer = setTimeout(() => {
+      reader.cancel().catch(() => {})
+    }, 45000)
+  }
+
+  try {
+    resetIdleTimer()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+
+      resetIdleTimer()
+      buffer += decoder.decode(value, { stream: true })
+      buffer = parseSSEChunk(buffer, onEvent)
+    }
+  } finally {
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+    }
+  }
+
+  const tail = decoder.decode()
+  if (tail) {
+    buffer += tail
+  }
+  if (buffer.trim()) {
+    parseSSEChunk(`${buffer}\n\n`, onEvent)
+  }
+}
+
 // 发送消息
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
@@ -302,6 +550,12 @@ const sendMessage = async () => {
   const tempAiMsg = {
     role: 'assistant',
     content: '',
+    thinking: '',
+    usage: null,
+    tool_contract_status: null,
+    tool_contract_error: null,
+    tool_call: null,
+    tool_result: null,
     isPending: true
   }
   messages.value.push(tempAiMsg)
@@ -333,24 +587,66 @@ const sendMessage = async () => {
       sessionId = currentSession.value.session_id
     }
     
-    // 3. 发送请求
-    const response = await api.post('/assistant/chat/send_message/', {
-      session_id: sessionId,
-      message: text
-    }, {
-      timeout: 60000
+    const controller = new AbortController()
+    activeStreamController.value = controller
+
+    let donePayload = null
+    await streamAssistantMessage({
+      sessionId,
+      message: text,
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (event.type === 'chunk') {
+          tempAiMsg.content += event.content || ''
+          scrollToBottom()
+          return
+        }
+
+        if (event.type === 'replace') {
+          tempAiMsg.content = event.content || tempAiMsg.content
+          scrollToBottom()
+          return
+        }
+
+        if (event.type === 'thinking') {
+          const mergedThinking = mergeThinkingChunk(tempAiMsg.thinking, event.content)
+          if (mergedThinking !== tempAiMsg.thinking) {
+            tempAiMsg.thinking = mergedThinking
+            scrollToBottom()
+          }
+          return
+        }
+
+        if (event.type === 'done') {
+          donePayload = event
+          return
+        }
+
+        if (event.type === 'error') {
+          throw new Error(event.error || t('assistant.messages.sendFailed'))
+        }
+      }
     })
-    
-    // 4. 替换临时消息为真实消息
-    messages.value.pop() // 移除思考中
-    messages.value.pop() // 移除临时用户消息（因为后端返回了完整的用户消息对象）
-    
-    messages.value.push(response.data.user_message)
-    messages.value.push(response.data.assistant_message)
-    
+
+    tempAiMsg.isPending = false
+
+    if (donePayload?.assistant_message) {
+      const serverAssistant = donePayload.assistant_message
+      tempAiMsg.id = serverAssistant.id
+      tempAiMsg.created_at = serverAssistant.created_at
+      tempAiMsg.conversation_id = serverAssistant.conversation_id
+      tempAiMsg.message_id = serverAssistant.message_id
+      tempAiMsg.content = serverAssistant.content || tempAiMsg.content
+      tempAiMsg.usage = donePayload.usage || null
+      tempAiMsg.tool_contract_status = donePayload.tool_contract_status || null
+      tempAiMsg.tool_contract_error = donePayload.tool_contract_error || null
+      tempAiMsg.tool_call = donePayload.tool_call || null
+      tempAiMsg.tool_result = donePayload.tool_result || null
+    }
+
     // 更新会话的 conversation_id
-    if (response.data.conversation_id && currentSession.value) {
-      currentSession.value.conversation_id = response.data.conversation_id
+    if (donePayload?.conversation_id && currentSession.value) {
+      currentSession.value.conversation_id = donePayload.conversation_id
     }
     
     // 如果是第一次对话，更新历史列表中的会话信息（比如 updated_at）
@@ -366,10 +662,18 @@ const sendMessage = async () => {
     
   } catch (error) {
     console.error('Send failed:', error)
-    // 移除临时消息，显示错误
-    messages.value.pop() // 移除思考中
-    ElMessage.error(error.response?.data?.error || t('assistant.messages.sendFailed'))
+    tempAiMsg.isPending = false
+    const isAbort = error?.name === 'AbortError'
+
+    if (!tempAiMsg.content) {
+      tempAiMsg.content = isAbort ? '已停止生成' : (error.message || t('assistant.messages.sendFailed'))
+    }
+
+    if (!isAbort) {
+      ElMessage.error(error.message || t('assistant.messages.sendFailed'))
+    }
   } finally {
+    activeStreamController.value = null
     sending.value = false
     scrollToBottom()
   }
@@ -388,6 +692,21 @@ const loadHistory = async () => {
 onMounted(() => {
   loadHistory()
   startNewChat()
+})
+
+watch(showThinking, (value) => {
+  setStorageFlag('assistant_show_thinking', value)
+})
+
+watch(enableThinkingMode, (value) => {
+  setStorageFlag('assistant_enable_thinking_mode', value)
+})
+
+onBeforeUnmount(() => {
+  if (activeStreamController.value) {
+    activeStreamController.value.abort()
+    activeStreamController.value = null
+  }
 })
 </script>
 
@@ -605,6 +924,18 @@ onMounted(() => {
       font-size: 16px;
       margin: 0;
     }
+
+    .welcome-mode-switch {
+      margin-top: 14px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+
+      .label {
+        font-size: 13px;
+        color: #606266;
+      }
+    }
   }
   
   .center-input-wrapper {
@@ -684,6 +1015,12 @@ onMounted(() => {
       font-size: 12px;
       color: #909399;
     }
+
+    .chat-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
   }
   
   .messages-container {
@@ -699,16 +1036,16 @@ onMounted(() => {
       
       &.user {
         flex-direction: row-reverse;
-        
+
         .message-bubble {
           background: #409eff;
-          color: white;
+          color: #fff;
           border-radius: 12px 12px 0 12px;
-          
+
           :deep(pre) {
             background: rgba(0, 0, 0, 0.1);
           }
-          
+
           :deep(code) {
             background: rgba(0, 0, 0, 0.1);
             color: #fff;
@@ -766,6 +1103,29 @@ onMounted(() => {
             font-size: 13px;
           }
         }
+
+        .thinking-block {
+          margin: 0 0 10px;
+          padding: 8px 10px;
+          border: 1px dashed #dcdfe6;
+          border-radius: 8px;
+          background: #fafafa;
+
+          summary {
+            cursor: pointer;
+            font-size: 13px;
+            color: #606266;
+            user-select: none;
+          }
+
+          .thinking-content {
+            margin-top: 8px;
+            white-space: pre-wrap;
+            font-size: 13px;
+            color: #606266;
+            line-height: 1.6;
+          }
+        }
         
         .message-status {
           display: flex;
@@ -776,6 +1136,38 @@ onMounted(() => {
           
           .is-loading {
             animation: rotating 2s linear infinite;
+          }
+        }
+
+        .message-usage {
+          margin-top: 8px;
+          font-size: 12px;
+          color: #909399;
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .tool-debug-block {
+          margin-top: 8px;
+          border: 1px dashed #dcdfe6;
+          border-radius: 8px;
+          padding: 6px 8px;
+          background: #fff;
+
+          summary {
+            cursor: pointer;
+            font-size: 12px;
+            color: #606266;
+            user-select: none;
+          }
+
+          .tool-debug-content {
+            margin-top: 6px;
+            font-size: 12px;
+            color: #606266;
+            white-space: pre-wrap;
+            line-height: 1.5;
           }
         }
       }
@@ -803,7 +1195,7 @@ onMounted(() => {
       :deep(.el-textarea__inner) {
         border: none;
         box-shadow: none;
-        padding: 8px 50px 8px 8px;
+        padding: 8px 130px 8px 8px;
         background: transparent;
       }
       
@@ -815,6 +1207,14 @@ onMounted(() => {
         height: 32px;
         padding: 0;
         border-radius: 8px;
+      }
+
+      .stop-btn {
+        position: absolute;
+        right: 48px;
+        bottom: 8px;
+        height: 32px;
+        padding: 0 10px;
       }
     }
     

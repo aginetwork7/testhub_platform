@@ -24,8 +24,8 @@ export default {
 
   // Dify 配置
   dify: {
-    title: 'AI评测师配置',
-    description: '配置Dify API以启用AI评测师功能',
+    title: 'AI智能体配置',
+    description: '配置Dify API以启用AI智能体功能',
     apiConfig: 'Dify API配置',
     apiUrl: 'API URL',
     apiUrlPlaceholder: 'https://api.dify.ai/v1',

@@ -13,7 +13,7 @@ export default {
   loggedOut: '已退出登录',
 
   // 欢迎页
-  title: 'AI 评测师',
+  title: 'AI 测试助手',
   subtitle: '我是您的专业测试助手，有什么可以帮您？',
   inputPlaceholder: '输入您的问题，按回车发送...',
   chatInputPlaceholder: '输入消息...',

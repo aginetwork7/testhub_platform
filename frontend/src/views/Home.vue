@@ -103,7 +103,7 @@
           <p>{{ $t('home.aiIntelligentModeDesc') }}</p>
         </div>
 
-        <!-- AI评测师 -->
+        <!-- AI智能体 -->
         <div class="nav-card" @click="handleNavigate('assistant')" role="button" tabindex="0">
           <div class="card-icon assistant-icon">
             <el-icon>
@@ -194,7 +194,10 @@ const handleNavigate = (type) => {
   }
 
   if (routes[type]) {
-    router.push(routes[type])
+    router.push(routes[type]).catch((error) => {
+      console.error('route navigation failed, fallback to location:', error)
+      window.location.href = routes[type]
+    })
   }
 }
 </script>
