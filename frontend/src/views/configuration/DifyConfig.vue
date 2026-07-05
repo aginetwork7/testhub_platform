@@ -108,6 +108,16 @@ const currentConfig = ref(null)
 const testing = ref(false)
 const saving = ref(false)
 
+const hasConfiguredRecord = computed(() => {
+  if (!currentConfig.value) {
+    return false
+  }
+  if (currentConfig.value.configured === false) {
+    return false
+  }
+  return !!currentConfig.value.id
+})
+
 const form = ref({
   api_url: '',
   api_key: '',
@@ -133,11 +143,12 @@ const formatDate = (dateString) => {
 const loadConfig = async () => {
   try {
     const response = await api.get('/assistant/config/dify/')
-    currentConfig.value = response.data
+    const responseData = response.data || {}
+    currentConfig.value = (responseData.configured === false || !responseData.id) ? null : responseData
     form.value = {
-      api_url: response.data.api_url,
+      api_url: responseData.api_url || '',
       api_key: '', // Don't populate API key for security
-      is_active: response.data.is_active
+      is_active: responseData.is_active ?? true
     }
   } catch (error) {
     if (error.response?.status !== 404) {
@@ -192,7 +203,7 @@ const saveConfig = async () => {
         dataToSave.api_key = form.value.api_key
       }
 
-      if (currentConfig.value) {
+      if (hasConfiguredRecord.value) {
         // Update existing config
         await api.patch(`/assistant/config/dify/${currentConfig.value.id}/`, dataToSave)
         ElMessage.success(t('configuration.dify.messages.updateSuccess'))

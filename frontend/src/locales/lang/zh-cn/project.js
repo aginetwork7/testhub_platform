@@ -165,8 +165,8 @@ export default {
     unifiedProjectDesc: '统一进行项目管理',
     aiIntelligentMode: 'AI 智能模式',
     aiIntelligentModeDesc: '基于自然语言的智能化测试执行',
-    aiEvaluator: 'AI评测师',
-    aiEvaluatorDesc: '基于评测师知识库，提供专业软件测试问答',
+    aiEvaluator: 'AI智能体',
+    aiEvaluatorDesc: '基于测试知识库，提供测试智能体以及知识问答',
     configCenter: '配置中心',
     configCenterDesc: '系统环境、AI模型及通知配置',
 
