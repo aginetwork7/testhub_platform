@@ -1,0 +1,1 @@
+"""API automation testing domain."""

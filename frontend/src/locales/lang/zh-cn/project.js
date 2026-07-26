@@ -153,8 +153,8 @@ export default {
     // Cards
     aiCaseGeneration: 'AI用例生成',
     aiCaseGenerationDesc: '智能分析需求，自动生成测试用例',
-    apiTesting: '接口测试',
-    apiTestingDesc: '高效的接口自动化测试与管理',
+    healthCheck: '健康监控',
+    healthCheckDesc: '查看服务器性能指标与 TestHub 服务状态',
     uiAutomation: 'UI自动化测试',
     uiAutomationDesc: '可视化的Web/App UI自动化测试',
     appAutomation: 'APP自动化测试',

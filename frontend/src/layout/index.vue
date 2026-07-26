@@ -58,43 +58,100 @@
             </el-menu-item>
           </template>
 
-          <!-- 接口测试模块菜单 -->
-          <template v-else-if="currentModule === 'api-testing'">
-            <el-menu-item index="/api-testing/dashboard">
-              <el-icon><Odometer /></el-icon>
-              <span>{{ $t('menu.dashboard') }}</span>
+          <template v-else-if="currentModule === 'assistant'">
+            <el-menu-item index="/assistant">
+              <el-icon><ChatDotRound /></el-icon>
+              <span>{{ $t('assistant.title') }}</span>
             </el-menu-item>
-            <el-menu-item index="/api-testing/projects">
-              <el-icon><Folder /></el-icon>
-              <span>{{ $t('menu.projectManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/interfaces">
-              <el-icon><Link /></el-icon>
-              <span>{{ $t('menu.interfaceManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/automation">
-              <el-icon><VideoPlay /></el-icon>
-              <span>{{ $t('menu.automationTesting') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/history">
-              <el-icon><Timer /></el-icon>
-              <span>{{ $t('menu.requestHistory') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/environments">
-              <el-icon><Setting /></el-icon>
-              <span>{{ $t('menu.environmentManagement') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/api-testing/reports">
+          </template>
+
+          <template v-else-if="currentModule === 'data-factory'">
+            <el-menu-item index="/data-factory">
               <el-icon><DataAnalysis /></el-icon>
-              <span>{{ $t('menu.testReport') }}</span>
+              <span>{{ $t('home.dataFactory') }}</span>
             </el-menu-item>
-            <el-menu-item index="/api-testing/scheduled-tasks">
+            <el-menu-item index="/data-factory/warehouse">
+              <el-icon><FolderOpened /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.warehouse') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/test_data">
+              <el-icon><User /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.test_data') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/business">
+              <el-icon><Collection /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.business') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/json">
+              <el-icon><Edit /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.json') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/string">
+              <el-icon><Document /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.string') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/encoding">
+              <el-icon><Connection /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.encoding') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/random">
+              <el-icon><MagicStick /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.random') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/encryption">
+              <el-icon><Lock /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.encryption') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/data-factory/crontab">
+              <el-icon><Timer /></el-icon>
+              <span>{{ $t('dataFactory.scenarios.crontab') }}</span>
+            </el-menu-item>
+          </template>
+
+          <!-- API自动化测试模块菜单 -->
+          <template v-else-if="currentModule === 'api-automation'">
+            <el-menu-item index="/api-automation/dashboard">
+              <el-icon><Odometer /></el-icon>
+              <span>{{ $t('menu.apiAutomationDashboard') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/cases">
+              <el-icon><Document /></el-icon>
+              <span>{{ $t('menu.apiAutomationCases') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/interfaces">
+              <el-icon><Link /></el-icon>
+              <span>{{ $t('menu.apiAutomationInterfaces') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/coverage">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>{{ $t('menu.apiAutomationCoverage') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/runs">
+              <el-icon><VideoPlay /></el-icon>
+              <span>{{ $t('menu.apiAutomationRuns') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/reports">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>{{ $t('menu.apiAutomationReports') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/scheduled-tasks">
               <el-icon><AlarmClock /></el-icon>
-              <span>{{ $t('menu.scheduledTasks') }}</span>
+              <span>{{ $t('menu.apiAutomationSchedules') }}</span>
             </el-menu-item>
-            <el-menu-item index="/api-testing/notification-logs">
+            <el-menu-item index="/api-automation/notification-logs">
               <el-icon><Bell /></el-icon>
-              <span>{{ $t('menu.notificationList') }}</span>
+              <span>{{ $t('menu.apiAutomationNotifications') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/api-automation/logs">
+              <el-icon><Monitor /></el-icon>
+              <span>{{ $t('menu.apiAutomationLogs') }}</span>
+            </el-menu-item>
+          </template>
+
+          <template v-else-if="currentModule === 'health-check'">
+            <el-menu-item index="/health-check">
+              <el-icon><Odometer /></el-icon>
+              <span>{{ $t('menu.healthCheck') }}</span>
             </el-menu-item>
           </template>
 
@@ -253,6 +310,10 @@
               <el-icon><Monitor /></el-icon>
               <span>{{ $t('menu.uiEnvConfig') }}</span>
             </el-menu-item>
+            <el-menu-item index="/configuration/api-environment">
+              <el-icon><Connection /></el-icon>
+              <span>{{ $t('menu.apiAutomationEnvironment') }}</span>
+            </el-menu-item>
             <el-menu-item index="/configuration/app-env">
               <el-icon><Cellphone /></el-icon>
               <span>{{ $t('menu.appEnvConfig') }}</span>
@@ -351,7 +412,7 @@ import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
   DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, User
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
 import logoHomePng from '@/assets/images/logo_home.png'
@@ -380,7 +441,10 @@ const handleLanguageChange = (lang) => {
 
 const currentModule = computed(() => {
   if (route.path.startsWith('/ai-generation')) return 'ai-generation'
-  if (route.path.startsWith('/api-testing')) return 'api-testing'
+  if (route.path.startsWith('/assistant')) return 'assistant'
+  if (route.path.startsWith('/data-factory')) return 'data-factory'
+  if (route.path.startsWith('/health-check')) return 'health-check'
+  if (route.path.startsWith('/api-automation')) return 'api-automation'
   if (route.path.startsWith('/ui-automation')) return 'ui-automation'
   if (route.path.startsWith('/app-automation')) return 'app-automation'
   if (route.path.startsWith('/ai-intelligent-mode')) return 'ai-intelligent-mode'
@@ -392,7 +456,10 @@ const currentModule = computed(() => {
 const moduleName = computed(() => {
   const map = {
     'ai-generation': t('modules.aiGeneration'),
-    'api-testing': t('modules.apiTesting'),
+    'assistant': t('home.aiEvaluator'),
+    'data-factory': t('home.dataFactory'),
+    'health-check': t('modules.healthCheck'),
+    'api-automation': t('modules.apiAutomation'),
     'ui-automation': t('modules.uiAutomation'),
     'app-automation': t('modules.appAutomation'),
     'ai-intelligent-mode': t('modules.aiIntelligentMode'),
@@ -416,17 +483,23 @@ const breadcrumbTitle = computed(() => {
     '/ai-generation/testsuites': t('menu.suiteManagement'),
     '/ai-generation/executions': t('menu.executionRecords'),
     '/ai-generation/reports': t('menu.testReport'),
+    '/assistant': t('assistant.title'),
 
-    // 接口测试
-    '/api-testing/dashboard': t('menu.dashboard'),
-    '/api-testing/projects': t('menu.projectManagement'),
-    '/api-testing/interfaces': t('menu.interfaceManagement'),
-    '/api-testing/automation': t('menu.automationTesting'),
-    '/api-testing/history': t('menu.requestHistory'),
-    '/api-testing/environments': t('menu.environmentManagement'),
-    '/api-testing/reports': t('menu.testReport'),
-    '/api-testing/scheduled-tasks': t('menu.scheduledTasks'),
-    '/api-testing/notification-logs': t('menu.notificationList'),
+    '/data-factory': t('home.dataFactory'),
+    '/data-factory/warehouse': t('dataFactory.scenarios.warehouse'),
+
+    '/health-check': t('menu.healthCheck'),
+
+    // API自动化测试
+    '/api-automation/dashboard': t('menu.apiAutomationDashboard'),
+    '/api-automation/cases': t('menu.apiAutomationCases'),
+    '/api-automation/interfaces': t('menu.apiAutomationInterfaces'),
+    '/api-automation/coverage': t('menu.apiAutomationCoverage'),
+    '/api-automation/runs': t('menu.apiAutomationRuns'),
+    '/api-automation/reports': t('menu.apiAutomationReports'),
+    '/api-automation/scheduled-tasks': t('menu.apiAutomationSchedules'),
+    '/api-automation/notification-logs': t('menu.apiAutomationNotifications'),
+    '/api-automation/logs': t('menu.apiAutomationLogs'),
 
     // UI自动化测试
     '/ui-automation/dashboard': t('menu.dashboard'),
@@ -472,6 +545,7 @@ const breadcrumbTitle = computed(() => {
     '/configuration/generation-config': t('menu.generationConfig'),
     '/configuration/knowledge-base': t('menu.knowledgeBaseConfig'),
     '/configuration/ui-env': t('menu.uiEnvConfig'),
+    '/configuration/api-environment': t('menu.apiAutomationEnvironment'),
     '/configuration/ai-mode': t('menu.aiModeModelConfig'),
     '/configuration/ai-mode-prompt': t('menu.aiModePromptConfig'),
     '/configuration/scheduled-task': t('menu.scheduledTaskConfig'),
@@ -486,6 +560,10 @@ const breadcrumbTitle = computed(() => {
     const nameStr = Array.isArray(queryName) ? queryName[0] : queryName
     const projectName = nameStr ? decodeURIComponent(nameStr) : sessionStorage.getItem('metaProjectName')
     return projectName || t('menu.projectManagementCenter')
+  }
+
+  if (path.startsWith('/data-factory/')) {
+    return t(`dataFactory.scenarios.${path.split('/')[2]}`)
   }
 
   return routeMap[path] || route.meta.title || ''

@@ -3,6 +3,7 @@
 """
 
 TOOL_LIST = [
+    {'name': 'construct_alert_event', 'display_name': '事件构造', 'description': '构造与 PyApiTest 一致的人员或车辆告警事件 payload', 'scenario': 'business', 'icon': 'video'},
     {'name': 'generate_chinese_name', 'display_name': '生成中文姓名', 'description': '生成随机中文姓名', 'scenario': 'test_data', 'icon': 'user'},
     {'name': 'generate_chinese_phone', 'display_name': '生成手机号', 'description': '生成随机中国手机号', 'scenario': 'test_data', 'icon': 'phone'},
     {'name': 'generate_chinese_email', 'display_name': '生成邮箱', 'description': '生成随机邮箱地址', 'scenario': 'test_data', 'icon': 'message'},
@@ -77,9 +78,15 @@ TOOL_LIST = [
 TOOL_CATEGORIES = [
     {
         'category': 'test_data',
-        'name': '测试数据',
+        'name': '数据生成',
         'scenario': 'test_data',
         'icon': 'user'
+    },
+    {
+        'category': 'business',
+        'name': '业务工具',
+        'scenario': 'business',
+        'icon': 'office'
     },
     {
         'category': 'json',

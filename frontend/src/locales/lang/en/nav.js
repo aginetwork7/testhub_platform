@@ -7,12 +7,13 @@ export default {
   },
   modules: {
     aiGeneration: 'AI Test Case Generation',
-    apiTesting: 'API Testing',
+    apiAutomation: 'API Automation Testing',
     uiAutomation: 'UI Automation Testing',
     appAutomation: 'APP Automation Testing',
     aiIntelligentMode: 'AI Intelligent Mode',
     configuration: 'Configuration Center',
-    unifiedProject: 'Unified Project Management'
+    unifiedProject: 'Unified Project Management',
+    healthCheck: 'Health Check'
   },
   menu: {
     // AI Test Case Generation
@@ -38,6 +39,20 @@ export default {
     environmentManagement: 'Environment Management',
     scheduledTasks: 'Scheduled Tasks',
     notificationList: 'Notification List',
+
+    // API Automation Testing
+    apiAutomationDashboard: 'Dashboard',
+    apiAutomationCases: 'Case Management',
+    apiAutomationInterfaces: 'Interface Management',
+    apiAutomationCoverage: 'Coverage Analytics',
+    apiAutomationRuns: 'Execution Records',
+    apiAutomationReports: 'Report Management',
+    apiAutomationConfigurations: 'Configuration Management',
+    apiAutomationEnvironment: 'Environment Configuration',
+    apiAutomationSchedules: 'Scheduled Tasks',
+    apiAutomationNotifications: 'Notification List',
+    apiAutomationLogs: 'Log Monitor',
+    healthCheck: 'System Health',
 
     // UI Automation
     elementManagement: 'Element Management',

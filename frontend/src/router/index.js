@@ -8,16 +8,9 @@ import Layout from '@/layout/index.vue'
 import ProjectList from '@/views/projects/ProjectList.vue'
 import Home from '@/views/Home.vue'
 import DataFactory from '@/views/data-factory/DataFactory.vue'
-import ApiDashboard from '@/views/api-testing/Dashboard.vue'
-import ApiProjectManagement from '@/views/api-testing/ProjectManagement.vue'
-import ApiInterfaceManagement from '@/views/api-testing/InterfaceManagement.vue'
-import ApiAutomationTesting from '@/views/api-testing/AutomationTesting.vue'
-import ApiRequestHistory from '@/views/api-testing/RequestHistory.vue'
-import ApiEnvironmentManagement from '@/views/api-testing/EnvironmentManagement.vue'
-import ApiReportView from '@/views/api-testing/ReportView.vue'
-import ApiScheduledTasks from '@/views/api-testing/ScheduledTasks.vue'
-import ApiAIServiceConfig from '@/views/api-testing/AIServiceConfig.vue'
-import NotificationLogs from '@/views/notification/NotificationLogs.vue'
+import DataWarehouse from '@/views/data-factory/DataWarehouse.vue'
+import HealthCheck from '@/views/health/HealthCheck.vue'
+import ApiAutomationWorkspace from '@/views/api-automation/Workspace.vue'
 import UiDashboard from '@/views/ui-automation/dashboard/Dashboard.vue'
 import UiProjectList from '@/views/ui-automation/projects/ProjectList.vue'
 import UiElementManagerEnhanced from '@/views/ui-automation/elements/ElementManagerEnhanced.vue'
@@ -57,12 +50,6 @@ const routes = [
     name: 'Register',
     component: Register,
     meta: { requiresGuest: true }
-  },
-  {
-    path: '/ai-generation/assistant',
-    name: 'Assistant',
-    component: () => import('@/views/assistant/AssistantView.vue'),
-    meta: { requiresAuth: true }
   },
   {
     path: '/reports',
@@ -203,11 +190,23 @@ const routes = [
         path: 'profile',
         name: 'Profile',
         component: () => import('@/views/profile/UserProfile.vue')
-      }
+      },
     ]
   },
   {
-    path: '/api-testing',
+    path: '/assistant',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [{ path: '', name: 'Assistant', component: () => import('@/views/assistant/AssistantView.vue') }]
+  },
+  {
+    path: '/health-check',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [{ path: '', name: 'HealthCheck', component: HealthCheck }]
+  },
+  {
+    path: '/api-automation',
     component: Layout,
     meta: { requiresAuth: true },
     children: [
@@ -217,53 +216,61 @@ const routes = [
       },
       {
         path: 'dashboard',
-        name: 'ApiDashboard',
-        component: ApiDashboard
+        name: 'ApiAutomationDashboard',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'dashboard' }
       },
       {
-        path: 'projects',
-        name: 'ApiProjects',
-        component: ApiProjectManagement
+        path: 'cases',
+        name: 'ApiAutomationCases',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'cases' }
       },
       {
         path: 'interfaces',
-        name: 'ApiInterfaces',
-        component: ApiInterfaceManagement
+        name: 'ApiAutomationInterfaces',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'interfaces' }
       },
       {
-        path: 'automation',
-        name: 'ApiAutomation',
-        component: ApiAutomationTesting
+        path: 'coverage',
+        name: 'ApiAutomationCoverage',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'coverage' }
       },
       {
-        path: 'history',
-        name: 'ApiHistory',
-        component: ApiRequestHistory
-      },
-      {
-        path: 'environments',
-        name: 'ApiEnvironments',
-        component: ApiEnvironmentManagement
+        path: 'runs',
+        name: 'ApiAutomationRuns',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'runs' }
       },
       {
         path: 'reports',
-        name: 'ApiReports',
-        component: ApiReportView
+        name: 'ApiAutomationReports',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'reports' }
+      },
+      {
+        path: 'configurations',
+        redirect: '/configuration/api-environment'
       },
       {
         path: 'scheduled-tasks',
-        name: 'ApiScheduledTasks',
-        component: ApiScheduledTasks
-      },
-      {
-        path: 'ai-service-config',
-        name: 'ApiAIServiceConfig',
-        component: ApiAIServiceConfig
+        name: 'ApiAutomationScheduledTasks',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'schedules' }
       },
       {
         path: 'notification-logs',
-        name: 'ApiNotificationLogs',
-        component: NotificationLogs
+        name: 'ApiAutomationNotificationLogs',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'notifications' }
+      },
+      {
+        path: 'logs',
+        name: 'ApiAutomationLogs',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'logs' }
       }
     ]
   },
@@ -391,9 +398,13 @@ const routes = [
   },
   {
     path: '/data-factory',
-    name: 'DataFactory',
-    component: DataFactory,
-    meta: { requiresAuth: true }
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      { path: '', name: 'DataFactory', component: DataFactory },
+      { path: 'warehouse', name: 'DataWarehouse', component: DataWarehouse },
+      { path: ':category', name: 'DataFactoryCategory', component: DataFactory }
+    ]
   },
   {
     path: '/configuration',
@@ -442,6 +453,12 @@ const routes = [
             path: 'ui-env',
             name: 'ConfigUIEnv',
             component: () => import('@/views/configuration/UIEnvironmentConfig.vue')
+          },
+          {
+            path: 'api-environment',
+            name: 'ConfigApiAutomationEnvironment',
+            component: ApiAutomationWorkspace,
+            props: { mode: 'configurations' }
           },
           {
             path: 'app-env',

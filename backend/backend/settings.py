@@ -67,6 +67,7 @@ LOCAL_APPS = [
     'apps.requirement_analysis',
     'apps.knowledge_base.apps.KnowledgeBaseConfig',
     'apps.api_testing',
+    'apps.api_automation.apps.ApiAutomationConfig',
     'apps.ui_automation.apps.UiAutomationConfig',
     'apps.app_automation.apps.AppAutomationConfig',
     'apps.ai_testing',
@@ -480,7 +481,7 @@ Q_CLUSTER = {
     'name': 'testhub',
     'workers': 1,  # 工作进程数，根据服务器配置做调整
     'timeout': 90,  # 任务超时时间（秒）
-    'retry': 180,  # 重试时间（秒），必须大于timeout，建议为timeout的2倍
+    'retry': 32_460,  # 必须覆盖 API 自动化任务最长 9 小时预算，防止执行中被重复投递
     'queue_limit': 50,  # 队列限制
     'bulk': 10,  # 批量处理数量
     'orm': 'default',  # 数据库配置
@@ -554,6 +555,8 @@ EMAIL_TIMEOUT = email_config.get('timeout', 30)
 logging_config = config_loader.get_logging_config()
 debug_enabled = logging_config.get('debug_enabled', False)
 console_level = 'DEBUG' if debug_enabled else 'INFO'
+API_AUTOMATION_LOG_MAX_BYTES = 10 * 1024 * 1024
+API_AUTOMATION_LOG_FILE = BASE_DIR / 'logs' / 'api_automation.log'
 
 # Logging - 使用log_config.py统一配置
 LOGGING = {
@@ -573,6 +576,15 @@ LOGGING = {
         'console': {
             'level': console_level,
             'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'api_automation_file': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': API_AUTOMATION_LOG_FILE,
+            'maxBytes': API_AUTOMATION_LOG_MAX_BYTES,
+            'backupCount': 5,
+            'encoding': 'utf-8',
             'formatter': 'verbose',
         },
     },
@@ -601,6 +613,11 @@ LOGGING = {
         'apps.scheduler.task_executor': {
             'handlers': ['console'],
             'level': 'DEBUG' if debug_enabled else 'INFO',
+            'propagate': False,
+        },
+        'apps.api_automation': {
+            'handlers': ['console', 'api_automation_file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

@@ -214,6 +214,12 @@ class ScheduleSerializer(serializers.ModelSerializer):
                     return '-'
             elif config.task_type == 'API_REQUEST':
                 return task_config.get('request_name', '-')
+            elif config.task_type == 'API_AUTOMATION_SUITE':
+                from apps.api_automation.models import ApiAutomationProject
+                try:
+                    return ApiAutomationProject.objects.get(id=config.project_id).name
+                except ApiAutomationProject.DoesNotExist:
+                    return '-'
         return '-'
     
     def get_engine(self, obj):
@@ -252,9 +258,10 @@ class ScheduleSerializer(serializers.ModelSerializer):
 class ScheduleCreateSerializer(serializers.Serializer):
     """创建定时任务序列化器"""
     name = serializers.CharField(max_length=100)
-    module = serializers.ChoiceField(choices=['API', 'UI', 'APP'])
+    module = serializers.ChoiceField(choices=['API', 'API_AUTOMATION', 'UI', 'APP'])
     task_type = serializers.ChoiceField(choices=[
         'API_TEST_SUITE', 'API_REQUEST',
+        'API_AUTOMATION_SUITE',
         'UI_TEST_SUITE', 'UI_TEST_CASE',
         'APP_TEST_SUITE', 'APP_TEST_CASE',
     ])

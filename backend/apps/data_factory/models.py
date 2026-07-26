@@ -8,7 +8,8 @@ class DataFactoryRecord(models.Model):
     """数据工厂使用记录"""
 
     TOOL_CATEGORIES = (
-        ('test_data', '测试数据'),
+        ('test_data', '数据生成'),
+        ('business', '业务工具'),
         ('json', 'JSON工具'),
         ('string', '字符工具'),
         ('encoding', '编码工具'),
@@ -18,7 +19,8 @@ class DataFactoryRecord(models.Model):
     )
 
     TOOL_SCENARIOS = (
-        ('test_data', '测试数据'),
+        ('test_data', '数据生成'),
+        ('business', '业务工具'),
         ('json', 'JSON工具'),
         ('string', '字符工具'),
         ('encoding', '编码工具'),

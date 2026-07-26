@@ -342,7 +342,9 @@ export default {
 
   // 场景名称
   scenarios: {
-    test_data: '测试数据',
+    warehouse: '数据仓库',
+    test_data: '数据生成',
+    business: '业务工具',
     json: 'JSON工具',
     string: '字符工具',
     encoding: '编码工具',
@@ -354,7 +356,8 @@ export default {
 
   // 场景描述
   scenarioDescs: {
-    test_data: '生成各种类型的测试数据',
+    test_data: '生成各种类型的数据',
+    business: '生成常用业务数据与档案信息',
     json: 'JSON数据的格式化、验证和转换',
     string: '字符串的处理和转换',
     encoding: '各种编码格式的转换',
@@ -366,6 +369,7 @@ export default {
 
   // 工具名称
   tools: {
+    construct_alert_event: '事件构造',
     generate_chinese_name: '生成中文姓名',
     generate_chinese_phone: '生成手机号',
     generate_chinese_email: '生成邮箱',
@@ -454,6 +458,7 @@ export default {
 
   // 工具描述
   toolDescs: {
+    construct_alert_event: '基于所选环境、设备和素材构造人员或车辆事件，并可选择真实上报。',
     generate_chinese_name: '生成随机中文姓名',
     generate_chinese_phone: '生成随机中国手机号码',
     generate_chinese_email: '生成随机邮箱地址',

@@ -160,8 +160,8 @@ export default {
     // Cards
     aiCaseGeneration: 'AI Case Generation',
     aiCaseGenerationDesc: 'Intelligently analyze requirements, auto-generate test cases',
-    apiTesting: 'API Testing',
-    apiTestingDesc: 'Efficient API automation testing and management',
+    healthCheck: 'Health Monitoring',
+    healthCheckDesc: 'View server performance metrics and TestHub service status',
     uiAutomation: 'UI Automation Testing',
     uiAutomationDesc: 'Visual Web/App UI automation testing',
     appAutomation: 'APP Automation Testing',

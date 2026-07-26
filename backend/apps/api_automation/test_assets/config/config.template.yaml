@@ -1,0 +1,84 @@
+api:
+  base_url: "{{BASE_URL}}"
+  timeout: 30
+  retry: 1
+  retry_interval: 1
+  headers:
+    User-Agent: "TestHub API Automation/1.0"
+  auth:
+    token_path: "/auth/login"
+    token_key: "token"
+    header_name: "Authorization"
+    header_prefix: "Bearer "
+websocket:
+  url: "{{WS_URL}}"
+  timeout: 30
+  ping_interval: 25
+  ping_timeout: 20
+  max_retries: 3
+  retry_interval: 5
+auth:
+  users:
+    dealer:
+      username: "{{DEALER_USERNAME}}"
+      password: "{{DEALER_PASSWORD}}"
+      role: "DEALER"
+    customer:
+      username: "{{CUSTOMER_USERNAME}}"
+      password: "{{CUSTOMER_PASSWORD}}"
+      role: "CUSTOMER"
+models:
+  qwen:
+    url: "{{QWEN_URL}}"
+    model: "{{QWEN_MODEL}}"
+    headers:
+      Authorization: "Bearer {{QWEN_API_KEY}}"
+  gpt:
+    url: "{{GPT_URL}}"
+    model: "{{GPT_MODEL}}"
+    headers:
+      Authorization: "Bearer {{GPT_API_KEY}}"
+test:
+  markers: ""
+  suite: ""
+  ignore_list: []
+  parallel: false
+  max_workers: 1
+  timeout:
+    case: 300
+    function: 60
+    setup: 180
+    teardown: 180
+  validation:
+    enabled: true
+    http_schema_enabled: false
+    schema_type: "json_schema"
+    ignore_optional: true
+  cleanup:
+    enabled: true
+    after_test: true
+    after_suite: true
+    after_session: true
+allure:
+  environment:
+    browser: "API Test"
+    language: "Python"
+    framework: "Pytest"
+  history:
+    max_items: 20
+html_report:
+  title: "TestHub API Automation Report"
+  combine_reports: true
+  timestamp: true
+performance:
+  concurrent_users: 10
+  monitoring: true
+  thresholds:
+    response_time_p95: 1000
+    error_rate_max: 1.0
+payment:
+  mock_base_url: "{{STRIPE_MOCK_URL}}"
+  headers:
+    X-Admin-Token: "{{STRIPE_ADMIN_TOKEN}}"
+  success_callback_url: "{{PAYMENT_SUCCESS_CALLBACK_URL}}"
+  expired_callback_url: "{{PAYMENT_EXPIRED_CALLBACK_URL}}"

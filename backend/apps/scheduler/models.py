@@ -2,12 +2,51 @@
 定时任务扩展模块
 扩展 Django-Q Schedule 模型，添加业务字段
 """
+import ast
+
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from django_q.models import Schedule
 
 User = get_user_model()
+API_AUTOMATION_SCHEDULE_TIMEOUT_SECONDS = 32_400
+
+
+def _schedule_kwargs(raw_kwargs):
+    if isinstance(raw_kwargs, dict):
+        return raw_kwargs
+    if not raw_kwargs:
+        return {}
+    try:
+        parsed = ast.literal_eval(raw_kwargs)
+    except (SyntaxError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def recalculate_api_automation_schedule_stats(schedule_id):
+    config = ScheduleConfig.objects.select_related('schedule').get(schedule_id=schedule_id)
+    from apps.api_automation.models import ApiAutomationRun
+    from django_q.models import Success
+
+    success_count = 0
+    failure_count = 0
+    for record in Success.objects.filter(func=config.schedule.func).order_by('stopped'):
+        result = record.result if isinstance(record.result, dict) else {}
+        run_id = result.get('run_id')
+        if not run_id:
+            continue
+        run = ApiAutomationRun.objects.filter(id=run_id).only('status').first()
+        if run is None:
+            continue
+        if run.status == 'COMPLETED':
+            success_count += 1
+        else:
+            failure_count += 1
+    config.success_count = success_count
+    config.failure_count = failure_count
+    config.save(update_fields=['success_count', 'failure_count'])
 
 
 class ScheduleConfig(models.Model):
@@ -17,6 +56,7 @@ class ScheduleConfig(models.Model):
     """
     MODULE_CHOICES = [
         ('API', 'API测试'),
+        ('API_AUTOMATION', 'API自动化测试'),
         ('UI', 'UI自动化'),
         ('APP', 'APP自动化'),
     ]
@@ -24,6 +64,7 @@ class ScheduleConfig(models.Model):
     TASK_TYPE_CHOICES = [
         ('API_TEST_SUITE', 'API测试套件'),
         ('API_REQUEST', 'API请求'),
+        ('API_AUTOMATION_SUITE', 'API自动化测试套件'),
         ('UI_TEST_SUITE', 'UI测试套件'),
         ('UI_TEST_CASE', 'UI测试用例'),
         ('APP_TEST_SUITE', 'APP测试套件'),
@@ -146,19 +187,32 @@ class ScheduleConfig(models.Model):
     def pause(self):
         """暂停任务"""
         self.status = 'PAUSED'
-        self.save()
-        # 暂停时将next_run设置为None，防止Django-Q调度器执行
         self.schedule.next_run = None
-        self.schedule.save()
+        self.schedule.save(update_fields=['next_run'])
+        self.save(update_fields=['status', 'updated_at'])
     
     def resume(self):
         """恢复任务"""
         self.status = 'ACTIVE'
-        self.save()
-        # 恢复时重新计算next_run
-        from django.utils import timezone
         self.schedule.next_run = timezone.now()
-        self.schedule.save()
+        self._ensure_api_automation_timeout()
+        self.schedule.save(update_fields=['next_run', 'kwargs'])
+        self.save(update_fields=['status', 'updated_at'])
+
+    def _ensure_api_automation_timeout(self):
+        if self.task_type != 'API_AUTOMATION_SUITE':
+            return
+        kwargs = _schedule_kwargs(self.schedule.kwargs)
+        q_options = kwargs.get('q_options') if isinstance(kwargs.get('q_options'), dict) else {}
+        self.schedule.kwargs = str({
+            **kwargs,
+            'schedule_id': self.schedule_id,
+            'q_options': {
+                **q_options,
+                'group': q_options.get('group', self.get_module_display()),
+                'timeout': API_AUTOMATION_SCHEDULE_TIMEOUT_SECONDS,
+            },
+        })
     
     def execute_now(self):
         """立即执行任务"""
@@ -181,6 +235,7 @@ def get_task_function(task_type):
     FUNCTION_MAP = {
         'API_TEST_SUITE': 'apps.scheduler.task_executor.execute_api_test_suite',
         'API_REQUEST': 'apps.scheduler.task_executor.execute_api_request',
+        'API_AUTOMATION_SUITE': 'apps.scheduler.task_executor.execute_api_automation_suite',
         'UI_TEST_SUITE': 'apps.scheduler.task_executor.execute_ui_test_suite',
         'UI_TEST_CASE': 'apps.scheduler.task_executor.execute_ui_test_cases',
         'APP_TEST_SUITE': 'apps.scheduler.task_executor.execute_app_test_suite',
@@ -252,13 +307,16 @@ def create_scheduled_task(
     )
     
     module_display = dict(ScheduleConfig.MODULE_CHOICES).get(module, module)
-    schedule.args = []
-    schedule.kwargs = {
-        'schedule_id': schedule.id,
-        'q_options': {
-            'group': module_display
-        }
+    q_options = {
+        'group': module_display,
     }
+    if task_type == 'API_AUTOMATION_SUITE':
+        q_options['timeout'] = API_AUTOMATION_SCHEDULE_TIMEOUT_SECONDS
+    schedule.args = []
+    schedule.kwargs = str({
+        'schedule_id': schedule.id,
+        'q_options': q_options,
+    })
     schedule.save()
     
     config = ScheduleConfig.objects.create(

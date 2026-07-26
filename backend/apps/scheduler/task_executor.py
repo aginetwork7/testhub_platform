@@ -3,10 +3,38 @@
 统一管理所有模块的异步任务执行
 """
 import re
+from functools import wraps
 from django.utils import timezone
 from django_q.tasks import async_task
 from django_q.models import Schedule
 from loguru import logger
+
+
+def _schedule_id_from_invocation(args, kwargs):
+    schedule_id = kwargs.get('schedule_id') or (args[0] if args else None)
+    if isinstance(schedule_id, list):
+        return schedule_id[0] if schedule_id else None
+    return schedule_id
+
+
+def _skip_paused_schedule(execute):
+    @wraps(execute)
+    def wrapped(*args, **kwargs):
+        if kwargs.get('is_manual_execution', False):
+            return execute(*args, **kwargs)
+        schedule_id = _schedule_id_from_invocation(args, kwargs)
+        if not schedule_id:
+            return execute(*args, **kwargs)
+        from apps.scheduler.models import ScheduleConfig
+        try:
+            config = ScheduleConfig.objects.get(schedule_id=schedule_id)
+        except ScheduleConfig.DoesNotExist:
+            return execute(*args, **kwargs)
+        if config.status == 'PAUSED':
+            logger.info(f"任务已暂停，跳过执行: {config.schedule.name}")
+            return {'success': True, 'skipped': True, 'message': '任务已暂停'}
+        return execute(*args, **kwargs)
+    return wrapped
 
 
 def _update_task_stats(schedule_id, success=True):
@@ -163,7 +191,7 @@ def execute_task(schedule_id, is_manual_execution=True, executed_by_id=None):
     try:
         from apps.scheduler.models import ScheduleConfig
         config = ScheduleConfig.objects.get(schedule__id=schedule_id)
-        if not is_manual_execution and (config.status == 'PAUSED' or not schedule.enabled):
+        if not is_manual_execution and config.status == 'PAUSED':
             logger.info(f"任务已暂停，跳过执行: {schedule.name}")
             return None
     except ScheduleConfig.DoesNotExist:
@@ -225,7 +253,7 @@ def execute_scheduled_task(*args, **kwargs):
         config = ScheduleConfig.objects.get(schedule__id=schedule_id)
         
         # 检查任务是否被暂停（手动执行时跳过此检查）
-        if not is_manual_execution and (config.status == 'PAUSED' or not schedule.enabled):
+        if not is_manual_execution and config.status == 'PAUSED':
             logger.info(f"任务已暂停，跳过执行: {schedule.name}")
             return
     except (Schedule.DoesNotExist, ScheduleConfig.DoesNotExist) as e:
@@ -240,6 +268,8 @@ def execute_scheduled_task(*args, **kwargs):
         execute_api_test_suite(schedule_id=schedule_id, is_manual_execution=is_manual_execution, executed_by_id=executed_by_id)
     elif task_type == 'API_REQUEST':
         execute_api_request(schedule_id=schedule_id, is_manual_execution=is_manual_execution, executed_by_id=executed_by_id)
+    elif task_type == 'API_AUTOMATION_SUITE':
+        execute_api_automation_suite(schedule_id=schedule_id, is_manual_execution=is_manual_execution, executed_by_id=executed_by_id)
     elif task_type == 'UI_TEST_SUITE':
         execute_ui_test_suite(schedule_id=schedule_id, is_manual_execution=is_manual_execution, executed_by_id=executed_by_id)
     elif task_type == 'UI_TEST_CASE':
@@ -252,6 +282,7 @@ def execute_scheduled_task(*args, **kwargs):
         logger.error(f"未知的任务类型: {task_type}")
 
 
+@_skip_paused_schedule
 def execute_api_test_suite(*args, **kwargs):
     """执行API测试套件"""
     from apps.scheduler.models import ScheduleConfig
@@ -319,6 +350,92 @@ def execute_api_test_suite(*args, **kwargs):
         raise
 
 
+@_skip_paused_schedule
+def execute_api_automation_suite(*args, **kwargs):
+    """执行 TestHub 已迁移的 API 自动化测试用例。"""
+    from apps.api_automation.executor import execute_run
+    from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject, ApiAutomationRun
+    from apps.scheduler.models import ScheduleConfig
+
+    schedule_id = kwargs.get('schedule_id') or (args[0] if args else None)
+    if isinstance(schedule_id, list):
+        schedule_id = schedule_id[0] if schedule_id else None
+    if not schedule_id:
+        raise ValueError('schedule_id 为空')
+
+    config = ScheduleConfig.objects.get(schedule__id=schedule_id)
+    project = ApiAutomationProject.objects.get(id=config.project_id)
+    task_config = config.task_config or {}
+    configuration = None
+    configuration_id = task_config.get('configuration_id')
+    if configuration_id:
+        configuration = ApiAutomationConfiguration.objects.get(id=configuration_id, project=project)
+
+    run = ApiAutomationRun.objects.create(
+        project=project,
+        configuration=configuration,
+        selection=task_config.get('selection') or {'source_path_prefix': 'test_api'},
+        executed_by=config.created_by,
+    )
+    execute_run(run.id)
+    run.refresh_from_db()
+    success = run.status == 'COMPLETED'
+    result = {
+        'success': success,
+        'run_id': run.id,
+        'total_cases': run.total_cases,
+        'passed_cases': run.passed_cases,
+        'failed_cases': run.failed_cases,
+        'skipped_cases': run.skipped_cases,
+    }
+    _update_task_stats(schedule_id, success=success)
+
+    notification_enabled = (success and config.notify_on_success) or (not success and config.notify_on_failure)
+    if notification_enabled:
+        send_notification(
+            config,
+            success,
+            result,
+            kwargs.get('is_manual_execution', False),
+            kwargs.get('executed_by_id'),
+        )
+    _record_api_automation_notification(config, run, notification_enabled)
+    return result
+
+
+def _record_api_automation_notification(config, run, notification_enabled):
+    from apps.api_automation.models import ApiAutomationNotificationLog
+
+    email_configs = config.notification_configs.filter(config_type='email', is_active=True)
+    webhook_configs = config.notification_configs.filter(config_type__startswith='webhook', is_active=True)
+    email_enabled = config.notify_on_email and email_configs.exists()
+    webhook_enabled = config.notify_on_webhook and webhook_configs.exists()
+    channel = 'MULTI' if email_enabled and webhook_enabled else 'EMAIL' if email_enabled else 'WEBHOOK' if webhook_enabled else 'NONE'
+    targets = [
+        *[{'type': 'email', 'name': item.name} for item in email_configs],
+        *[{'type': 'webhook', 'name': item.name} for item in webhook_configs],
+    ]
+    status = 'DISPATCHED' if notification_enabled and channel != 'NONE' else 'SKIPPED'
+    message = (
+        f"运行 #{run.id} 已{'完成' if run.status == 'COMPLETED' else '失败'}："
+        f"通过 {run.passed_cases}，失败 {run.failed_cases}，跳过 {run.skipped_cases}。"
+    )
+    ApiAutomationNotificationLog.objects.update_or_create(
+        run=run,
+        defaults={
+            'project': run.project,
+            'schedule_id': config.schedule_id,
+            'schedule_name': config.schedule.name if config.schedule else '未命名计划',
+            'execution_status': run.status,
+            'channel': channel,
+            'status': status,
+            'targets': targets,
+            'message': message,
+        },
+    )
+
+
+@_skip_paused_schedule
 def execute_api_request(*args, **kwargs):
     """执行单个API请求"""
     from apps.scheduler.models import ScheduleConfig
@@ -381,6 +498,7 @@ def execute_api_request(*args, **kwargs):
         raise
 
 
+@_skip_paused_schedule
 def execute_ui_test_suite(*args, **kwargs):
     """执行UI自动化测试套件"""
     from apps.scheduler.models import ScheduleConfig
@@ -452,6 +570,7 @@ def execute_ui_test_suite(*args, **kwargs):
         raise
 
 
+@_skip_paused_schedule
 def execute_ui_test_cases(*args, **kwargs):
     """执行UI自动化测试用例"""
     from apps.scheduler.models import ScheduleConfig
@@ -551,6 +670,7 @@ def execute_ui_test_cases(*args, **kwargs):
         raise
 
 
+@_skip_paused_schedule
 def execute_app_test_suite(*args, **kwargs):
     """执行APP自动化测试套件"""
     from apps.scheduler.models import ScheduleConfig
@@ -615,6 +735,7 @@ def execute_app_test_suite(*args, **kwargs):
         raise
 
 
+@_skip_paused_schedule
 def execute_app_test_cases(*args, **kwargs):
     """执行APP自动化测试用例"""
     from apps.scheduler.models import ScheduleConfig
@@ -960,7 +1081,7 @@ def send_notification(config, success, result, is_manual_execution=False, execut
                     for bot in bots:
                         if bot.get('enabled', True):
                             module = config.module
-                            if module == 'API' and bot.get('enable_api_testing', True):
+                            if module in {'API', 'API_AUTOMATION'} and bot.get('enable_api_testing', True):
                                 all_webhook_bots.append(bot)
                                 logger.info(f"添加机器人: {bot.get('name')} (API测试已启用)")
                             elif module == 'UI' and bot.get('enable_ui_automation', True):

@@ -32,25 +32,16 @@
         </div>
       </div>
       
-      <div class="user-profile">
-        <el-dropdown trigger="click" @command="handleCommand">
-          <div class="user-info">
-            <el-avatar :size="32" :icon="UserFilled" />
-            <span class="username">{{ userStore.user?.username || $t('assistant.user') }}</span>
-            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </div>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="home">{{ $t('assistant.goHome') }}</el-dropdown-item>
-              <el-dropdown-item command="logout" divided>{{ $t('assistant.logout') }}</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
     </div>
 
     <!-- 右侧主内容区 -->
     <div class="main-content">
+      <div class="page-header">
+        <div>
+          <h2>{{ $t('assistant.title') }}</h2>
+          <p>{{ $t('assistant.subtitle') }}</p>
+        </div>
+      </div>
       <!-- 场景1：新会话（居中输入框） -->
       <div v-if="isNewChatMode" class="welcome-screen">
         <div class="welcome-content">
@@ -214,14 +205,12 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
-import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useUserStore } from '@/stores/user'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, ChatDotRound, User, Cpu, Promotion, Loading, UserFilled, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { Plus, Delete, ChatDotRound, User, Cpu, Promotion, Loading } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 
-const router = useRouter()
 const userStore = useUserStore()
 const { t, locale } = useI18n()
 
@@ -256,26 +245,6 @@ const messagesContainer = ref(null)
 const activeStreamController = ref(null)
 const enableThinkingMode = ref(getStorageFlag('assistant_enable_thinking_mode', true))
 const showThinking = ref(getStorageFlag('assistant_show_thinking', true))
-
-const handleCommand = (command) => {
-  if (command === 'logout') {
-    handleLogout()
-  } else if (command === 'home') {
-    router.push('/home')
-  }
-}
-
-const handleLogout = () => {
-  ElMessageBox.confirm(t('assistant.logoutConfirm'), t('assistant.logoutTitle'), {
-    confirmButtonText: t('assistant.confirm'),
-    cancelButtonText: t('assistant.cancel'),
-    type: 'warning'
-  }).then(() => {
-    userStore.logout()
-    router.push('/login')
-    ElMessage.success(t('assistant.loggedOut'))
-  }).catch(() => {})
-}
 
 // 计算属性
 const historySessionsDescending = computed(() => {
@@ -713,7 +682,7 @@ onBeforeUnmount(() => {
 <style scoped lang="scss">
 .assistant-layout {
   display: flex;
-  height: 100vh;
+  height: calc(100vh - 60px);
   background: #fff;
   overflow: hidden;
 }
@@ -721,12 +690,12 @@ onBeforeUnmount(() => {
 /* 左侧侧边栏 */
 .sidebar {
   width: 260px;
-  background: #001529; /* 与主布局一致的深色背景 */
-  border-right: 1px solid #1f1f1f;
+  background: #f8fafc;
+  border-right: 1px solid #eaecf0;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  color: rgba(255, 255, 255, 0.65);
+  color: #475467;
   
   .new-chat-btn-wrapper {
     padding: 20px;
@@ -736,13 +705,12 @@ onBeforeUnmount(() => {
       height: 40px;
       border-radius: 4px; /* 稍微减小圆角以匹配整体风格 */
       font-size: 14px;
-      background: #1890ff;
-      border-color: #1890ff;
-      color: white;
+      background: #1677ff;
+      border-color: #1677ff;
       
       &:hover {
-        background: #40a9ff;
-        border-color: #40a9ff;
+        background: #4096ff;
+        border-color: #4096ff;
       }
     }
   }
@@ -756,7 +724,7 @@ onBeforeUnmount(() => {
     .history-label {
       padding: 0 20px 10px;
       font-size: 12px;
-      color: rgba(255, 255, 255, 0.45);
+      color: #667085;
     }
     
     .session-scroll-area {
@@ -768,7 +736,7 @@ onBeforeUnmount(() => {
         width: 4px;
       }
       &::-webkit-scrollbar-thumb {
-        background: rgba(255, 255, 255, 0.2);
+        background: #cbd5e1;
         border-radius: 2px;
       }
     }
@@ -782,11 +750,11 @@ onBeforeUnmount(() => {
       border-radius: 4px;
       cursor: pointer;
       transition: all 0.2s;
-      color: rgba(255, 255, 255, 0.65);
+      color: #475467;
       
       &:hover {
-        background: rgba(255, 255, 255, 0.08);
-        color: white;
+        background: #eef4ff;
+        color: #1d4ed8;
         
         .session-actions {
           opacity: 1;
@@ -794,8 +762,8 @@ onBeforeUnmount(() => {
       }
       
       &.active {
-        background: #1890ff;
-        color: white;
+        background: #dbeafe;
+        color: #1d4ed8;
       }
       
       .session-title-wrapper {
@@ -823,7 +791,7 @@ onBeforeUnmount(() => {
         
         .delete-icon {
           font-size: 14px;
-          color: rgba(255, 255, 255, 0.45);
+          color: #98a2b3;
           &:hover {
             color: #ff4d4f;
           }
@@ -832,37 +800,6 @@ onBeforeUnmount(() => {
     }
   }
   
-  .user-profile {
-    padding: 16px;
-    border-top: 1px solid #1f1f1f;
-    
-    .user-info {
-      display: flex;
-      align-items: center;
-      cursor: pointer;
-      padding: 8px;
-      border-radius: 4px;
-      transition: all 0.2s;
-      
-      &:hover {
-        background: rgba(255, 255, 255, 0.08);
-      }
-      
-      .username {
-        margin: 0 8px;
-        font-size: 14px;
-        color: rgba(255, 255, 255, 0.85);
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      
-      .el-icon {
-        color: rgba(255, 255, 255, 0.45);
-      }
-    }
-  }
 }
 
 /* 右侧主内容区 */
@@ -872,6 +809,28 @@ onBeforeUnmount(() => {
   flex-direction: column;
   position: relative;
   background: #fff;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+  padding: 20px 24px;
+  border-bottom: 1px solid #eaecf0;
+  background: #f8fafc;
+
+  h2 {
+    margin: 0;
+    color: #1c2b3a;
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  p {
+    margin: 6px 0 0;
+    color: #667085;
+    font-size: 14px;
+  }
 }
 
 /* 场景1：欢迎页（新会话） */

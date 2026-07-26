@@ -20,7 +20,7 @@ class ConfigLoader:
             current_path = Path(__file__).resolve().parent
             while current_path != current_path.parent:
                 config_path = current_path / 'config.yaml'
-                if config_path.exists():
+                if config_path.is_file() and config_path.stat().st_size > 0:
                     self.project_root = current_path
                     config_file = config_path
                     break
@@ -43,7 +43,7 @@ class ConfigLoader:
             return {}
 
         with open(self.config_file, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            return yaml.safe_load(f) or {}
 
     def get(self, key_path, default=None, cast=None):
         """
