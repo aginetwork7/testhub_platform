@@ -7,12 +7,13 @@ export default {
   },
   modules: {
     aiGeneration: 'AI用例生成',
-    apiTesting: '接口测试',
+    apiAutomation: 'API自动化测试',
     uiAutomation: 'UI自动化测试',
     appAutomation: 'APP自动化测试',
     aiIntelligentMode: 'AI 智能模式',
     configuration: '配置中心',
-    unifiedProject: '项目管理'
+    unifiedProject: '项目管理',
+    healthCheck: '健康检测'
   },
   menu: {
     // AI用例生成
@@ -38,6 +39,20 @@ export default {
     environmentManagement: '环境管理',
     scheduledTasks: '定时任务',
     notificationList: '通知列表',
+
+    // API自动化测试
+    apiAutomationDashboard: '数据看板',
+    apiAutomationCases: '用例管理',
+    apiAutomationInterfaces: '接口管理',
+    apiAutomationCoverage: '覆盖统计',
+    apiAutomationRuns: '执行记录',
+    apiAutomationReports: '报告管理',
+    apiAutomationConfigurations: '配置管理',
+    apiAutomationEnvironment: '环境配置',
+    apiAutomationSchedules: '定时任务',
+    apiAutomationNotifications: '通知列表',
+    apiAutomationLogs: '日志监控',
+    healthCheck: '系统健康检测',
 
     // UI自动化
     elementManagement: '元素管理',

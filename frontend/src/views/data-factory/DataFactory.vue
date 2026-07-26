@@ -1,36 +1,33 @@
 <template>
   <div class="data-factory-container">
-    <el-card class="header-card">
-      <div class="header-content">
-        <h1 class="page-title" @click="goToHome">
-          <el-icon class="title-icon"><DataLine /></el-icon>
-          {{ $t('dataFactory.title') }}
-        </h1>
-        <p class="page-subtitle">{{ $t('dataFactory.subtitle') }}</p>
-        <div class="header-actions">
-          <el-button-group>
-            <el-button
-              :type="viewMode === 'category' ? 'primary' : ''"
-              @click="viewMode = 'category'"
-            >
-              <el-icon><Menu /></el-icon>
-              {{ $t('dataFactory.viewMode.category') }}
-            </el-button>
-            <el-button
-              :type="viewMode === 'scenario' ? 'primary' : ''"
-              @click="viewMode = 'scenario'"
-            >
-              <el-icon><Grid /></el-icon>
-              {{ $t('dataFactory.viewMode.scenario') }}
-            </el-button>
-          </el-button-group>
-          <el-button type="info" @click="showHistory = true">
-            <el-icon><Clock /></el-icon>
-            {{ $t('dataFactory.actions.history') }}
-          </el-button>
-        </div>
+    <div class="page-header">
+      <div>
+        <h2>{{ $t('dataFactory.title') }}</h2>
+        <p>{{ $t('dataFactory.subtitle') }}</p>
       </div>
-    </el-card>
+      <div class="header-actions">
+        <el-button-group v-if="!selectedCategory">
+          <el-button
+            :type="viewMode === 'category' ? 'primary' : ''"
+            @click="viewMode = 'category'"
+          >
+            <el-icon><Menu /></el-icon>
+            {{ $t('dataFactory.viewMode.category') }}
+          </el-button>
+          <el-button
+            :type="viewMode === 'scenario' ? 'primary' : ''"
+            @click="viewMode = 'scenario'"
+          >
+            <el-icon><Grid /></el-icon>
+            {{ $t('dataFactory.viewMode.scenario') }}
+          </el-button>
+        </el-button-group>
+        <el-button type="info" @click="showHistory = true">
+          <el-icon><Clock /></el-icon>
+          {{ $t('dataFactory.actions.history') }}
+        </el-button>
+      </div>
+    </div>
 
     <!-- 工具分类视图 -->
     <div v-if="viewMode === 'category'" class="category-view">
@@ -76,6 +73,7 @@
           </div>
         </el-card>
       </div>
+      <el-empty v-if="!filteredCategories().length" description="当前分类暂无工具" />
     </div>
 
     <!-- 场景视图 -->
@@ -103,6 +101,7 @@
       v-model="toolDialogVisible"
       :title="getToolDisplayName(currentTool?.name) || currentTool?.display_name"
       width="1200px"
+      align-center
       :close-on-click-modal="false"
       @close="resetToolForm"
     >
@@ -116,8 +115,20 @@
         />
 
         <!-- 测试数据工具 - 无需输入参数 -->
-        <div v-if="currentCategory === 'test_data'" class="tool-form">
+        <div v-if="['test_data', 'business'].includes(currentCategory)" class="tool-form">
           <el-form label-width="120px">
+            <template v-if="currentTool.name === 'construct_alert_event'">
+              <el-form-item label="运行环境"><el-select v-model="toolForm.environment_id" placeholder="选择运行环境"><el-option v-for="environment in eventEnvironments" :key="environment.id" :label="environment.name" :value="environment.id" /></el-select></el-form-item>
+              <el-form-item label="设备"><el-select v-model="toolForm.device" :disabled="!eventDevices.length"><el-option v-for="device in eventDevices" :key="device.value" :label="device.label" :value="device.value" /></el-select></el-form-item>
+              <el-form-item label="摄像头"><el-select v-model="toolForm.camera_index" :disabled="!eventCameras.length"><el-option v-for="(camera, index) in eventCameras" :key="`${camera.camera_mac}-${index}`" :label="`${camera.camera_name} (${camera.camera_mac})`" :value="index" /></el-select></el-form-item>
+              <el-form-item label="事件类型"><el-select v-model="toolForm.alert_type"><el-option label="人员事件" value="person" /><el-option label="车辆事件" value="vehicle" /></el-select></el-form-item>
+              <el-form-item label="事件时间"><el-input-number v-model="toolForm.created_at" :min="1" /></el-form-item>
+              <el-form-item v-if="toolForm.alert_type === 'person'" label="上衣颜色"><el-input-number v-model="toolForm.coat_color" :min="0" /></el-form-item>
+              <el-form-item v-if="toolForm.alert_type === 'person'" label="裤子颜色"><el-input-number v-model="toolForm.trousers_color" :min="0" /></el-form-item>
+              <el-form-item v-if="toolForm.alert_type === 'vehicle'" label="车辆颜色"><el-input-number v-model="toolForm.vehicle_color" :min="0" /></el-form-item>
+              <el-form-item label="素材路径"><el-select v-model="toolForm.media_path" clearable placeholder="选择素材目录或关键素材文件"><el-option v-for="option in eventMediaOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select><span class="form-tip">目录会批量处理所有 *_image_0.jpeg</span></el-form-item>
+              <el-form-item label="真实上报"><el-switch v-model="toolForm.report_event" /><span class="form-tip">开启后将向所选环境创建真实事件</span></el-form-item>
+            </template>
             <el-form-item :label="$t('dataFactory.form.count')">
               <el-input-number v-model="toolForm.count" :min="1" :max="100" />
               <span class="form-tip">{{ $t('dataFactory.form.countTip') }}</span>
@@ -920,9 +931,16 @@
                   {{ formatDateTime(row.created_at) }}
                 </template>
               </el-table-column>
-              <el-table-column :label="$t('dataFactory.history.operation')" width="100" align="center" fixed="right">
+              <el-table-column :label="$t('dataFactory.history.operation')" width="120" align="center" fixed="right">
                 <template #default="{ row }">
-                  <el-button size="small" type="danger" @click="deleteRecord(row)">{{ $t('dataFactory.actions.delete') }}</el-button>
+                  <div class="history-actions">
+                    <el-tooltip content="查看详情" placement="top">
+                      <el-button class="history-action-button detail" :icon="View" circle @click="showRecordDetail(row)" />
+                    </el-tooltip>
+                    <el-tooltip content="删除记录" placement="top">
+                      <el-button class="history-action-button delete" :icon="Delete" circle @click="deleteRecord(row)" />
+                    </el-tooltip>
+                  </div>
                 </template>
               </el-table-column>
             </el-table>
@@ -1000,13 +1018,21 @@
         </el-tab-pane>
       </el-tabs>
     </el-dialog>
+
+    <el-dialog v-model="recordDetailVisible" title="使用记录详情" width="860px" align-center>
+      <template v-if="selectedRecord">
+        <el-descriptions :column="2" border><el-descriptions-item label="工具">{{ getToolDisplayName(selectedRecord.tool_name) }}</el-descriptions-item><el-descriptions-item label="时间">{{ formatDateTime(selectedRecord.created_at) }}</el-descriptions-item><el-descriptions-item label="分类">{{ selectedRecord.tool_category_display }}</el-descriptions-item><el-descriptions-item label="场景">{{ selectedRecord.tool_scenario_display }}</el-descriptions-item></el-descriptions>
+        <h4 class="record-detail-title">输入参数</h4><pre class="record-detail-json">{{ JSON.stringify(selectedRecord.input_data, null, 2) }}</pre>
+        <h4 class="record-detail-title">调用结果</h4><pre class="record-detail-json">{{ JSON.stringify(selectedRecord.output_data, null, 2) }}</pre>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, watch, onMounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, ElEmpty } from 'element-plus'
 import {
   DataLine, Menu, Grid, Clock, Operation, ArrowRight,
@@ -1014,6 +1040,7 @@ import {
   Phone, Message, Location, Ticket, OfficeBuilding, CreditCard, CircleCheck, DocumentCopy, Search, Delete, Edit, Unlock, DataLine as DataLineIcon, Sort, Share, View, Upload
 } from '@element-plus/icons-vue'
 import api from '@/utils/api'
+import { getAutomationConfigurations } from '@/api/api-automation'
 import { debounce } from 'lodash-es'
 
 // 缓存工具
@@ -1047,8 +1074,8 @@ const cache = {
   }
 }
 
-const router = useRouter()
 const { t } = useI18n()
+const route = useRoute()
 
 const viewMode = ref('category')
 const categories = ref([])
@@ -1057,6 +1084,8 @@ const currentScenario = ref(null)
 const toolDialogVisible = ref(false)
 const currentTool = ref(null)
 const currentCategory = ref('')
+const eventEnvironments = ref([])
+const eventMediaOptions = ref([])
 const toolForm = ref({
   count: 1,
   text: '',
@@ -1140,6 +1169,16 @@ const toolForm = ref({
   image_format: 'png',
   include_prefix: true,
   base64_str: ''
+  ,alert_type: 'person'
+  ,environment_id: null
+  ,device: 'main'
+  ,camera_index: 0
+  ,created_at: Math.floor(Date.now() / 1000)
+  ,coat_color: 1
+  ,trousers_color: 2
+  ,vehicle_color: 1
+  ,report_event: false
+  ,media_path: ''
 })
 const toolResult = ref(null)
 const imagePreview = ref('')
@@ -1154,10 +1193,19 @@ const historyCurrentPage = ref(1)
 const historyPageSize = ref(10)
 const statistics = ref({})
 const historyLoading = ref(false)
+const recordDetailVisible = ref(false)
+const selectedRecord = ref(null)
 const statsLoading = ref(false)
 const jsonTreeData = ref(null)
 const jsonExpandedKeys = ref([])
 const jsonCollapseState = ref({})
+const selectedCategory = computed(() => String(route.params.category || ''))
+const selectedEventEnvironment = computed(() => eventEnvironments.value.find(item => item.id === toolForm.value.environment_id))
+const eventDevices = computed(() => {
+  const edge = selectedEventEnvironment.value?.runtime_settings?.api?.edge || {}
+  return ['main', 'backup'].map(value => ({ value, label: value === 'main' ? '主设备' : '备设备', cameras: edge[`${value}_device`]?.cameras || [] })).filter(device => device.cameras.length)
+})
+const eventCameras = computed(() => eventDevices.value.find(device => device.value === toolForm.value.device)?.cameras || [])
 
 const iconMap = {
   'document': Document,
@@ -1195,6 +1243,7 @@ const getIcon = (iconName) => {
 const getScenarioIcon = (scenario) => {
   const iconMapping = {
     'test_data': User,
+    'business': OfficeBuilding,
     'json': List,
     'string': Document,
     'encoding': Connection,
@@ -1211,6 +1260,23 @@ const fetchCategories = async () => {
     categories.value = response.data.categories
   } catch (error) {
     ElMessage.error(t('dataFactory.messages.fetchCategoriesFailed'))
+  }
+}
+
+const loadEventEnvironments = async () => {
+  try {
+    const response = await getAutomationConfigurations()
+    eventEnvironments.value = response.data.results || response.data
+  } catch (error) {
+    ElMessage.error('加载事件运行环境失败')
+  }
+}
+
+const loadEventMediaOptions = async () => {
+  try {
+    eventMediaOptions.value = (await api.get('/data-factory/warehouse/')).data.event_paths || []
+  } catch (error) {
+    ElMessage.error('加载事件素材失败')
   }
 }
 
@@ -1429,10 +1495,6 @@ const getToolDescriptionOld = (toolName) => {
   return toolDescriptions[toolName] || ''
 }
 
-const goToHome = () => {
-  router.push('/')
-}
-
 const openTool = (tool, category) => {
   currentTool.value = tool
   currentCategory.value = category
@@ -1445,7 +1507,22 @@ const buildInputData = () => {
   const category = currentCategory.value
   const form = toolForm.value
 
-  if (category === 'test_data') {
+  if (['test_data', 'business'].includes(category)) {
+    if (toolName === 'construct_alert_event') {
+      return {
+        alert_type: form.alert_type,
+        environment_id: form.environment_id,
+        device: form.device,
+        camera_index: form.camera_index,
+        created_at: form.created_at,
+        coat_color: form.coat_color,
+        trousers_color: form.trousers_color,
+        vehicle_color: form.vehicle_color,
+        media_path: form.media_path,
+        report_event: form.report_event,
+        count: form.count
+      }
+    }
     const data = { count: form.count }
     if (toolName === 'generate_chinese_name') data.gender = form.gender
     if (toolName === 'generate_chinese_phone') data.region = form.region
@@ -1695,6 +1772,16 @@ const resetToolForm = () => {
     image_format: 'png',
     include_prefix: true,
     base64_str: '',
+    alert_type: 'person',
+    environment_id: null,
+    device: 'main',
+    camera_index: 0,
+    created_at: Math.floor(Date.now() / 1000),
+    coat_color: 1,
+    trousers_color: 2,
+    vehicle_color: 1,
+    report_event: false,
+    media_path: '',
     sequence: '',
     unique: false
   }
@@ -2043,8 +2130,12 @@ const clearScenario = () => {
 }
 
 const filteredCategories = () => {
-  if (!currentScenario.value) return categories.value
-  return categories.value.map(category => ({
+  let filtered = categories.value
+  if (selectedCategory.value) {
+    filtered = filtered.filter(category => category.category === selectedCategory.value)
+  }
+  if (!currentScenario.value) return filtered
+  return filtered.map(category => ({
     ...category,
     tools: category.tools.filter(tool => tool.scenario === currentScenario.value.scenario)
   })).filter(category => category.tools.length > 0)
@@ -2159,6 +2250,11 @@ const deleteRecord = async (record) => {
   }
 }
 
+const showRecordDetail = (record) => {
+  selectedRecord.value = record
+  recordDetailVisible.value = true
+}
+
 const calculatePercentage = (value, total) => {
   if (!total) return 0
   return Math.round((value / total) * 100)
@@ -2212,8 +2308,26 @@ watch(historyTab, (newVal) => {
   }
 })
 
+watch(selectedCategory, (category) => {
+  if (category) {
+    viewMode.value = 'category'
+    currentScenario.value = null
+  }
+}, { immediate: true })
+
+watch(() => toolForm.value.environment_id, () => {
+  toolForm.value.device = eventDevices.value[0]?.value || 'main'
+  toolForm.value.camera_index = 0
+})
+
+watch(() => toolForm.value.device, () => {
+  toolForm.value.camera_index = 0
+})
+
 onMounted(async () => {
   await fetchCategories()
+  await loadEventEnvironments()
+  await loadEventMediaOptions()
   fetchScenarios()
   fetchStatistics()
 })
@@ -2226,46 +2340,32 @@ onMounted(async () => {
   background: #f5f7fa;
 }
 
-.header-card {
+.record-detail-title { margin: 18px 0 8px; color: #344054; font-size: 14px; }.record-detail-json { max-height: 260px; margin: 0; padding: 12px; overflow: auto; border: 1px solid #e4e7ec; background: #f8fafc; color: #1d2939; font: 12px/1.6 Consolas, monospace; }
+
+.page-header {
   margin-bottom: 20px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
 
-  .header-content {
-    display: flex;
-    flex-direction: column;
-    gap: 15px;
+  h2 {
+    margin: 0;
+    color: #1c2b3a;
+    font-size: 22px;
+    font-weight: 700;
   }
 
-  .page-title {
-    font-size: 28px;
-    font-weight: 600;
-    color: #2c3e50;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 0;
-    cursor: pointer;
-    transition: color 0.3s;
-
-    &:hover {
-      color: #409eff;
-    }
-
-    .title-icon {
-      font-size: 32px;
-      color: #409eff;
-    }
-  }
-
-  .page-subtitle {
-    font-size: 16px;
-    color: #7f8c8d;
-    margin: 0;
+  p {
+    margin: 6px 0 0;
+    color: #667085;
+    font-size: 14px;
   }
 
   .header-actions {
     display: flex;
     gap: 10px;
-    justify-content: flex-end;
+    align-items: center;
   }
 }
 
@@ -2513,6 +2613,45 @@ onMounted(async () => {
           background-color: #f5f7fa;
         }
       }
+    }
+  }
+}
+
+.history-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
+.history-action-button {
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  border-radius: 6px;
+
+  &.detail {
+    border-color: #b2ddff;
+    color: #1570ef;
+    background: #f0f7ff;
+
+    &:hover,
+    &:focus {
+      border-color: #1570ef;
+      color: #fff;
+      background: #1570ef;
+    }
+  }
+
+  &.delete {
+    border-color: #fecdca;
+    color: #d92d20;
+    background: #fff5f4;
+
+    &:hover,
+    &:focus {
+      border-color: #d92d20;
+      color: #fff;
+      background: #d92d20;
     }
   }
 }

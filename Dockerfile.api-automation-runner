@@ -1,0 +1,24 @@
+FROM python:3.12-slim
+
+WORKDIR /runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends default-jre-headless \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN addgroup --system runner && adduser --system --ingroup runner runner
+
+COPY backend/apps/api_automation/runner_service/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+COPY backend/apps/api_automation/runner_service/ .
+COPY backend/apps/api_automation/test_assets/ /runner/test_assets/
+COPY expand/allure/ /opt/allure/
+
+RUN chmod +x /opt/allure/bin/allure
+
+ENV PATH="/opt/allure/bin:${PATH}"
+
+USER runner
+EXPOSE 19000
+
+CMD ["python", "server.py"]

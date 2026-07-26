@@ -46,6 +46,8 @@ services:
       - DB_HOST=db
       - DB_PORT=3306
       - REDIS_URL=redis://redis:6379/
+      - API_AUTOMATION_RUNNER_URL=http://api-automation-runner:19000
+      - API_AUTOMATION_RUNNER_TOKEN=${API_AUTOMATION_RUNNER_TOKEN:-}
       - HERMES_BASE_URL=${HERMES_BASE_URL:-http://host.docker.internal:8642/v1}
       - HERMES_MODEL_NAME=${HERMES_MODEL_NAME:-hermes-agent}
       - HERMES_API_KEY=${HERMES_API_KEY:-}
@@ -90,7 +92,10 @@ services:
     restart: always
     gpus: all
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+      api-automation-runner:
+        condition: service_healthy
     environment:
       - DB_NAME=testhub
       - DB_USER=root
@@ -98,6 +103,8 @@ services:
       - DB_HOST=db
       - DB_PORT=3306
       - REDIS_URL=redis://redis:6379/
+      - API_AUTOMATION_RUNNER_URL=http://api-automation-runner:19000
+      - API_AUTOMATION_RUNNER_TOKEN=${API_AUTOMATION_RUNNER_TOKEN:-}
       - HERMES_BASE_URL=${HERMES_BASE_URL:-http://host.docker.internal:8642/v1}
       - HERMES_MODEL_NAME=${HERMES_MODEL_NAME:-hermes-agent}
       - HERMES_API_KEY=${HERMES_API_KEY:-}
@@ -122,7 +129,48 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ${HERMES_API_KEY_FILE_HOST:-$HOME/.secrets/hermes_api_key}:/run/secrets/hermes_api_key:ro
 
-  # 5. 前端服务 (Vite Dev Server)
+  # 5. API 自动化报告目录初始化（仅创建目录并授权给 Runner 用户）
+  api-automation-artifact-init:
+    image: alpine:3.21
+    user: "0:0"
+    command: sh -c 'mkdir -p /artifacts && chown -R 100:101 /artifacts'
+    volumes:
+      - ./media/api-automation:/artifacts
+
+  # 6. API 自动化 pytest Runner（仅内部网络访问）
+  api-automation-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.api-automation-runner
+    restart: always
+    depends_on:
+      api-automation-artifact-init:
+        condition: service_completed_successfully
+    environment:
+      - API_AUTOMATION_RUNNER_TOKEN=${API_AUTOMATION_RUNNER_TOKEN:-}
+      - API_AUTOMATION_RUNNER_WORK_ROOT=/work
+      - API_AUTOMATION_RUNNER_ARTIFACT_ROOT=/artifacts
+      - API_AUTOMATION_RUNNER_MAX_REQUEST_BYTES=1048576
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=128m
+      - /work:rw,nosuid,size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:19000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ./media/api-automation:/artifacts
+
+  # 7. 前端服务 (Vite Dev Server)
   frontend:
     build:
       context: .

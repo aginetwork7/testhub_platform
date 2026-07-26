@@ -891,11 +891,11 @@ export function deleteSchedulerSchedule(id) {
   })
 }
 
-export function toggleSchedulerSchedule(id, is_active) {
-  const action = is_active ? 'resume' : 'pause'
+export function toggleSchedulerSchedule(id, action) {
   return request({
-    url: `/scheduler/schedules/${id}/${action}/`,
-    method: 'post'
+    url: `/scheduler/schedules/${id}/toggle/`,
+    method: 'post',
+    data: { action }
   })
 }
 

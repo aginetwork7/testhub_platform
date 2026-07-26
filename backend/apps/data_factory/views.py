@@ -6,12 +6,19 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import FormParser, MultiPartParser
 from django.db.models import Count
+from django.db.models import Q
 from django.http import HttpResponse
+from django.http import FileResponse
 from django.core.cache import cache
 
 from pathlib import Path
+import re
+import mimetypes
+import shutil
 from loguru import logger
+from dotenv import dotenv_values
 
 from .models import DataFactoryRecord
 from .serializers import DataFactoryRecordSerializer, ToolExecuteSerializer
@@ -24,6 +31,7 @@ from .tools.test_data_tools import TestDataTools
 from .tools.json_tools import JsonTools
 from .tools.crontab_tools import CrontabTools
 from .tools.image_tools import ImageTools
+from .tools.business_tools import BusinessTools
 
 
 class DataFactoryPagination(PageNumberPagination):
@@ -116,7 +124,8 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             result = self.execute_tool(
                 data['tool_name'],
                 data['tool_category'],
-                data['input_data']
+                data['input_data'],
+                request.user,
             )
 
             if 'error' in result:
@@ -215,10 +224,13 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             logger.error(f'清除历史记录缓存失败: {str(e)}\n{traceback.format_exc()}')
         # 历史记录缓存会在3分钟后自动过期（作为备份）
 
-    def execute_tool(self, tool_name: str, tool_category: str, input_data: dict):
+    def execute_tool(self, tool_name: str, tool_category: str, input_data: dict, user=None):
         """执行工具"""
         try:
-            logger.info(f'开始执行工具: {tool_name}, 分类: {tool_category}, 输入数据: {input_data}')
+            log_input = dict(input_data)
+            if 'device_key' in log_input:
+                log_input['device_key'] = '***'
+            logger.info(f'开始执行工具: {tool_name}, 分类: {tool_category}, 输入数据: {log_input}')
 
             # 字符工具
             if tool_category == 'string':
@@ -233,9 +245,11 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             elif tool_category == 'encryption':
                 result = self.execute_encryption_tool(tool_name, input_data)
             # 测试数据（包含测试数据和Mock数据）
-            elif tool_category == 'test_data':
+            elif tool_category in {'test_data', 'business'}:
                 if tool_name.startswith('mock_'):
                     result = self.execute_mock_tool(tool_name, input_data)
+                elif tool_category == 'business':
+                    result = self.execute_business_tool(tool_name, input_data, user)
                 else:
                     result = self.execute_test_data_tool(tool_name, input_data)
             # JSON工具
@@ -255,6 +269,206 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             error_msg = f'工具执行失败: {str(e)}'
             logger.error(error_msg, exc_info=True)
             return {'error': error_msg}
+
+    def execute_business_tool(self, tool_name: str, input_data: dict | str, user=None):
+        if tool_name != 'construct_alert_event':
+            return {'error': f'不支持的业务工具: {tool_name}'}
+        if isinstance(input_data, str):
+            input_data = {}
+        environment_id = input_data.pop('environment_id', None)
+        device = input_data.pop('device', 'main')
+        camera_index = input_data.pop('camera_index', 0)
+        report_event = input_data.pop('report_event', False)
+        media_path = input_data.pop('media_path', '')
+        if not environment_id or user is None:
+            return {'error': '事件构造需要选择可访问的运行环境。'}
+
+        from apps.api_automation.models import ApiAutomationConfiguration
+
+        environment = ApiAutomationConfiguration.objects.filter(
+            Q(project__owner=user) | Q(project__members=user),
+            id=environment_id,
+        ).distinct().first()
+        if environment is None:
+            return {'error': '运行环境不存在或无访问权限。'}
+        edge_settings = (environment.runtime_settings or {}).get('api', {}).get('edge', {})
+        device_settings = edge_settings.get(f'{device}_device', {})
+        cameras = device_settings.get('cameras', [])
+        if not isinstance(camera_index, int) or camera_index < 0 or camera_index >= len(cameras):
+            return {'error': '所选运行环境未配置对应摄像头。'}
+        camera = cameras[camera_index]
+        camera_mac = camera.get('camera_mac')
+        camera_name = camera.get('camera_name')
+        if not camera_mac or not camera_name:
+            return {'error': '所选摄像头缺少 MAC 地址或名称。'}
+
+        media_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        media_groups = BusinessTools.collect_event_media(media_root, media_path) if media_path else []
+        if media_groups:
+            input_data['count'] = len(media_groups)
+        result = BusinessTools.construct_alert_event(
+            camera_mac=camera_mac,
+            camera_name=camera_name,
+            **input_data,
+        )
+        if result.get('success'):
+            result['environment'] = {
+                'id': environment.id,
+                'name': environment.name,
+                'base_url': environment.base_url,
+                'device': device,
+                'camera_index': camera_index,
+            }
+            if report_event:
+                device_key = self._environment_device_key(environment.environment, device)
+                if not device_key:
+                    return {'success': False, 'error': '所选环境未配置设备私钥，无法真实上报事件。'}
+                events = result['result'] if isinstance(result['result'], list) else [result['result']]
+                report = BusinessTools.report_alert_events(
+                    events=events,
+                    base_url=environment.base_url,
+                    device_id=device_settings.get('device_id', ''),
+                    device_key=device_key,
+                    timeout_seconds=environment.timeout_seconds,
+                    paths=edge_settings.get('path', {}),
+                    media_groups=media_groups or None,
+                    s3_url=edge_settings.get('s3_url', ''),
+                )
+                if not report.get('success'):
+                    return report
+                result['report'] = report
+        return result
+
+    @action(detail=False, methods=['get'])
+    def warehouse(self, request):
+        events_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        categories = []
+        event_paths = []
+        labels = {'person': '人员事件素材', 'vehicle': '车辆事件素材'}
+        for directory in sorted(path for path in events_root.iterdir() if path.is_dir()):
+            category = directory.name
+            label = labels.get(category, f'自定义素材 / {category}')
+            try:
+                groups = BusinessTools.collect_event_media(events_root, category)
+            except ValueError:
+                groups = []
+            group_items = [
+                {
+                    'path': str(group['image_0'].relative_to(events_root)),
+                    'name': group['image_0'].name,
+                    'image_1': group['image_1'].name if group['image_1'] else None,
+                    'video_0': group['video_0'].name if group['video_0'] else None,
+                }
+                for group in groups
+            ]
+            categories.append({'key': category, 'label': label, 'group_count': len(group_items), 'groups': group_items})
+            event_paths.append({'value': category, 'label': f'{label}目录（{len(group_items)} 组事件）'})
+            event_paths.extend({'value': item['path'], 'label': f"{label} - {item['name']}"} for item in group_items)
+        return Response({'categories': categories, 'event_paths': event_paths})
+
+    @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def warehouse_upload(self, request):
+        category = request.data.get('category')
+        media_files = request.FILES.getlist('files') or ([request.FILES['file']] if request.FILES.get('file') else [])
+        if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', category):
+            return Response({'error': '存放路径只能是与 person、vehicle 同级的单层目录名。'}, status=status.HTTP_400_BAD_REQUEST)
+        if not media_files:
+            return Response({'error': '请选择需要上传的素材文件。'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(media_files) > 3:
+            return Response({'error': '一次最多上传主素材、关联图片和关联视频共 3 个文件。'}, status=status.HTTP_400_BAD_REQUEST)
+        pattern = re.compile(r'(?P<prefix>[A-Za-z0-9-]+)_(?P<kind>snap_image_[01]\.jpe?g|video_video_0\.mp4)')
+        validated_files = []
+        for media_file in media_files:
+            if media_file.size > 50 * 1024 * 1024:
+                return Response({'error': '单个素材文件不能超过 50MB。'}, status=status.HTTP_400_BAD_REQUEST)
+            filename = Path(media_file.name).name
+            match = pattern.fullmatch(filename)
+            if match is None:
+                return Response({'error': '文件名需符合 <名称>_snap_image_0.jpeg、<名称>_snap_image_1.jpeg 或 <名称>_video_video_0.mp4。'}, status=status.HTTP_400_BAD_REQUEST)
+            validated_files.append((media_file, filename, match.group('prefix'), match.group('kind')))
+        prefixes = {item[2] for item in validated_files}
+        if len(prefixes) > 1:
+            return Response({'error': '同一次上传的素材必须属于同一个事件前缀。'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(validated_files) > 1 and not any(item[3].startswith('snap_image_0.') for item in validated_files):
+            return Response({'error': '批量上传必须包含 <名称>_snap_image_0.jpeg 主素材。'}, status=status.HTTP_400_BAD_REQUEST)
+        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        target_directory = (warehouse_root / category).resolve()
+        target_directory.mkdir(parents=True, exist_ok=True)
+        uploaded_paths = []
+        for media_file, filename, _, _ in validated_files:
+            target = (target_directory / filename).resolve()
+            if target_directory not in target.parents:
+                return Response({'error': '素材路径无效。'}, status=status.HTTP_400_BAD_REQUEST)
+            with target.open('wb') as destination:
+                for chunk in media_file.chunks():
+                    destination.write(chunk)
+            uploaded_paths.append(f'{category}/{filename}')
+        cache.delete('data_factory_categories')
+        return Response({'paths': uploaded_paths, 'count': len(uploaded_paths)}, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'])
+    def warehouse_media(self, request):
+        category = request.query_params.get('category')
+        media_path = request.query_params.get('path', '')
+        if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', category):
+            return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
+        if not media_path.startswith(f'{category}/'):
+            return Response({'error': '素材路径与所选分类不匹配。'}, status=status.HTTP_400_BAD_REQUEST)
+        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        media_file = (warehouse_root / media_path).resolve()
+        category_root = (warehouse_root / category).resolve()
+        if category_root not in media_file.parents or not media_file.is_file():
+            return Response({'error': '素材文件不存在。'}, status=status.HTTP_404_NOT_FOUND)
+        content_type = mimetypes.guess_type(media_file.name)[0] or 'application/octet-stream'
+        return FileResponse(media_file.open('rb'), content_type=content_type)
+
+    @action(detail=False, methods=['delete'])
+    def warehouse_group(self, request):
+        category = request.query_params.get('category')
+        media_path = request.query_params.get('path', '')
+        if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', category):
+            return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
+        if not media_path.startswith(f'{category}/'):
+            return Response({'error': '素材路径与所选分类不匹配。'}, status=status.HTTP_400_BAD_REQUEST)
+        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        primary_path = (warehouse_root / media_path).resolve()
+        category_root = (warehouse_root / category).resolve()
+        if category_root not in primary_path.parents or '_snap_image_0.' not in primary_path.name:
+            return Response({'error': '只能通过主素材删除完整事件组。'}, status=status.HTTP_400_BAD_REQUEST)
+        if not primary_path.is_file():
+            return Response({'error': '事件主素材不存在。'}, status=status.HTTP_404_NOT_FOUND)
+        media_group = BusinessTools._media_group(primary_path)
+        deleted_paths = []
+        for media_path in media_group.values():
+            if media_path is not None and media_path.is_file():
+                media_path.unlink()
+                deleted_paths.append(str(media_path.relative_to(warehouse_root)))
+        cache.delete('data_factory_categories')
+        return Response({'deleted_paths': deleted_paths, 'count': len(deleted_paths)})
+
+    @action(detail=False, methods=['delete'])
+    def warehouse_directory(self, request):
+        category = request.query_params.get('category')
+        if not isinstance(category, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', category):
+            return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
+        if category in {'person', 'vehicle'}:
+            return Response({'error': '内置素材目录不能删除。'}, status=status.HTTP_400_BAD_REQUEST)
+        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
+        directory = (warehouse_root / category).resolve()
+        if warehouse_root not in directory.parents or not directory.is_dir():
+            return Response({'error': '自定义素材目录不存在。'}, status=status.HTTP_404_NOT_FOUND)
+        shutil.rmtree(directory)
+        cache.delete('data_factory_categories')
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _environment_device_key(environment: str, device: str) -> str:
+        config_directory = Path(__file__).resolve().parents[1] / 'api_automation' / 'test_assets' / 'config' / 'environments'
+        environment_file = config_directory / f'.env.{environment}'
+        if not environment_file.is_file():
+            return ''
+        key_name = 'MAIN_KEY' if device == 'main' else 'BACKUP_KEY'
+        return dotenv_values(environment_file).get(key_name) or ''
 
     def execute_string_tool(self, tool_name: str, input_data: dict | str):
         """执行字符工具"""
@@ -653,7 +867,7 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
         # 批量生成
         results = []
         for i in range(count):
-            result = self.execute_tool(tool_name, tool_category, input_data)
+            result = self.execute_tool(tool_name, tool_category, input_data, request.user)
             if 'error' not in result:
                 results.append(result)
 

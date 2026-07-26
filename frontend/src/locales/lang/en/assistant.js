@@ -13,7 +13,7 @@ export default {
   loggedOut: 'Logged out successfully',
 
   // Welcome Page
-  title: 'AI Reviewer',
+  title: 'AI Test Assistant',
   subtitle: "I'm your professional testing assistant. How can I help you?",
   inputPlaceholder: 'Enter your question, press Enter to send...',
   chatInputPlaceholder: 'Enter message...',

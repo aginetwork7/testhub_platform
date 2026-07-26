@@ -342,7 +342,9 @@ export default {
 
   // Scenario names
   scenarios: {
-    test_data: 'Test Data',
+    warehouse: 'Data Warehouse',
+    test_data: 'Data Generation',
+    business: 'Business Tools',
     json: 'JSON Tools',
     string: 'String Tools',
     encoding: 'Encoding Tools',
@@ -354,7 +356,8 @@ export default {
 
   // Scenario descriptions
   scenarioDescs: {
-    test_data: 'Generate various types of test data',
+    test_data: 'Generate various types of data',
+    business: 'Generate common business data and profile information',
     json: 'Format, validate and convert JSON data',
     string: 'String processing and conversion',
     encoding: 'Various encoding format conversions',
@@ -366,6 +369,7 @@ export default {
 
   // Tool names
   tools: {
+    construct_alert_event: 'Event Builder',
     generate_chinese_name: 'Generate Chinese Name',
     generate_chinese_phone: 'Generate Phone Number',
     generate_chinese_email: 'Generate Email',
@@ -454,6 +458,7 @@ export default {
 
   // Tool descriptions
   toolDescs: {
+    construct_alert_event: 'Build person or vehicle events from the selected environment, device, and media, with optional real reporting.',
     generate_chinese_name: 'Generate random Chinese names',
     generate_chinese_phone: 'Generate random Chinese phone numbers',
     generate_chinese_email: 'Generate random email addresses',

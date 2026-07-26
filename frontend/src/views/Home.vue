@@ -36,6 +36,15 @@
       <h1 class="main-title">{{ $t('home.title') }}</h1>
       <p class="subtitle">{{ $t('home.subtitle') }}</p>
 
+      <svg class="icon-gradient-definitions" aria-hidden="true">
+        <defs>
+          <linearGradient id="home-ai-blue-purple" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#3b82f6" />
+            <stop offset="100%" stop-color="#7c3aed" />
+          </linearGradient>
+        </defs>
+      </svg>
+
       <div class="cards-container">
         <!-- AI用例生成 -->
         <div class="nav-card" @click="handleNavigate('ai')" role="button" tabindex="0">
@@ -48,15 +57,15 @@
           <p>{{ $t('home.aiCaseGenerationDesc') }}</p>
         </div>
 
-        <!-- 接口测试 -->
-        <div class="nav-card" @click="handleNavigate('api')" role="button" tabindex="0">
-          <div class="card-icon api-icon">
+        <!-- API自动化测试 -->
+        <div class="nav-card" @click="handleNavigate('api-automation')" role="button" tabindex="0">
+          <div class="card-icon api-automation-icon">
             <el-icon>
-              <Link/>
+              <Connection/>
             </el-icon>
           </div>
-          <h3>{{ $t('home.apiTesting') }}</h3>
-          <p>{{ $t('home.apiTestingDesc') }}</p>
+          <h3>API自动化测试</h3>
+          <p>统一管理并执行代码型 API 自动化用例</p>
         </div>
 
         <!-- UI自动化测试 -->
@@ -124,6 +133,12 @@
           <h3>{{ $t('home.configCenter') }}</h3>
           <p>{{ $t('home.configCenterDesc') }}</p>
         </div>
+
+        <div class="nav-card" @click="handleNavigate('health')" role="button" tabindex="0">
+          <div class="card-icon health-icon"><el-icon><Odometer/></el-icon></div>
+          <h3>{{ $t('home.healthCheck') }}</h3>
+          <p>{{ $t('home.healthCheckDesc') }}</p>
+        </div>
       </div>
     </div>
   </div>
@@ -138,7 +153,6 @@ import {useAppStore} from '@/stores/app'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {
   MagicStick,
-  Link,
   Monitor,
   DataLine,
   Cpu,
@@ -146,7 +160,9 @@ import {
   ChatDotRound,
   UserFilled,
   ArrowDown,
-  Cellphone
+  Cellphone,
+  Connection,
+  Odometer
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -184,13 +200,14 @@ const handleLogout = () => {
 const handleNavigate = (type) => {
   const routes = {
     'ai': '/ai-generation/requirement-analysis',
-    'api': '/api-testing/dashboard',
+    'api-automation': '/api-automation/dashboard',
     'ui': '/ui-automation/dashboard',
     'app': '/app-automation/dashboard',
     'ai-intelligent': '/ai-intelligent-mode/testing',
-    'assistant': '/ai-generation/assistant',
+    'assistant': '/assistant',
     'config': '/configuration/project-center',
-    'data': '/data-factory'
+    'data': '/data-factory',
+    'health': '/health-check'
   }
 
   if (routes[type]) {
@@ -208,8 +225,8 @@ const handleNavigate = (type) => {
   background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
   display: flex;
   justify-content: center;
-  align-items: center;
-  padding: 20px;
+  align-items: flex-start;
+  padding: 12px 20px;
 }
 
 .content-wrapper {
@@ -287,30 +304,48 @@ const handleNavigate = (type) => {
 }
 
 .main-title {
-  font-size: 3.5rem;
+  font-size: 2.4rem;
   color: #2c3e50;
-  margin-bottom: 1rem;
+  margin: 8px 0 4px;
   font-weight: 700;
   letter-spacing: 2px;
 }
 
 .subtitle {
-  font-size: 1.5rem;
+  font-size: 1rem;
   color: #5e6d82;
-  margin-bottom: 4rem;
+  margin: 0 0 12px;
 }
 
 .cards-container {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 30px;
-  padding: 20px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 8px;
 }
+
+.icon-gradient-definitions {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.nav-card:nth-child(1) { order: 4; }
+.nav-card:nth-child(2) { order: 1; }
+.nav-card:nth-child(3) { order: 2; }
+.nav-card:nth-child(4) { order: 3; }
+.nav-card:nth-child(5) { order: 8; }
+.nav-card:nth-child(6) { order: 6; }
+.nav-card:nth-child(7) { order: 5; }
+.nav-card:nth-child(8) { order: 9; }
+.nav-card:nth-child(9) { order: 7; }
 
 .nav-card {
   background: rgba(255, 255, 255, 0.9);
   border-radius: 16px;
-  padding: 40px 20px;
+  min-height: 132px;
+  padding: 16px 14px;
   cursor: pointer;
   transition: all 0.3s ease;
   box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
@@ -325,68 +360,93 @@ const handleNavigate = (type) => {
   }
 
   h3 {
-    font-size: 1.5rem;
+    font-size: 1.1rem;
     color: #2c3e50;
-    margin: 20px 0 10px;
+    margin: 8px 0 5px;
   }
 
   p {
     color: #7f8c8d;
-    line-height: 1.5;
+    font-size: 0.85rem;
+    line-height: 1.35;
     margin: 0;
   }
 }
 
+@media (max-width: 920px) {
+  .cards-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .cards-container {
+    grid-template-columns: 1fr;
+    padding: 0;
+  }
+}
+
 .card-icon {
-  width: 80px;
-  height: 80px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 40px;
-  margin-bottom: 10px;
+  font-size: 24px;
+  margin-bottom: 2px;
   transition: all 0.3s ease;
 
   &.ai-icon {
-    background: #e8f4ff;
-    color: #409eff;
+    background: #eef4ff;
+    color: #3b82f6;
   }
 
-  &.api-icon {
+  &.api-automation-icon {
     background: #f0f9eb;
     color: #67c23a;
   }
 
   &.ui-icon {
-    background: #fdf6ec;
-    color: #e6a23c;
+    background: #f0f9eb;
+    color: #67c23a;
   }
 
   &.data-icon {
-    background: #e8f4ff;
-    color: #409eff;
-  }
-
-  &.app-icon {
-    background: #f9f0ff;
-    color: #722ed1;
-  }
-
-  &.ai-intelligent-icon {
-    background: #f0f5ff;
-    color: #2f54eb;
-  }
-
-  &.config-icon {
-    background: #e6fffb;
-    color: #13c2c2;
-  }
-
-  &.assistant-icon {
     background: #fff7e6;
     color: #fa8c16;
   }
+
+  &.app-icon {
+    background: #f0f9eb;
+    color: #67c23a;
+  }
+
+  &.ai-intelligent-icon {
+    background: #eef4ff;
+    color: #3b82f6;
+  }
+
+  &.config-icon {
+    background: #fff7e6;
+    color: #fa8c16;
+  }
+
+  &.assistant-icon {
+    background: #eef4ff;
+    color: #3b82f6;
+  }
+
+  &.health-icon {
+    background: #fff7e6;
+    color: #fa8c16;
+  }
+}
+
+.ai-icon :deep(svg path),
+.ai-intelligent-icon :deep(svg path),
+.assistant-icon :deep(svg path) {
+  fill: url('#home-ai-blue-purple') !important;
 }
 
 .nav-card:hover .card-icon {
@@ -616,6 +676,51 @@ const handleNavigate = (type) => {
   }
 }
 
+/* Keep all nine module cards compact and ordered on common desktop viewports. */
+.cards-container {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 8px;
+}
+
+.nav-card {
+  min-height: 132px;
+  padding: 16px 14px;
+}
+
+.nav-card h3 {
+  font-size: 1.1rem;
+  margin: 8px 0 5px;
+}
+
+.nav-card p {
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.card-icon {
+  width: 48px;
+  height: 48px;
+  font-size: 24px;
+  margin-bottom: 2px;
+}
+
+@media (max-width: 920px) {
+  .cards-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .cards-container {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-card {
+    min-height: 120px;
+  }
+}
+
 @media screen and (max-width: 480px) {
   .home-container {
     padding: 8px;
@@ -659,6 +764,27 @@ const handleNavigate = (type) => {
 
   .header-actions {
     padding: 3px;
+  }
+}
+
+@media (max-width: 920px) {
+  .cards-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .cards-container {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-card {
+    min-height: 120px;
+    padding: 14px 12px;
+  }
+
+  .nav-card h3 {
+    font-size: 1rem;
   }
 }
 </style>

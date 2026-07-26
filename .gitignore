@@ -96,4 +96,5 @@ frontend/*.log
 frontend/dist/
 
 # reference:
+pyapitest/
 pyuitest/

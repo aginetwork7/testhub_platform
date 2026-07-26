@@ -5,8 +5,11 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
+from django.core.cache import cache
+from django.db import DatabaseError, connection
 
 from .models import UnifiedNotificationConfig, NotificationTemplate
 from .serializers import UnifiedNotificationConfigSerializer, NotificationTemplateSerializer
@@ -19,11 +22,88 @@ import hmac
 import hashlib
 import base64
 import re
+import os
+import platform
+import socket
 from urllib.parse import quote_plus
 from django.conf import settings
 from django.core.mail import send_mail
+import psutil
+from redis.exceptions import RedisError
 
 logger = logging.getLogger(__name__)
+
+
+class SystemHealthAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({
+            'host': self._host_metrics(),
+            'services': self._service_checks(),
+            'checked_at': time.time(),
+        })
+
+    @staticmethod
+    def _host_metrics():
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(settings.BASE_DIR)
+        network = psutil.net_io_counters()
+        load_average = os.getloadavg() if hasattr(os, 'getloadavg') else None
+        return {
+            'hostname': socket.gethostname(),
+            'platform': platform.platform(),
+            'cpu_percent': psutil.cpu_percent(interval=0.1),
+            'cpu_count': psutil.cpu_count(logical=True),
+            'memory_total': memory.total,
+            'memory_used': memory.used,
+            'memory_percent': memory.percent,
+            'disk_total': disk.total,
+            'disk_used': disk.used,
+            'disk_percent': disk.percent,
+            'network_sent': network.bytes_sent,
+            'network_received': network.bytes_recv,
+            'load_average': load_average,
+            'uptime_seconds': max(0, int(time.time() - psutil.boot_time())),
+        }
+
+    def _service_checks(self):
+        return [
+            self._service_result('TestHub 后端', self._check_backend),
+            self._service_result('MySQL 数据库', self._check_database),
+            self._service_result('Redis 缓存与队列', self._check_cache),
+            self._service_result('API 自动化 Runner', self._check_api_automation_runner),
+        ]
+
+    @staticmethod
+    def _service_result(name, check):
+        started = time.monotonic()
+        try:
+            check()
+        except (DatabaseError, RedisError, requests.RequestException, OSError, ValueError) as error:
+            return {'name': name, 'status': 'DOWN', 'latency_ms': round((time.monotonic() - started) * 1000, 1), 'message': str(error)}
+        return {'name': name, 'status': 'UP', 'latency_ms': round((time.monotonic() - started) * 1000, 1), 'message': '服务正常'}
+
+    @staticmethod
+    def _check_backend():
+        return None
+
+    @staticmethod
+    def _check_database():
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1')
+
+    @staticmethod
+    def _check_cache():
+        cache.get('system-health-probe')
+
+    @staticmethod
+    def _check_api_automation_runner():
+        runner_url = os.environ.get('API_AUTOMATION_RUNNER_URL', '').rstrip('/')
+        if not runner_url:
+            raise ValueError('未配置 API_AUTOMATION_RUNNER_URL。')
+        response = requests.get(f'{runner_url}/healthz', timeout=3)
+        response.raise_for_status()
 
 
 class NotificationTemplateViewSet(viewsets.ModelViewSet):

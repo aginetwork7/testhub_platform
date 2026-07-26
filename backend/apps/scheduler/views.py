@@ -3,6 +3,7 @@
 """
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -20,12 +21,19 @@ from .serializers import (
 from apps.core.models import NotificationTemplate
 
 
+class SchedulePagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class ScheduleViewSet(viewsets.ModelViewSet):
     """
     定时任务视图集
     """
     queryset = Schedule.objects.all()
     serializer_class = ScheduleSerializer
+    pagination_class = SchedulePagination
     filterset_fields = ['schedule_type', 'cluster']
     search_fields = ['name', 'func']
     ordering_fields = ['next_run', 'name']
@@ -337,13 +345,12 @@ class ScheduleViewSet(viewsets.ModelViewSet):
                 return Response({'message': _('任务已恢复')})
         except ScheduleConfig.DoesNotExist:
             if action_type == 'pause':
-                schedule.enabled = False
-                schedule.save()
+                schedule.next_run = None
+                schedule.save(update_fields=['next_run'])
                 return Response({'message': _('任务已禁用')})
-            else:
-                schedule.enabled = True
-                schedule.save()
-                return Response({'message': _('任务已启用')})
+            schedule.next_run = timezone.now()
+            schedule.save(update_fields=['next_run'])
+            return Response({'message': _('任务已启用')})
     
     @action(detail=True, methods=['get'])
     def history(self, request, pk=None):
