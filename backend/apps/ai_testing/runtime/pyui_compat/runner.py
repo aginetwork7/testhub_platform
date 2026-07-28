@@ -33,12 +33,14 @@ class PyUICompatHistory:
 class PyUICompatAgent:
     """Initial pyuitest-inspired runtime scaffold for AI intelligent mode."""
 
-    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True):
+    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None):
         self.execution_mode = execution_mode
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
         self.use_cache = bool(use_cache)
+        self.execution_user_id = execution_user_id
         self._recent_network_events = []
+        self._reported_event_ids = []
 
     async def analyze_task(self, task_description, case_mode='freeform', task_steps=None):
         return self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -143,7 +145,7 @@ class PyUICompatAgent:
                 launch_kwargs['executable_path'] = browser_executable
             browser = await playwright.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
-                viewport={'width': 1440, 'height': 900},
+                viewport={'width': 1760, 'height': 900},
             )
             page = await context.new_page()
             self._attach_runtime_observers(page)
@@ -221,6 +223,24 @@ class PyUICompatAgent:
                                     )
                                 else:
                                     raise
+                        elif step.get('action') == 'report_vehicle_event':
+                            event_report = await self._report_vehicle_event(step)
+                            self._reported_event_ids = event_report['event_ids']
+                            history.artifacts.append(
+                                {
+                                    'type': 'event_report',
+                                    'step': index,
+                                    'environment_id': step.get('environment_id'),
+                                    'event_ids': event_report.get('event_ids', []),
+                                }
+                            )
+                            await self._emit(
+                                step_callback,
+                                {
+                                    'type': 'log',
+                                    'content': f"[planner_v2] Step {index} reported vehicle event(s): {', '.join(event_report.get('event_ids', []))}\n",
+                                },
+                            )
                         else:
                             await self._execute_step(page, step, timeout_error=PlaywrightTimeout)
                     except Exception as exc:
@@ -668,6 +688,11 @@ class PyUICompatAgent:
             'assert_kind': raw_step.get('assert_kind'),
             'fields': raw_step.get('fields'),
             'selector_candidates': raw_step.get('selector_candidates'),
+            'environment_id': raw_step.get('environment_id'),
+            'device': raw_step.get('device'),
+            'camera_index': raw_step.get('camera_index'),
+            'media_path': raw_step.get('media_path'),
+            'vehicle_color': raw_step.get('vehicle_color'),
             'min_count': raw_step.get('min_count'),
             'min_x': raw_step.get('min_x'),
             'min_y': raw_step.get('min_y'),
@@ -676,6 +701,92 @@ class PyUICompatAgent:
             'timeout_ms': int(raw_step.get('timeout_ms') or raw_step.get('wait_time') or 10000),
             'thinking': raw_step.get('thinking'),
         }
+
+    async def _report_vehicle_event(self, step):
+        environment_id = step.get('environment_id')
+        if not isinstance(environment_id, int) or environment_id <= 0:
+            raise ValueError('report_vehicle_event requires a positive environment_id')
+        if not self.execution_user_id:
+            raise PermissionError('report_vehicle_event requires the execution user context')
+
+        payload = {
+            'environment_id': environment_id,
+            'device': str(step.get('device') or 'main'),
+            'camera_index': int(step.get('camera_index') or 0),
+            'media_path': str(step.get('media_path') or ''),
+            'vehicle_color': int(step.get('vehicle_color') or 1),
+            'alert_type': 'vehicle',
+            'report_event': True,
+        }
+
+        def report_event():
+            from django.contrib.auth import get_user_model
+            from apps.data_factory.views import DataFactoryViewSet
+
+            user = get_user_model().objects.get(id=self.execution_user_id)
+            return DataFactoryViewSet().execute_business_tool(
+                'construct_alert_event',
+                payload,
+                user,
+            )
+
+        report = await asyncio.to_thread(report_event)
+        if not report.get('success'):
+            raise AssertionError(report.get('error') or 'vehicle event report failed')
+        nested_report = report.get('report') if isinstance(report.get('report'), dict) else {}
+        event_ids = report.get('event_ids') or nested_report.get('event_ids')
+        if not event_ids:
+            raise AssertionError('vehicle event report did not return event IDs')
+        return {'event_ids': event_ids}
+
+    @staticmethod
+    def _has_gpt_analysis(alert):
+        if not isinstance(alert, dict):
+            return False
+
+        gpt_raw = alert.get('gptRaw')
+        if isinstance(gpt_raw, dict) and str(gpt_raw.get('natural_language_description') or '').strip():
+            return True
+
+        for status in alert.get('statuses') or []:
+            note = ((status.get('noteRecord') or {}).get('new') or {}).get('note')
+            if str(note or '').strip():
+                return True
+        return False
+
+    async def _assert_reported_alert_gpt_analysis(self, page, timeout_ms):
+        if not self._reported_event_ids:
+            raise AssertionError('no reported event ID is available for GPT analysis assertion')
+
+        event_id = self._reported_event_ids[-1]
+        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000
+        last_failure = 'alert was not found'
+
+        while time.monotonic() < deadline:
+            try:
+                async with page.expect_response(
+                    lambda response: '/alert/alerts?' in response.url and response.request.method == 'GET',
+                    timeout=min(timeout_ms, 30000),
+                ) as response_info:
+                    await page.reload(wait_until='domcontentloaded', timeout=min(timeout_ms, 60000))
+                response = await response_info.value
+                headers = await response.request.all_headers()
+                query_url = re.sub(r'([?&]paging\.limit=)\d+', r'\g<1>100', response.url)
+                api_response = await page.context.request.get(query_url, headers=headers)
+                payload = await api_response.json()
+                alert = next(
+                    (item for item in payload.get('data', []) if item.get('eventId') == event_id),
+                    None,
+                )
+                if self._has_gpt_analysis(alert):
+                    return
+                last_failure = 'alert has not received a GPT analysis yet' if alert else 'alert was not found'
+            except Exception as error:
+                last_failure = f'alert query failed: {type(error).__name__}: {error}'
+
+            await page.wait_for_timeout(5000)
+
+        raise AssertionError(f"reported event '{event_id}' {last_failure}")
 
     async def _plan_ai_step(self, page, step):
         fallback_actions = self._fallback_actions_for_step(step)
@@ -1335,7 +1446,7 @@ class PyUICompatAgent:
             return [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}]
         if '主页图标' in text or '房子的形状' in text:
             return [{'action': 'click', 'loc': '(48,92)', 'param': ':left:top:25:25'}]
-        if 'Alerts' in text or '铃铛形状' in text:
+        if len(text.strip()) <= 50 and ('Alerts' in text or '铃铛形状' in text):
             return [{'action': 'click', 'loc': '(48,196)', 'param': ':left:top:25:25'}]
         if 'Cameras' in text or '摄像头的形状' in text:
             return [
@@ -1763,6 +1874,24 @@ class PyUICompatAgent:
                 value=str(step.get('value') or param or '').strip(),
                 timeout_ms=timeout_ms,
             )
+            return
+
+        if action == 'ensure_switch_enabled':
+            label = str(step.get('value') or param or '').strip()
+            if not label:
+                raise ValueError('ensure_switch_enabled step requires a switch label')
+            switch_row = page.locator(f'div:has(> span:has-text("{label}"))').last
+            switch = switch_row.locator('input[role="switch"]').first
+            if await switch.count() == 0:
+                raise AssertionError(f"switch '{label}' was not found")
+            if not await switch.is_checked():
+                await switch_row.locator('.react-switch-bg').first.click(timeout=timeout_ms)
+            if not await switch.is_checked():
+                raise AssertionError(f"switch '{label}' is not enabled")
+            return
+
+        if action == 'assert_reported_alert_gpt_analysis':
+            await self._assert_reported_alert_gpt_analysis(page, timeout_ms)
             return
 
         if action in {'wait', 'sleep'}:
@@ -2267,6 +2396,11 @@ class PyUICompatAgent:
             await page.locator('input[id="login_email"], input[type="email"], input[name*="email" i], input[placeholder*="email" i]').first.fill(email, timeout=10000)
             await page.locator('input[id="login_password"], input[type="password"], input[name*="password" i], input[placeholder*="password" i]').first.fill(password, timeout=10000)
             await page.locator('button[type="submit"], button:has-text("Sign in"), button:has-text("Login"), button:has-text("Log in")').first.click(timeout=10000)
+            await page.wait_for_timeout(300)
+            terms_prompt = page.get_by_text('I have read and agree to the Terms of Use.', exact=False).first
+            if await terms_prompt.is_visible():
+                await terms_prompt.click(timeout=10000)
+                await page.get_by_text('Continue', exact=True).first.click(timeout=10000)
 
             try:
                 await self._wait_dashboard_ready(page)
