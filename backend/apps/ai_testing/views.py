@@ -355,6 +355,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     case_mode=ai_case.case_mode,
                     task_steps=ai_case.task_steps,
                     use_cache=use_cache,
+                    execution_user_id=request.user.id,
                 )
 
                 # 检查是否是手动停止

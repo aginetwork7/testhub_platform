@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from django.conf import settings
 from django.test import SimpleTestCase, override_settings
@@ -157,6 +157,21 @@ class _StreamPageStub:
 
 
 class PyUICompatRuntimeTests(SimpleTestCase):
+    def test_report_vehicle_event_requires_environment_id(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis', execution_user_id=1)
+
+        with self.assertRaisesRegex(ValueError, 'environment_id'):
+            asyncio.run(agent._report_vehicle_event({'action': 'report_vehicle_event'}))
+
+    def test_report_vehicle_event_reads_nested_report_ids(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis', execution_user_id=1)
+        report = {'success': True, 'report': {'success': True, 'event_ids': ['event-123']}}
+
+        with patch('apps.ai_testing.runtime.pyui_compat.runner.asyncio.to_thread', new=AsyncMock(return_value=report)):
+            result = asyncio.run(agent._report_vehicle_event({'environment_id': 5}))
+
+        self.assertEqual(result, {'event_ids': ['event-123']})
+
     def test_store_and_load_cached_ai_actions(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
             with override_settings(MEDIA_ROOT=media_root):
@@ -350,6 +365,47 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 }
             ],
         )
+
+    def test_long_alert_verification_step_does_not_use_navigation_fallback(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis')
+
+        actions = agent._fallback_actions_for_step(
+            {
+                'description': (
+                    '打开 Alerts 页面，定位刚刚由摄像头 5003_D03 创建的最新车辆告警，'
+                    '并确认 alert note 中出现非空的 GPT 图像分析结果。'
+                )
+            }
+        )
+
+        self.assertEqual(actions, [])
+
+    def test_normalize_step_preserves_switch_label(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis')
+
+        step = agent._normalize_step(
+            {
+                'action': 'ensure_switch_enabled',
+                'value': 'Process Vehicle Alerts',
+            },
+            1,
+        )
+
+        self.assertEqual(step['action'], 'ensure_switch_enabled')
+        self.assertEqual(step['value'], 'Process Vehicle Alerts')
+
+    def test_has_gpt_analysis_accepts_description_or_note(self) -> None:
+        self.assertTrue(
+            PyUICompatAgent._has_gpt_analysis(
+                {'gptRaw': {'natural_language_description': 'Vehicle detected'}}
+            )
+        )
+        self.assertTrue(
+            PyUICompatAgent._has_gpt_analysis(
+                {'statuses': [{'noteRecord': {'new': {'note': 'GPT vehicle analysis'}}}]}
+            )
+        )
+        self.assertFalse(PyUICompatAgent._has_gpt_analysis({'gptRaw': {}}))
 
     def test_fallback_actions_for_site_manager_role_flow(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')
