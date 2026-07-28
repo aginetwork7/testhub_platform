@@ -72,8 +72,12 @@
 
     <template v-else-if="mode === 'interfaces'">
       <section class="panel">
-        <div class="panel-title interface-toolbar"><el-input v-model="endpointPath" class="path-search" clearable placeholder="按接口路径搜索" @clear="loadEndpoints" @keyup.enter="loadEndpoints"><template #append><el-button @click="loadEndpoints">搜索</el-button></template></el-input><div class="schema-actions"><el-tag type="info">{{ endpoints.length }} 个接口</el-tag><el-tag :type="schemaStatus.schema_count ? 'success' : 'info'">{{ schemaStatus.schema_count || 0 }} 条 Schema</el-tag><el-button :loading="schemaLoading" @click="loadSchemaStatus"><el-icon><Refresh /></el-icon>刷新 Schema</el-button><el-button type="primary" :loading="schemaGenerating" @click="regenerateSchemas">重新生成</el-button></div></div>
+        <div class="panel-title interface-toolbar"><el-input v-model="endpointPath" class="path-search" clearable placeholder="按接口路径搜索" @clear="resetEndpointPage" @keyup.enter="resetEndpointPage"><template #append><el-button @click="resetEndpointPage">搜索</el-button></template></el-input><div class="schema-actions"><el-tag :type="schemaStatus.schema_count ? 'success' : 'info'">{{ pagination.interfaces.total }} 个接口</el-tag><el-button :loading="schemaLoading" @click="loadSchemaStatus"><el-icon><Refresh /></el-icon>刷新 Schema</el-button><el-button type="primary" :loading="schemaGenerating" @click="regenerateSchemas">重新生成</el-button></div></div>
         <p v-if="schemaStatus.latest_snapshot?.change_summary" class="schema-summary">最近生成：新增 {{ schemaStatus.latest_snapshot.change_summary.added?.length || 0 }}，变更 {{ schemaStatus.latest_snapshot.change_summary.changed?.length || 0 }}，删除 {{ schemaStatus.latest_snapshot.change_summary.removed?.length || 0 }}</p>
+        <el-tabs v-model="endpointCategory" class="interface-category-tabs" @tab-change="changeEndpointCategory">
+          <el-tab-pane label="Frontend" name="frontend" />
+          <el-tab-pane label="Others" name="others" />
+        </el-tabs>
         <el-table v-loading="loading" :data="endpoints">
           <el-table-column prop="path" label="路径" min-width="280" show-overflow-tooltip />
           <el-table-column label="协议" width="110"><template #default="{ row }"><el-tag :type="row.protocol === 'WebSocket' ? 'warning' : 'success'">{{ row.protocol }}</el-tag></template></el-table-column>
@@ -84,6 +88,7 @@
           <el-table-column prop="summary" label="摘要" min-width="260" show-overflow-tooltip />
           <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.deprecated ? 'danger' : 'success'">{{ row.deprecated ? '已废弃' : '可用' }}</el-tag></template></el-table-column>
         </el-table>
+        <el-pagination v-model:current-page="pagination.interfaces.page" v-model:page-size="pagination.interfaces.pageSize" class="list-pagination" background layout="total, sizes, prev, pager, next" :page-sizes="pageSizeOptions" :total="pagination.interfaces.total" @current-change="loadEndpoints" @size-change="changePageSize('interfaces', loadEndpoints)" />
       </section>
     </template>
 
@@ -337,6 +342,7 @@ const selectedConfiguration = ref(null)
 const executionConfigurationId = ref(null)
 const endpoints = ref([])
 const endpointPath = ref('')
+const endpointCategory = ref('frontend')
 const schemaStatus = ref({ schema_count: 0, latest_snapshot: null })
 const schemaLoading = ref(false)
 const schemaGenerating = ref(false)
@@ -346,6 +352,7 @@ const notifications = ref([])
 const reports = ref([])
 const pageSizeOptions = [20, 50, 100]
 const pagination = reactive({
+  interfaces: { page: 1, pageSize: 20, total: 0 },
   runs: { page: 1, pageSize: 20, total: 0 },
   reports: { page: 1, pageSize: 20, total: 0 },
   schedules: { page: 1, pageSize: 20, total: 0 },
@@ -494,7 +501,17 @@ async function loadConfigurations() {
 async function loadEndpoints() {
   if (!selectedProjectId.value) return
   loading.value = true
-  try { endpoints.value = unwrap(await getAutomationEndpoints({ project: selectedProjectId.value, path: endpointPath.value })) } catch (error) { ElMessage.error('加载接口失败') } finally { loading.value = false }
+  try { setPaginatedItems(await getAutomationEndpoints({ project: selectedProjectId.value, path: endpointPath.value, category: endpointCategory.value, page: pagination.interfaces.page, page_size: pagination.interfaces.pageSize }), endpoints, pagination.interfaces) } catch (error) { ElMessage.error('加载接口失败') } finally { loading.value = false }
+}
+
+function changeEndpointCategory() {
+  pagination.interfaces.page = 1
+  loadEndpoints()
+}
+
+function resetEndpointPage() {
+  pagination.interfaces.page = 1
+  loadEndpoints()
 }
 
 async function loadSchemaStatus() {
@@ -508,7 +525,11 @@ async function regenerateSchemas() {
   schemaGenerating.value = true
   try {
     const result = (await regenerateAutomationSchemas({ project: selectedProjectId.value })).data
-    ElMessage.success(`已生成 ${result.schema_count} 条 Schema`)
+    const catalogMessage = result.catalog
+      ? `，接口目录：新增 ${result.catalog.created}，更新 ${result.catalog.updated}，删除 ${result.catalog.deleted}`
+      : ''
+    ElMessage.success(`已生成 ${result.schema_count} 条 Schema${catalogMessage}`)
+    pagination.interfaces.page = 1
     await Promise.all([loadEndpoints(), loadSchemaStatus()])
   } catch (error) { ElMessage.error(error.response?.data?.error || '重新生成 Schema 失败') } finally { schemaGenerating.value = false }
 }

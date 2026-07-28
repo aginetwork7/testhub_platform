@@ -25,6 +25,17 @@ BACKEND_PORT = config('BACKEND_PORT', default=config_loader.get('server.backend_
 # 前端服务URL（用于生成报告链接等）
 FRONTEND_URL = config('FRONTEND_URL', default=config_loader.get('server.frontend_url', 'http://localhost:3000'))
 
+API_AUTOMATION_SWAGGER_URL = config(
+    'API_AUTOMATION_SWAGGER_URL',
+    default=config_loader.get('api_automation.swagger_url', ''),
+)
+API_AUTOMATION_SWAGGER_TIMEOUT_SECONDS = config(
+    'API_AUTOMATION_SWAGGER_TIMEOUT_SECONDS',
+    default=config_loader.get('api_automation.swagger_timeout_seconds', 30),
+    cast=int,
+)
+API_AUTOMATION_SWAGGER_TOKEN = config('API_AUTOMATION_SWAGGER_TOKEN', default='')
+
 # 根据DEBUG模式设置ALLOWED_HOSTS，生产环境不应使用通配符
 if DEBUG:
     ALLOWED_HOSTS = ['*']

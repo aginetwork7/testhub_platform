@@ -14,6 +14,7 @@ import yaml
 from django_q.tasks import async_task
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -38,6 +39,13 @@ class ApiAutomationPagination(PageNumberPagination):
 from .coverage import collect_endpoint_coverage
 from .serializers import HTTP_RESPONSE_SCHEMA_PATH
 from .executor import estimate_run_task_timeout
+from .swagger_sync import (
+    SwaggerSourceNotFoundError,
+    SwaggerSyncError,
+    SwaggerTokenExpiredError,
+    SwaggerTokenPermissionError,
+    synchronize_remote_swagger,
+)
 from .serializers import (
     ApiAutomationCaseSerializer,
     ApiAutomationCaseListSerializer,
@@ -109,13 +117,20 @@ class ApiAutomationCaseViewSet(ProjectAccessMixin, viewsets.ReadOnlyModelViewSet
 class ApiAutomationEndpointViewSet(ProjectAccessMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = ApiAutomationEndpointSerializer
     permission_classes = [IsAuthenticated]
-    pagination_class = None
+    pagination_class = ApiAutomationPagination
     filterset_fields = ['project']
     search_fields = ['key', 'path']
 
     def get_queryset(self):
-        queryset = ApiAutomationEndpoint.objects.filter(project__in=self.accessible_projects())
+        queryset = ApiAutomationEndpoint.objects.filter(project__in=self.accessible_projects()).order_by('path', 'key')
         path = self.request.query_params.get('path')
+        category = self.request.query_params.get('category', 'frontend')
+        if category == 'frontend':
+            queryset = queryset.filter(tags__icontains='frontend/')
+        elif category == 'others':
+            queryset = queryset.exclude(tags__icontains='frontend/')
+        else:
+            raise ValidationError({'category': '仅支持 frontend 或 others。'})
         return queryset.filter(path__icontains=path) if path else queryset
 
     @action(detail=False, methods=['get'])
@@ -143,8 +158,25 @@ class ApiAutomationEndpointViewSet(ProjectAccessMixin, viewsets.ReadOnlyModelVie
             return Response({'error': '项目不存在或无权限访问。'}, status=status.HTTP_404_NOT_FOUND)
         output = io.StringIO()
         try:
-            call_command('generate_api_automation_schemas', stdout=output)
-        except CommandError as error:
+            swagger_url = settings.API_AUTOMATION_SWAGGER_URL.strip()
+            sync_result = None
+            if swagger_url:
+                sync_result = synchronize_remote_swagger(
+                    project=project,
+                    source_url=swagger_url,
+                    timeout_seconds=settings.API_AUTOMATION_SWAGGER_TIMEOUT_SECONDS,
+                    access_token=settings.API_AUTOMATION_SWAGGER_TOKEN,
+                )
+                output.write(sync_result['paths_output'])
+                output.write(sync_result['schemas_output'])
+            else:
+                call_command('generate_api_automation_schemas', stdout=output)
+        except (SwaggerTokenExpiredError, SwaggerTokenPermissionError, SwaggerSourceNotFoundError) as error:
+            return Response(
+                {'error': str(error), 'code': error.code},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except (CommandError, SwaggerSyncError) as error:
             return Response({'error': str(error)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         document = _load_http_schema_document()
         fingerprints = {
@@ -169,6 +201,8 @@ class ApiAutomationEndpointViewSet(ProjectAccessMixin, viewsets.ReadOnlyModelVie
             'source_hash': snapshot.source_hash,
             'change_summary': change_summary,
             'output': output.getvalue(),
+            'catalog': sync_result['catalog'] if sync_result else None,
+            'synced_from_remote': sync_result is not None,
         })
 
 

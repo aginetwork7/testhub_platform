@@ -20,6 +20,15 @@ server:
   secret_key: "django-insecure-please-change-this-in-production"
 
 # ================================
+# API 自动化接口目录同步
+# ================================
+api_automation:
+  # 稳定 Swagger 原始 JSON 下载地址。配置后，接口管理的“重新生成”会下载并同步接口目录。
+  swagger_url: ""
+  # Swagger 下载超时（秒）
+  swagger_timeout_seconds: 30
+
+# ================================
 # 数据库配置
 # ================================
 database:
