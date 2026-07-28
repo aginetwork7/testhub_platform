@@ -48,6 +48,7 @@ services:
       - REDIS_URL=redis://redis:6379/
       - API_AUTOMATION_RUNNER_URL=http://api-automation-runner:19000
       - API_AUTOMATION_RUNNER_TOKEN=${API_AUTOMATION_RUNNER_TOKEN:-}
+      - API_AUTOMATION_SWAGGER_TOKEN=${API_AUTOMATION_SWAGGER_TOKEN:-}
       - HERMES_BASE_URL=${HERMES_BASE_URL:-http://host.docker.internal:8642/v1}
       - HERMES_MODEL_NAME=${HERMES_MODEL_NAME:-hermes-agent}
       - HERMES_API_KEY=${HERMES_API_KEY:-}
