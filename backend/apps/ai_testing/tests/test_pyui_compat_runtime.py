@@ -172,6 +172,27 @@ class PyUICompatRuntimeTests(SimpleTestCase):
 
         self.assertEqual(result, {'event_ids': ['event-123']})
 
+    def test_alert_note_assertion_matches_reported_gpt_description(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis')
+        agent._reported_alert_gpt_description = 'A black truck is parked near a fence.'
+        page = _TextPageStub('Alert Note: A black truck is parked near a fence.')
+
+        asyncio.run(agent._assert_reported_alert_note_matches_gpt(page, timeout_ms=1000))
+
+    def test_wait_for_reported_alert_gpt_analysis_action_uses_readiness_check(self) -> None:
+        agent = PyUICompatAgent(case_name='AGI_Analysis')
+        agent._wait_for_reported_alert_gpt_analysis = AsyncMock()
+
+        asyncio.run(
+            agent._execute_step(
+                None,
+                {'action': 'wait_for_reported_alert_gpt_analysis', 'timeout_ms': 120000},
+                timeout_error=Exception,
+            )
+        )
+
+        agent._wait_for_reported_alert_gpt_analysis.assert_awaited_once_with(None, 120000)
+
     def test_store_and_load_cached_ai_actions(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
             with override_settings(MEDIA_ROOT=media_root):
@@ -251,6 +272,27 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 self.assertEqual(history.cache_stats['model_retries'], 2)
                 self.assertEqual(history.planner_trace['step_retry_map']['3'], 2)
                 self.assertEqual(len(history.artifacts), 2)
+
+    def test_plan_retry_dismisses_blocking_video_error(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_004')
+        history = HistoryStub()
+        step = {'index': 3, 'description': '打开 AGI Analysis'}
+        page = _VideoLoadErrorPageStub(error_visible=True)
+        agent._plan_ai_step = AsyncMock(side_effect=[ValueError('empty response'), [{'action': 'click', 'selector': 'text=AGI Analysis'}]])
+
+        actions = asyncio.run(agent._plan_ai_step_with_retries(page, step, history, step_index=3, max_attempts=2))
+
+        self.assertEqual(actions, [{'action': 'click', 'selector': 'text=AGI Analysis'}])
+        self.assertTrue(page.close_button.clicked)
+        self.assertIn(
+            {
+                'type': 'planner_recovery',
+                'step': 3,
+                'attempt': 2,
+                'action': 'dismiss_video_load_error',
+            },
+            history.artifacts,
+        )
 
     def test_write_case_report_artifacts_outputs_jsonl_and_html(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
