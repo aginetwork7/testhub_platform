@@ -41,6 +41,7 @@ class PyUICompatAgent:
         self.execution_user_id = execution_user_id
         self._recent_network_events = []
         self._reported_event_ids = []
+        self._reported_alert_gpt_description = ''
 
     async def analyze_task(self, task_description, case_mode='freeform', task_steps=None):
         return self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -754,9 +755,9 @@ class PyUICompatAgent:
                 return True
         return False
 
-    async def _assert_reported_alert_gpt_analysis(self, page, timeout_ms):
+    async def _wait_for_reported_alert_gpt_analysis(self, page, timeout_ms):
         if not self._reported_event_ids:
-            raise AssertionError('no reported event ID is available for GPT analysis assertion')
+            raise AssertionError('no reported event ID is available for GPT analysis readiness check')
 
         event_id = self._reported_event_ids[-1]
         deadline = time.monotonic() + max(timeout_ms, 1000) / 1000
@@ -778,7 +779,10 @@ class PyUICompatAgent:
                     (item for item in payload.get('data', []) if item.get('eventId') == event_id),
                     None,
                 )
-                if self._has_gpt_analysis(alert):
+                gpt_raw = alert.get('gptRaw') if isinstance(alert, dict) else None
+                description = str((gpt_raw or {}).get('natural_language_description') or '').strip()
+                if description:
+                    self._reported_alert_gpt_description = description
                     return
                 last_failure = 'alert has not received a GPT analysis yet' if alert else 'alert was not found'
             except Exception as error:
@@ -787,6 +791,24 @@ class PyUICompatAgent:
             await page.wait_for_timeout(5000)
 
         raise AssertionError(f"reported event '{event_id}' {last_failure}")
+
+    async def _assert_reported_alert_gpt_analysis(self, page, timeout_ms):
+        await self._wait_for_reported_alert_gpt_analysis(page, timeout_ms)
+
+    async def _assert_reported_alert_note_matches_gpt(self, page, timeout_ms):
+        expected = self._normalize_text_for_contains(self._reported_alert_gpt_description)
+        if not expected:
+            raise AssertionError('no GPT natural-language description is available for Alert Note comparison')
+
+        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000
+        last_text = ''
+        while time.monotonic() < deadline:
+            last_text = str(await page.locator('body').first.text_content(timeout=timeout_ms) or '')
+            if expected in self._normalize_text_for_contains(last_text):
+                return
+            await page.wait_for_timeout(1000)
+
+        raise AssertionError('Alert Note does not contain the reported alert GPT natural-language description')
 
     async def _plan_ai_step(self, page, step):
         fallback_actions = self._fallback_actions_for_step(step)
@@ -1890,8 +1912,12 @@ class PyUICompatAgent:
                 raise AssertionError(f"switch '{label}' is not enabled")
             return
 
-        if action == 'assert_reported_alert_gpt_analysis':
-            await self._assert_reported_alert_gpt_analysis(page, timeout_ms)
+        if action in {'assert_reported_alert_gpt_analysis', 'wait_for_reported_alert_gpt_analysis'}:
+            await self._wait_for_reported_alert_gpt_analysis(page, timeout_ms)
+            return
+
+        if action == 'assert_reported_alert_note_matches_gpt':
+            await self._assert_reported_alert_note_matches_gpt(page, timeout_ms)
             return
 
         if action in {'wait', 'sleep'}:

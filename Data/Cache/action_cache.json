@@ -1114,5 +1114,40 @@
         "thinking": "planned_by=browser_use_vision"
       }
     ]
+  },
+  "v3::AGI_Analysis_-_车辆告警_GPT_图像分析::step11::2c60d8170c39": {
+    "case_name": "AGI Analysis - 车辆告警 GPT 图像分析",
+    "step_num": 11,
+    "step_description": "在 Alerts 告警列表中仅查找类型为 Vehicle 的事件，按页面显示的时间从新到旧选择并点击最新的一条 Vehicle 告警进入 Alert 详情。不得选择 Person 或其他类型的事件。",
+    "updated_at": "2026-07-29 10:01:32",
+    "actions": [
+      {
+        "index": 1,
+        "step_mode": "direct",
+        "action": "click",
+        "description": "Click the first Vehicle alert in the list.",
+        "selector": "text=Vehicle",
+        "loc": null,
+        "param": null,
+        "url": null,
+        "value": null,
+        "expected": null,
+        "assert_kind": null,
+        "fields": null,
+        "selector_candidates": null,
+        "environment_id": null,
+        "device": null,
+        "camera_index": null,
+        "media_path": null,
+        "vehicle_color": null,
+        "min_count": null,
+        "min_x": null,
+        "min_y": null,
+        "min_width": null,
+        "min_height": null,
+        "timeout_ms": 10000,
+        "thinking": "planned_by=browser_use_vision"
+      }
+    ]
   }
 }
