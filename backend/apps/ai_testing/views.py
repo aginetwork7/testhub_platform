@@ -67,6 +67,7 @@ def extract_step_info(step, step_index):
             'thinking': step.get('thinking'),
             'duration_seconds': step.get('duration_seconds'),
             'error': step.get('error'),
+            'output': step.get('output'),
         }
 
 
@@ -78,7 +79,7 @@ def extract_step_info(step, step_index):
     else:
         step_info['action'] = str(step)
 
-    for key in ['status', 'element', 'thinking', 'duration_seconds', 'error']:
+    for key in ['status', 'element', 'thinking', 'duration_seconds', 'error', 'output']:
         if hasattr(step, key):
             step_info[key] = getattr(step, key)
 
@@ -182,6 +183,47 @@ def build_accessible_ai_project_queryset(user):
     ).distinct()
 
 
+def build_accessible_api_automation_configuration_queryset(user):
+    from apps.api_automation.models import ApiAutomationConfiguration
+
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return ApiAutomationConfiguration.objects.none()
+    return ApiAutomationConfiguration.objects.filter(
+        models.Q(project__owner=user) | models.Q(project__members=user)
+    ).distinct()
+
+
+def resolve_api_automation_configuration_from_task(task_description, user):
+    text = str(task_description or '').strip().lower()
+    configurations = build_accessible_api_automation_configuration_queryset(user)
+    if not text:
+        return configurations.filter(is_default=True).order_by('project_id', 'id').first()
+
+    matches = []
+    for configuration in configurations:
+        aliases = {
+            str(configuration.environment or '').strip().lower(),
+            str(configuration.name or '').strip().lower(),
+        }
+        for alias in aliases:
+            if not alias:
+                continue
+            if re.fullmatch(r'[a-z0-9_-]+', alias):
+                matched = re.search(rf'(?<![a-z0-9_-]){re.escape(alias)}(?![a-z0-9_-])', text)
+            else:
+                matched = alias in text
+            if matched:
+                matches.append((len(alias), configuration.id, configuration))
+                break
+
+    if not matches:
+        return configurations.filter(is_default=True).order_by('project_id', 'id').first()
+    matches.sort(key=lambda item: item[:2], reverse=True)
+    best_length = matches[0][0]
+    best_matches = [item for item in matches if item[0] == best_length]
+    return best_matches[0][2] if len(best_matches) == 1 else None
+
+
 def _is_relative_to(path, base_path):
     try:
         path.relative_to(base_path)
@@ -233,8 +275,18 @@ class AICaseViewSet(viewsets.ModelViewSet):
     def run(self, request, pk=None):
         """执行 AI 用例"""
         ai_case = self.get_object()
-        execution_mode = request.data.get('execution_mode', 'text')
+        execution_mode = request.data.get('execution_mode', 'planner_v2')
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
+        api_automation_configuration = (
+            ai_case.api_automation_configuration
+            or resolve_api_automation_configuration_from_task(ai_case.task_description, request.user)
+        )
+        if api_automation_configuration is not None:
+            has_configuration_access = build_accessible_api_automation_configuration_queryset(request.user).filter(
+                id=api_automation_configuration.id,
+            ).exists()
+            if not has_configuration_access:
+                return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
@@ -356,6 +408,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     task_steps=ai_case.task_steps,
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
+                    api_automation_configuration=api_automation_configuration,
                 )
 
                 # 检查是否是手动停止
@@ -971,11 +1024,12 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         """执行临时 AI 任务"""
         project_id = request.data.get('project_id')
         task_description = request.data.get('task_description')
-        execution_mode = request.data.get('execution_mode', 'text')  # 默认文本模式
+        execution_mode = request.data.get('execution_mode', 'planner_v2')  # 默认 Planner 模式
         enable_gif = request.data.get('enable_gif', True)  # GIF录制开关，默认开启
         case_mode = request.data.get('case_mode', 'freeform')
         task_steps = request.data.get('task_steps') or []
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
+        api_automation_configuration_id = request.data.get('api_automation_configuration_id')
 
         if not task_description:
             return Response({'error': '缺少任务描述参数'}, status=status.HTTP_400_BAD_REQUEST)
@@ -987,6 +1041,19 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 project = AiProject.objects.get(id=project_id)
             except AiProject.DoesNotExist:
                 return Response({'error': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        api_automation_configuration = None
+        if api_automation_configuration_id is not None:
+            api_automation_configuration = build_accessible_api_automation_configuration_queryset(request.user).filter(
+                id=api_automation_configuration_id,
+            ).first()
+            if api_automation_configuration is None:
+                return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
+        else:
+            api_automation_configuration = resolve_api_automation_configuration_from_task(
+                task_description,
+                request.user,
+            )
 
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
@@ -1139,6 +1206,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     case_mode=case_mode,
                     task_steps=task_steps,
                     use_cache=use_cache,
+                    execution_user_id=request.user.id,
+                    api_automation_configuration=api_automation_configuration,
                 )
 
                 # 检查是否是手动停止 (使用同步版本)
@@ -1506,6 +1575,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 'action': action_text,
                 'element': (step or {}).get('element') if isinstance(step, dict) else None,
                 'thinking': build_step_thinking(step if isinstance(step, dict) else {}),
+                'output': (step or {}).get('output') if isinstance(step, dict) else None,
                 'duration': duration
             })
 

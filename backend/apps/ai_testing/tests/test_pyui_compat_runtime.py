@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from django.conf import settings
@@ -38,6 +39,38 @@ class _ResolveLocatorPageStub:
         return self.css_locator
 
     def get_by_text(self, _text: str, exact: bool = False) -> _LocatorCountStub:
+        return self.text_locator
+
+
+class _LocatorVisibilityItemStub:
+    def __init__(self, visible: bool):
+        self._visible = visible
+
+    async def is_visible(self) -> bool:
+        return self._visible
+
+
+class _LocatorVisibilityStub:
+    def __init__(self, visibility: list[bool]):
+        self._items = [_LocatorVisibilityItemStub(item) for item in visibility]
+        self.first = self._items[0] if self._items else None
+
+    async def count(self) -> int:
+        return len(self._items)
+
+    def nth(self, index: int) -> _LocatorVisibilityItemStub:
+        return self._items[index]
+
+
+class _VisibleResolveLocatorPageStub:
+    def __init__(self):
+        self.css_locator = _LocatorVisibilityStub([False, True])
+        self.text_locator = _LocatorVisibilityStub([False])
+
+    def locator(self, _selector: str) -> _LocatorVisibilityStub:
+        return self.css_locator
+
+    def get_by_text(self, _text: str, exact: bool = False) -> _LocatorVisibilityStub:
         return self.text_locator
 
 
@@ -157,6 +190,69 @@ class _StreamPageStub:
 
 
 class PyUICompatRuntimeTests(SimpleTestCase):
+    def test_resolve_locator_skips_hidden_matches(self) -> None:
+        agent = PyUICompatAgent(case_name='Locator_Visibility')
+        page = _VisibleResolveLocatorPageStub()
+
+        locator = asyncio.run(agent._resolve_locator(page, 'text=Cameras'))
+
+        self.assertIs(locator, page.css_locator.nth(1))
+
+    def test_normalize_step_preserves_device_cli_fields(self) -> None:
+        agent = PyUICompatAgent(case_name='Device_Check')
+
+        step = agent._normalize_step(
+            {
+                'executor': 'device_cli',
+                'description': '检查设备服务',
+                'device_id': 'ainvr_5000',
+                'command': 'systemctl is-active camera-agent',
+                'timeout_ms': 60000,
+            },
+            1,
+        )
+
+        self.assertEqual(step['executor'], 'device_cli')
+        self.assertEqual(step['device_id'], 'ainvr_5000')
+        self.assertEqual(step['command'], 'systemctl is-active camera-agent')
+
+    def test_freeform_device_plan_skips_playwright(self) -> None:
+        configuration = SimpleNamespace(id=7, name='Device Test', environment='test')
+        agent = PyUICompatAgent(case_name='Device_Check', api_automation_configuration=configuration)
+        agent._execute_device_cli_step = AsyncMock(return_value={
+            'status': 'PASSED',
+            'operation': 'connection_check',
+            'exit_code': 0,
+            'duration_ms': 12.0,
+            'stdout': '',
+            'stderr': '',
+        })
+        agent._write_case_report_artifacts = lambda *_args: []
+
+        with patch(
+            'apps.ai_testing.global_planner.GlobalTestPlanner.create_plan',
+            new=AsyncMock(return_value=[
+                {
+                    'executor': 'device_cli',
+                    'description': '连接设备',
+                    'device_id': 'ainvr_5000',
+                },
+            ]),
+        ):
+            history = asyncio.run(
+                agent.run_full_process(
+                    '连接设备并验证可用性',
+                    case_mode='freeform',
+                    task_steps=None,
+                )
+            )
+
+        self.assertEqual(history.steps[0]['status'], 'completed')
+        self.assertEqual(history.steps[0]['executor'], 'device_cli')
+        self.assertEqual(history.planner_trace['source'], 'global_planner')
+        self.assertEqual(history.planner_trace['api_automation_configuration']['id'], 7)
+        agent._execute_device_cli_step.assert_awaited_once()
+
     def test_report_vehicle_event_requires_environment_id(self) -> None:
         agent = PyUICompatAgent(case_name='AGI_Analysis', execution_user_id=1)
 
@@ -171,6 +267,33 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             result = asyncio.run(agent._report_vehicle_event({'environment_id': 5}))
 
         self.assertEqual(result, {'event_ids': ['event-123']})
+
+    def test_execute_data_factory_step_uses_single_vehicle_media_group(self) -> None:
+        configuration = SimpleNamespace(
+            id=5,
+            runtime_settings={
+                'api': {
+                    'edge': {
+                        'main_device': {
+                            'cameras': [{'camera_name': '5003_D13'}],
+                        },
+                    },
+                },
+            },
+        )
+        agent = PyUICompatAgent(execution_user_id=1, api_automation_configuration=configuration)
+        agent._report_vehicle_event = AsyncMock(return_value={'event_ids': ['event-123']})
+
+        result = asyncio.run(agent._execute_data_factory_step({'camera_name': '5003_D13'}))
+
+        self.assertEqual(result, {'event_ids': ['event-123']})
+        agent._report_vehicle_event.assert_awaited_once_with({
+            'environment_id': 5,
+            'device': 'main',
+            'camera_index': 0,
+            'media_path': 'vehicle/normal_snap_image_0.jpeg',
+            'vehicle_color': 1,
+        })
 
     def test_alert_note_assertion_matches_reported_gpt_description(self) -> None:
         agent = PyUICompatAgent(case_name='AGI_Analysis')

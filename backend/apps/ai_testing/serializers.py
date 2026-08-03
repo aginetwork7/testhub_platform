@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db import models
 from .models import AiProject, AICase, AIExecutionRecord
 
 User = get_user_model()
@@ -63,6 +64,8 @@ class AiProjectSerializer(serializers.Serializer):
 class AICaseSerializer(serializers.Serializer):
     id = serializers.IntegerField(read_only=True)
     project_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    api_automation_configuration_id = serializers.IntegerField(required=False, allow_null=True)
+    api_automation_configuration_name = serializers.SerializerMethodField()
     project_name = serializers.SerializerMethodField()
     name = serializers.CharField(max_length=200)
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -78,6 +81,10 @@ class AICaseSerializer(serializers.Serializer):
         
     def get_project_name(self, obj):
         return obj.project.name if obj.project else ''
+
+    def get_api_automation_configuration_name(self, obj):
+        configuration = obj.api_automation_configuration
+        return configuration.name if configuration else ''
 
     def validate(self, attrs):
         case_mode = attrs.get('case_mode') or getattr(self.instance, 'case_mode', 'freeform')
@@ -95,6 +102,20 @@ class AICaseSerializer(serializers.Serializer):
         elif not str(task_description or '').strip():
             raise serializers.ValidationError({'task_description': 'freeform mode requires task_description'})
 
+        configuration_id = attrs.get('api_automation_configuration_id')
+        if configuration_id is None and self.instance is not None:
+            configuration_id = self.instance.api_automation_configuration_id
+        if configuration_id is not None:
+            from apps.api_automation.models import ApiAutomationConfiguration
+
+            user = self.context['request'].user
+            configuration = ApiAutomationConfiguration.objects.filter(
+                models.Q(project__owner=user) | models.Q(project__members=user),
+                id=configuration_id,
+            ).distinct().first()
+            if configuration is None:
+                raise serializers.ValidationError({'api_automation_configuration_id': '环境不存在或无访问权限'})
+
         return attrs
 
     def create(self, validated_data):
@@ -103,6 +124,10 @@ class AICaseSerializer(serializers.Serializer):
 
     def update(self, instance, validated_data):
         instance.project_id = validated_data.get('project_id', instance.project_id)
+        instance.api_automation_configuration_id = validated_data.get(
+            'api_automation_configuration_id',
+            instance.api_automation_configuration_id,
+        )
         instance.name = validated_data.get('name', instance.name)
         instance.description = validated_data.get('description', instance.description)
         instance.task_description = validated_data.get('task_description', instance.task_description)

@@ -253,6 +253,18 @@
         <el-tab-pane label="运行设置" name="runtime">
           <el-form class="config-form" label-position="top"><el-form-item label="运行设置 JSON"><el-input v-model="runtimeSettings" class="config-code-input runtime-code-input" type="textarea" :rows="20" /></el-form-item></el-form>
         </el-tab-pane>
+        <el-tab-pane label="设备 CLI" name="device-cli">
+          <el-form class="config-form" label-position="top">
+            <div class="device-cli-switch"><div><strong>启用设备 CLI Skill</strong><span>仅需传入设备 ID 即可使用当前环境的固定认证与 SSH 连接模式。</span></div><el-switch v-model="deviceCliEnabled" /></div>
+            <el-form-item label="命令黑名单（正则表达式）">
+              <div class="blacklist-editor">
+                <div v-for="(_, index) in deviceCliBlacklist" :key="index" class="blacklist-row"><el-input v-model="deviceCliBlacklist[index]" placeholder="输入禁止执行的命令正则" /><el-button :icon="Delete" circle plain type="danger" @click="removeDeviceCliBlacklist(index)" /></div>
+                <el-button plain :icon="Plus" @click="addDeviceCliBlacklist">添加黑名单规则</el-button>
+              </div>
+            </el-form-item>
+            <el-alert type="warning" :closable="false" show-icon title="默认允许执行命令；命中任一黑名单正则即被拒绝。黑名单规则由当前环境独立维护。" />
+          </el-form>
+        </el-tab-pane>
       </el-tabs>
       <template #footer><div class="config-dialog-footer"><el-button :loading="loadingTemplate" @click="loadConfigurationTemplate">加载模板</el-button><div><el-button @click="configurationDialogVisible = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveConfiguration">保存环境配置</el-button></div></div></template>
     </el-dialog>
@@ -371,9 +383,22 @@ const authenticationProfiles = ref('{}')
 const paymentConfiguration = ref('{}')
 const modelProfiles = ref('{}')
 const runtimeSettings = ref('{}')
+const deviceCliEnabled = ref(false)
+const deviceCliBlacklist = ref([])
 const loadingTemplate = ref(false)
 const initializingConfiguration = ref(false)
 const configurationForm = ref({ name: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false })
+const defaultDeviceCliBlacklist = [
+  '(^|\\s)(sudo\\s+)?rm\\s+(-[A-Za-z]*r[A-Za-z]*f?|--recursive)(\\s|$)',
+  '(^|\\s)(sudo\\s+)?(mkfs(\\.|\\s|$)|wipefs(\\s|$)|fdisk(\\s|$)|parted(\\s|$))',
+  '(^|\\s)(sudo\\s+)?dd\\s+.*\\bof=/dev/',
+  '(^|\\s)(sudo\\s+)?(reboot|poweroff|shutdown|halt|init\\s+[06])(\\s|$)',
+  '(^|\\s)(sudo\\s+)?(passwd|useradd|userdel|usermod|chpasswd|visudo)(\\s|$)',
+  '(^|\\s)(sudo\\s+)?(iptables|nft|ufw|firewall-cmd)(\\s|$)',
+  '(^|\\s)(sudo\\s+)?(chmod\\s+(-R\\s+)?777|chown\\s+-R\\s+/)(\\s|$)',
+  '(^|\\s)(curl|wget)\\s+.*\\|\\s*(ba)?sh(\\s|$)',
+  '(^|/)authorized_keys(\\s|$)|(^|/)sshd_config(\\s|$)',
+]
 const scheduleDialogVisible = ref(false)
 const scheduleForm = ref({ name: '', schedule_type: 'I', minutes: 60, cron: '', configuration_id: null, source_path_prefix: 'test_api', notify_on_success: false, notify_on_failure: true })
 const treeProps = { children: 'children', label: 'name' }
@@ -624,6 +649,9 @@ function openConfigurationDialog(configuration = null) {
   paymentConfiguration.value = JSON.stringify(configuration?.payment_config || {}, null, 2)
   modelProfiles.value = JSON.stringify(configuration?.model_profiles || {}, null, 2)
   runtimeSettings.value = JSON.stringify(configuration?.runtime_settings || {}, null, 2)
+  const deviceCliSettings = configuration?.runtime_settings?.device_cli || {}
+  deviceCliEnabled.value = Boolean(deviceCliSettings.enabled)
+  deviceCliBlacklist.value = Array.isArray(deviceCliSettings.command_blacklist) ? [...deviceCliSettings.command_blacklist] : [...defaultDeviceCliBlacklist]
   configurationDialogVisible.value = true
 }
 
@@ -645,6 +673,11 @@ async function saveConfiguration() {
     configuredRuntimeSettings.test = configuredRuntimeSettings.test || {}
     configuredRuntimeSettings.test.validation = configuredRuntimeSettings.test.validation || {}
     configuredRuntimeSettings.test.validation.http_schema_enabled = configurationForm.value.http_schema_enabled
+    configuredRuntimeSettings.device_cli = {
+      ...(configuredRuntimeSettings.device_cli || {}),
+      enabled: deviceCliEnabled.value,
+      command_blacklist: deviceCliBlacklist.value.map(item => item.trim()).filter(Boolean),
+    }
     const { http_schema_enabled, ...configurationValues } = configurationForm.value
     const payload = {
       ...configurationValues,
@@ -684,8 +717,18 @@ async function loadConfigurationTemplate() {
     paymentConfiguration.value = JSON.stringify(template.payment || {}, null, 2)
     modelProfiles.value = JSON.stringify(template.models || {}, null, 2)
     runtimeSettings.value = JSON.stringify(template, null, 2)
+    deviceCliEnabled.value = false
+    deviceCliBlacklist.value = [...defaultDeviceCliBlacklist]
     ElMessage.success('已加载测试配置模板，请补充变量引用后保存')
   } catch (error) { ElMessage.error('加载测试配置模板失败') } finally { loadingTemplate.value = false }
+}
+
+function addDeviceCliBlacklist() {
+  deviceCliBlacklist.value.push('')
+}
+
+function removeDeviceCliBlacklist(index) {
+  deviceCliBlacklist.value.splice(index, 1)
 }
 
 async function initializeConfiguration() {
@@ -871,6 +914,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .workspace { padding: 24px; min-height: 100%; background: #f4f7fb; }
 .config-dialog-intro { margin: -4px 0 16px; padding: 10px 12px; border-left: 3px solid #1677ff; background: #f0f7ff; color: #526170; font-size: 13px; line-height: 1.6; }.config-tabs :deep(.el-tabs__header) { margin-bottom: 18px; }.config-form { padding: 0 2px; }.config-grid { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 0 16px; }.config-grid .full-row { grid-column: 1 / -1; }.config-form :deep(.el-form-item__label) { padding-bottom: 6px; color: #344054; font-size: 13px; font-weight: 600; }.config-form :deep(.el-input-number) { width: 100%; }.config-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }.config-switches > div { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; padding: 14px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f8fafc; }.config-switches strong { color: #344054; font-size: 13px; }.config-switches span { color: #667085; font-size: 12px; }.config-switches :deep(.el-switch) { grid-column: 2; grid-row: 1 / span 2; }.config-code-input :deep(.el-textarea__inner) { min-height: 160px; border-color: #d0d5dd; background: #101828; color: #d0d5dd; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.6; }.runtime-code-input :deep(.el-textarea__inner) { min-height: 420px; }.config-dialog-footer { display: flex; align-items: center; justify-content: space-between; width: 100%; }.config-dialog-footer > div { display: flex; gap: 8px; }
+.device-cli-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 14px; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }.device-cli-switch strong { display: block; color: #344054; font-size: 13px; }.device-cli-switch span { display: block; max-width: 580px; margin-top: 4px; color: #667085; font-size: 12px; line-height: 1.5; }.blacklist-editor { display: grid; gap: 8px; width: 100%; }.blacklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
 .run-progress { margin-top: 16px; }
 .run-progress-head { display: flex; justify-content: space-between; margin-bottom: 8px; color: #475467; font-size: 13px; }
 .current-case { margin: 8px 0 0; color: #475467; font-size: 13px; }

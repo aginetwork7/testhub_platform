@@ -17,7 +17,6 @@
             <el-form-item :label="$t('uiAutomation.ai.executionBackend')">
               <el-select v-model="taskForm.executionMode" style="width: 220px;">
                 <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
-                <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
                 <el-option :label="$t('uiAutomation.ai.backends.plannerV2')" value="planner_v2" />
               </el-select>
             </el-form-item>
@@ -261,7 +260,7 @@ const createStructuredStep = (stepMode = 'direct') => ({
 const taskForm = reactive({
   description: '',
   enableGif: true,  // GIF录制开关，默认开启
-  executionMode: 'text',
+  executionMode: 'planner_v2',
   caseMode: 'freeform',
   taskSteps: [createStructuredStep()]
 })
@@ -315,11 +314,8 @@ watch(
   () => taskForm.executionMode,
   (mode) => {
     if (mode === 'planner_v2') {
-      if (taskForm.caseMode === 'freeform') {
-        taskForm.caseMode = 'hybrid'
-      }
       taskForm.enableGif = false
-      if (taskForm.taskSteps.length === 0) {
+      if (taskForm.caseMode !== 'freeform' && taskForm.taskSteps.length === 0) {
         taskForm.taskSteps.push(createStructuredStep(taskForm.caseMode === 'hybrid' ? 'ai' : 'direct'))
       }
       return

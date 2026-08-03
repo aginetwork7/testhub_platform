@@ -472,9 +472,9 @@ export default {
     taskDescription: 'Task Description',
     executionBackend: 'Execution Backend',
     caseMode: 'Case Mode',
-    caseModeTip: 'Freeform fits the current Browser/Hermes modes, while structured steps fit planner_v2.',
+    caseModeTip: 'Freeform fits the current Browser/Hermes modes, while structured steps fit Planner.',
     hybridCaseModeTip: 'Hybrid steps let natural-language AI steps and system-direct steps coexist in one case.',
-    plannerV2Tip: 'planner_v2 currently executes structured or hybrid steps. Please provide step entries.',
+    plannerV2Tip: 'Planner currently executes structured or hybrid steps. Please provide step entries.',
     taskPlaceholder: 'Describe the task in natural language, e.g.:\n1. Visit https://www.baidu.com\n2. Search \'TestHub\'\n3. Click the first search result',
     gifRecording: 'GIF Recording',
     on: 'On',
@@ -514,7 +514,7 @@ export default {
     backends: {
       browser: 'Browser',
       hermes: 'Hermes',
-      plannerV2: 'Planner V2'
+      plannerV2: 'Planner'
     },
     caseModes: {
       freeform: 'Freeform',
@@ -582,7 +582,7 @@ export default {
         deleteFailed: 'Failed to delete AI case',
         runSuccess: 'Case execution started',
         runFailed: 'Failed to execute AI case',
-        structuredCasePlannerModeRequired: 'Structured or hybrid-step cases must run with Planner V2',
+        structuredCasePlannerModeRequired: 'Structured or hybrid-step cases must run with Planner',
         hybridCaseExecutionPending: 'Hybrid-step cases can now be created and maintained, but mixed execution is still being wired in'
       }
     },
@@ -595,7 +595,7 @@ export default {
       executionMode: 'Execution Mode',
       browserMode: 'Browser',
       hermesMode: 'Hermes',
-      plannerV2Mode: 'Planner V2',
+      plannerV2Mode: 'Planner',
       adhocExecution: 'Adhoc Execution',
       caseExecution: 'Case Execution',
       status: 'Status',
