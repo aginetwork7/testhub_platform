@@ -218,6 +218,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             if normalized.endswith('/chat/completions'):
                 normalized = normalized[:-len('/chat/completions')]
 
+            if provider in {'gemini', 'google_gemini'}:
+                return normalized
+
             parsed = urlparse(normalized)
             hostname = parsed.hostname
             if self._running_in_docker() and hostname in {'127.0.0.1', 'localhost'}:
@@ -237,6 +240,8 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             return 'https://api.deepseek.com'
         if provider == 'anthropic':
             return 'https://api.anthropic.com'
+        if provider in {'gemini', 'google_gemini'}:
+            return 'https://generativelanguage.googleapis.com/v1beta/openai'
         if provider == 'other':
             return ''
         return ''

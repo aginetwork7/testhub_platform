@@ -33,12 +33,13 @@ class PyUICompatHistory:
 class PyUICompatAgent:
     """Initial pyuitest-inspired runtime scaffold for AI intelligent mode."""
 
-    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None):
+    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, api_automation_configuration=None):
         self.execution_mode = execution_mode
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
         self.use_cache = bool(use_cache)
         self.execution_user_id = execution_user_id
+        self.api_automation_configuration = api_automation_configuration
         self._recent_network_events = []
         self._reported_event_ids = []
         self._reported_alert_gpt_description = ''
@@ -75,16 +76,29 @@ class PyUICompatAgent:
         return None
 
     async def run_full_process(self, task_description, analysis_callback=None, step_callback=None, should_stop=None, case_mode='freeform', task_steps=None):
-        planned_tasks = self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
+        execution_steps = task_steps
+        resolved_case_mode = case_mode
+        if case_mode == 'freeform':
+            from apps.ai_testing.global_planner import GlobalTestPlanner
+
+            execution_steps = await GlobalTestPlanner().create_plan(
+                task_description,
+                getattr(self.api_automation_configuration, 'id', None),
+            )
+            resolved_case_mode = 'structured'
+
+        planned_tasks = self._build_planned_tasks(task_description, case_mode=resolved_case_mode, task_steps=execution_steps)
         if analysis_callback is not None:
             await self._emit(analysis_callback, planned_tasks)
 
         history = PyUICompatHistory(
             planner_trace={
-                'case_mode': case_mode,
+                'case_mode': resolved_case_mode,
                 'task_count': len(planned_tasks),
-                'source': 'planner_v2_bootstrap' if case_mode != 'hybrid' else 'planner_v2_hybrid',
+                'source': 'global_planner' if case_mode == 'freeform' else ('planner_v2_bootstrap' if case_mode != 'hybrid' else 'planner_v2_hybrid'),
                 'step_retry_map': {},
+                'api_automation_configuration': self._planner_configuration_trace(),
+                'global_plan': self._planner_step_trace(execution_steps) if case_mode == 'freeform' else [],
             },
             cache_stats={
                 'enabled': self.use_cache,
@@ -112,7 +126,7 @@ class PyUICompatAgent:
             },
         )
 
-        if case_mode not in {'structured', 'hybrid'} or not isinstance(task_steps, list) or not task_steps:
+        if resolved_case_mode not in {'structured', 'hybrid'} or not isinstance(execution_steps, list) or not execution_steps:
             await self._emit(
                 step_callback,
                 {
@@ -121,6 +135,46 @@ class PyUICompatAgent:
                 },
             )
             return history
+
+        normalized_steps = [self._normalize_step(raw_step, index) for index, raw_step in enumerate(execution_steps, start=1)]
+        artifact_dir, artifact_prefix = self._prepare_artifact_dir()
+        if all(step.get('executor') in {'device_cli', 'data_factory'} for step in normalized_steps):
+            return await self._run_device_only_plan(
+                normalized_steps,
+                history,
+                step_callback,
+                should_stop,
+                artifact_dir,
+                artifact_prefix,
+                task_description,
+                planned_tasks,
+            )
+
+        first_browser_index = next(
+            (index for index, step in enumerate(normalized_steps) if step.get('executor') not in {'device_cli', 'data_factory'}),
+            0,
+        )
+        step_index_start = 1
+        if first_browser_index:
+            await self._run_device_only_plan(
+                normalized_steps[:first_browser_index],
+                history,
+                step_callback,
+                should_stop,
+                artifact_dir,
+                artifact_prefix,
+                task_description,
+                planned_tasks,
+                finalize=False,
+            )
+            if not history.case_report['success'] or len(history.steps) < first_browser_index:
+                report_artifacts = self._write_case_report_artifacts(artifact_dir, artifact_prefix, history)
+                if report_artifacts:
+                    history.artifacts.extend(report_artifacts)
+                history.planner_trace['case_report'] = history.case_report
+                return history
+            step_index_start = first_browser_index + 1
+            normalized_steps = normalized_steps[first_browser_index:]
 
         try:
             from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -132,9 +186,6 @@ class PyUICompatAgent:
                     'content': f'planner_v2 无法启动: 缺少 playwright 依赖。{exc}\n',
                 },
             )
-            return history
-
-        artifact_dir, artifact_prefix = self._prepare_artifact_dir()
 
         async with async_playwright() as playwright:
             launch_kwargs = {
@@ -154,7 +205,7 @@ class PyUICompatAgent:
             try:
                 await self._bootstrap_pyuitest_session(page, step_callback)
 
-                for index, raw_step in enumerate(task_steps, start=1):
+                for index, step in enumerate(normalized_steps, start=step_index_start):
                     if should_stop is not None and await self._check_stop(should_stop):
                         await self._emit(
                             step_callback,
@@ -162,7 +213,6 @@ class PyUICompatAgent:
                         )
                         break
 
-                    step = self._normalize_step(raw_step, index)
                     history.planner_trace['step_retry_map'][str(index)] = 0
                     await self._emit(step_callback, {'task_id': index, 'status': 'in_progress'})
                     await self._emit(
@@ -178,7 +228,49 @@ class PyUICompatAgent:
                     screenshot_rel_path = None
 
                     try:
-                        if step.get('step_mode') == 'ai':
+                        if step.get('executor') == 'device_cli':
+                            device_result = await self._execute_device_cli_step(step)
+                            status = 'completed' if device_result['status'] == 'PASSED' else 'failed'
+                            error_message = device_result.get('stderr') or None
+                            device_output = self._sanitize_device_output(
+                                device_result.get('stdout'),
+                                device_result.get('stderr'),
+                            )
+                            last_executed_action = 'device_cli'
+                            action_source = 'device_cli'
+                            history.artifacts.append(
+                                {
+                                    'type': 'device_cli',
+                                    'step': index,
+                                    'device_id': step['device_id'],
+                                    'operation': device_result.get('operation'),
+                                    'status': device_result['status'],
+                                    'exit_code': device_result.get('exit_code'),
+                                    'duration_ms': device_result.get('duration_ms'),
+                                    'output_preview': device_output,
+                                }
+                            )
+                        elif step.get('executor') == 'data_factory':
+                            event_report = await self._execute_data_factory_step(step)
+                            self._reported_event_ids = event_report['event_ids']
+                            last_executed_action = 'report_vehicle_event'
+                            action_source = 'data_factory'
+                            history.artifacts.append(
+                                {
+                                    'type': 'event_report',
+                                    'step': index,
+                                    'camera_name': step['camera_name'],
+                                    'event_ids': event_report['event_ids'],
+                                }
+                            )
+                            await self._emit(
+                                step_callback,
+                                {
+                                    'type': 'log',
+                                    'content': f"[planner_v2] Step {index} reported vehicle event(s): {', '.join(event_report['event_ids'])}\n",
+                                },
+                            )
+                        elif step.get('step_mode') == 'ai':
                             ai_actions, action_source = await self._get_ai_actions_for_step(
                                 page,
                                 step,
@@ -283,8 +375,10 @@ class PyUICompatAgent:
                             ),
                             'duration_seconds': duration_seconds,
                             'error': error_message,
+                            'output': device_output if step.get('executor') == 'device_cli' else None,
                             'result': status == 'completed',
                             'source': action_source,
+                            'executor': step.get('executor', 'browser'),
                             'retry_count': history.planner_trace['step_retry_map'].get(str(index), 0),
                             'step_screenshot': screenshot_rel_path,
                             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -298,10 +392,12 @@ class PyUICompatAgent:
                             'action': last_executed_action,
                             'result': status == 'completed',
                             'error': error_message,
+                            'output': device_output if step.get('executor') == 'device_cli' else None,
                             'fail_screenshot': screenshot_rel_path if status == 'failed' else None,
                             'step_screenshot': screenshot_rel_path,
                             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                             'source': action_source,
+                            'executor': step.get('executor', 'browser'),
                             'retry_count': history.planner_trace['step_retry_map'].get(str(index), 0),
                         }
                     )
@@ -347,6 +443,154 @@ class PyUICompatAgent:
                 break
 
         return history
+
+    def _planner_configuration_trace(self):
+        configuration = self.api_automation_configuration
+        if configuration is None:
+            return None
+        return {
+            'id': configuration.id,
+            'name': configuration.name,
+            'environment': configuration.environment,
+        }
+
+    @staticmethod
+    def _planner_step_trace(steps):
+        return [
+            {
+                'executor': step.get('executor'),
+                'description': step.get('description'),
+                'device_id': step.get('device_id'),
+                'has_command': bool(step.get('command')),
+            }
+            for step in steps
+            if isinstance(step, dict)
+        ]
+
+    async def _run_device_only_plan(self, steps, history, step_callback, should_stop, artifact_dir, artifact_prefix, task_description, planned_tasks, start_index=1, finalize=True):
+        for index, step in enumerate(steps, start=start_index):
+            if should_stop is not None and await self._check_stop(should_stop):
+                await self._emit(step_callback, {'type': 'log', 'content': 'Planner 收到停止信号，结束后续步骤执行。\n'})
+                break
+            await self._emit(step_callback, {'task_id': index, 'status': 'in_progress'})
+            started_at = time.perf_counter()
+            status = 'completed'
+            error_message = None
+            result = None
+            device_output = None
+            try:
+                if step.get('executor') == 'data_factory':
+                    event_report = await self._execute_data_factory_step(step)
+                    self._reported_event_ids = event_report['event_ids']
+                    result = {
+                        'status': 'PASSED',
+                        'operation': 'report_vehicle_event',
+                        'stdout': f"event_ids={','.join(event_report['event_ids'])}",
+                        'stderr': '',
+                    }
+                else:
+                    result = await self._execute_device_cli_step(step)
+                status = 'completed' if result['status'] == 'PASSED' else 'failed'
+                error_message = result.get('stderr') or None
+                device_output = self._sanitize_device_output(result.get('stdout'), result.get('stderr'))
+            except Exception as exc:
+                status = 'failed'
+                error_message = f'{type(exc).__name__}: {exc}'
+            duration_seconds = round(time.perf_counter() - started_at, 2)
+            history.artifacts.append({
+                'type': step.get('executor'),
+                'step': index,
+                'device_id': step.get('device_id'),
+                'camera_name': step.get('camera_name'),
+                'operation': (result or {}).get('operation', 'connection_check'),
+                'status': (result or {}).get('status', 'ERROR'),
+                'exit_code': (result or {}).get('exit_code'),
+                'duration_ms': (result or {}).get('duration_ms'),
+                'output_preview': device_output,
+            })
+            history.steps.append({
+                'step_num': index,
+                'step_description': step['description'],
+                'status': status,
+                'action': result.get('operation', step.get('executor')),
+                'element': None,
+                'thinking': f"executor={step.get('executor')}",
+                'duration_seconds': duration_seconds,
+                'error': error_message,
+                'output': device_output,
+                'result': status == 'completed',
+                'source': step.get('executor'),
+                'executor': step.get('executor'),
+                'retry_count': 0,
+                'step_screenshot': None,
+                'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            history.case_report['steps'].append({
+                'step_num': index,
+                'step_description': step['description'],
+                'action': result.get('operation', step.get('executor')),
+                'result': status == 'completed',
+                'error': error_message,
+                'output': device_output,
+                'source': step.get('executor'),
+                'retry_count': 0,
+            })
+            await self._emit(step_callback, {'task_id': index, 'status': status})
+            if status == 'failed':
+                history.case_report['success'] = False
+                break
+        if finalize:
+            report_artifacts = self._write_case_report_artifacts(artifact_dir, artifact_prefix, history)
+            if report_artifacts:
+                history.artifacts.extend(report_artifacts)
+            history.planner_trace['case_report'] = history.case_report
+        return history
+
+    async def _execute_device_cli_step(self, step):
+        if self.api_automation_configuration is None:
+            raise ValueError('device_cli 步骤需要绑定 API 自动化环境。')
+        from apps.api_automation.device_cli_skill import DeviceCliSkill
+
+        return await asyncio.to_thread(
+            DeviceCliSkill().execute,
+            self.api_automation_configuration,
+            device_id=step['device_id'],
+            operation=step.get('operation'),
+            arguments=step.get('arguments'),
+            command=step.get('command'),
+            timeout_seconds=max(1, int(step.get('timeout_ms', 30000) / 1000)),
+        )
+
+    async def _execute_data_factory_step(self, step):
+        if self.api_automation_configuration is None:
+            raise ValueError('data_factory 步骤需要绑定 API 自动化环境。')
+        if not self.execution_user_id:
+            raise PermissionError('data_factory 步骤需要执行用户上下文。')
+        edge_settings = ((self.api_automation_configuration.runtime_settings or {}).get('api', {}) or {}).get('edge', {}) or {}
+        cameras = (edge_settings.get('main_device', {}) or {}).get('cameras', []) or []
+        camera_name = str(step.get('camera_name') or '').strip()
+        camera_index = next(
+            (index for index, camera in enumerate(cameras) if str(camera.get('camera_name') or '').strip() == camera_name),
+            None,
+        )
+        if camera_index is None:
+            raise ValueError(f'当前环境未配置摄像头 {camera_name}。')
+        return await self._report_vehicle_event({
+            'environment_id': self.api_automation_configuration.id,
+            'device': 'main',
+            'camera_index': camera_index,
+            'media_path': 'vehicle/normal_snap_image_0.jpeg',
+            'vehicle_color': 1,
+        })
+
+    @staticmethod
+    def _sanitize_device_output(stdout, stderr):
+        output = '\n'.join(part for part in [str(stdout or '').strip(), str(stderr or '').strip()] if part)
+        if not output:
+            return None
+        output = re.sub(r'(send\s+")[^"]+(\\r")', r'\1***\2', output, flags=re.IGNORECASE)
+        output = re.sub(r'((?:password|token|authorization)\s*[:=]\s*)\S+', r'\1***', output, flags=re.IGNORECASE)
+        return output[-8000:]
 
     async def _get_ai_actions_for_step(self, page, step, history, step_callback=None, step_index=None):
         fallback_actions = self._fallback_actions_for_step(step)
@@ -427,7 +671,24 @@ class PyUICompatAgent:
                 step_callback,
                 {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {self._describe_action(ai_action)}\n"},
             )
-            await self._execute_step(page, ai_action, timeout_error=timeout_error)
+            try:
+                await self._execute_step(page, ai_action, timeout_error=timeout_error)
+            except Exception:
+                fallback_actions = self._fallback_actions_for_step(
+                    {'description': self._describe_action(ai_action)}
+                )
+                if not fallback_actions:
+                    raise
+                await self._emit(
+                    step_callback,
+                    {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: using deterministic fallback.\n"},
+                )
+                for fallback_action in fallback_actions:
+                    normalized_fallback = self._normalize_step(
+                        {**fallback_action, 'step_mode': 'direct'},
+                        sub_index,
+                    )
+                    await self._execute_step(page, normalized_fallback, timeout_error=timeout_error)
 
     def _cache_file_path(self):
         try:
@@ -677,6 +938,7 @@ class PyUICompatAgent:
             expected = raw_step.get('value') or raw_step.get('text')
         return {
             'index': index,
+            'executor': str(raw_step.get('executor') or 'browser').strip().lower(),
             'step_mode': str(raw_step.get('step_mode') or 'direct').strip().lower(),
             'action': action,
             'description': description,
@@ -690,6 +952,11 @@ class PyUICompatAgent:
             'fields': raw_step.get('fields'),
             'selector_candidates': raw_step.get('selector_candidates'),
             'environment_id': raw_step.get('environment_id'),
+            'camera_name': raw_step.get('camera_name'),
+            'device_id': raw_step.get('device_id'),
+            'command': raw_step.get('command'),
+            'operation': raw_step.get('operation'),
+            'arguments': raw_step.get('arguments') or {},
             'device': raw_step.get('device'),
             'camera_index': raw_step.get('camera_index'),
             'media_path': raw_step.get('media_path'),
@@ -1580,15 +1847,31 @@ class PyUICompatAgent:
         if not target:
             return None
         try:
-            locator = page.locator(target).first
-            if await locator.count() > 0:
-                return locator
+            locator = page.locator(target)
+            visible_locator = await self._first_visible_locator(locator)
+            if visible_locator is not None:
+                return visible_locator
         except Exception:
             pass
         try:
-            return page.get_by_text(target, exact=False).first
+            return await self._first_visible_locator(page.get_by_text(target, exact=False))
         except Exception:
             return None
+
+    @staticmethod
+    async def _first_visible_locator(locator):
+        count = await locator.count()
+        for index in range(count):
+            candidate = locator.nth(index) if hasattr(locator, 'nth') else locator.first
+            is_visible = getattr(candidate, 'is_visible', None)
+            if not callable(is_visible):
+                return candidate
+            try:
+                if await is_visible():
+                    return candidate
+            except Exception:
+                continue
+        return None
 
     async def _has_visible_text_candidate(self, page, text):
         if not text:

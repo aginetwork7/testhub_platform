@@ -11,6 +11,7 @@
         <div class="section-header">
           <h2>{{ $t('configuration.aiMode.configList') }}</h2>
           <button class="add-config-btn" @click="openAddModal">
+            <el-icon><Plus /></el-icon>
             {{ $t('configuration.aiMode.addConfig') }}
           </button>
         </div>
@@ -34,16 +35,28 @@
                 </div>
               </div>
               <div class="config-actions">
-                <el-switch
-                  v-model="config.is_active"
-                  @change="toggleActive(config)"
-                  :loading="config.toggling"
-                />
+                <div class="config-toggle">
+                  <span>{{ config.is_active ? $t('configuration.common.enabled') : $t('configuration.common.disabled') }}</span>
+                  <el-switch
+                    v-model="config.is_active"
+                    @change="toggleActive(config)"
+                    :loading="config.toggling"
+                  />
+                </div>
                 <button class="test-btn" @click="testConnection(config)" :disabled="config.testing">
+                  <el-icon><Connection /></el-icon>
                   {{ $t('configuration.aiMode.testConnection') }}
                 </button>
-                <button class="edit-btn" @click="editConfig(config)">✏️</button>
-                <button class="delete-btn" @click="deleteConfig(config.id)">🗑️</button>
+                <el-tooltip :content="$t('configuration.aiMode.editConfig')" placement="top">
+                  <button class="icon-btn edit-btn" @click="editConfig(config)" type="button">
+                    <el-icon><EditPen /></el-icon>
+                  </button>
+                </el-tooltip>
+                <el-tooltip :content="$t('configuration.aiMode.messages.deleteConfirm')" placement="top">
+                  <button class="icon-btn delete-btn" @click="deleteConfig(config.id)" type="button">
+                    <el-icon><Delete /></el-icon>
+                  </button>
+                </el-tooltip>
               </div>
             </div>
 
@@ -111,7 +124,7 @@
                 <option value="openai">{{ $t('configuration.aiMode.providers.openai') }}</option>
                 <option value="azure_openai">{{ $t('configuration.aiMode.providers.azure_openai') }}</option>
                 <option value="anthropic">{{ $t('configuration.aiMode.providers.anthropic') }}</option>
-                <option value="google_gemini">{{ $t('configuration.aiMode.providers.google_gemini') }}</option>
+                <option value="gemini">{{ $t('configuration.aiMode.providers.gemini') }}</option>
                 <option value="deepseek">{{ $t('configuration.aiMode.providers.deepseek') }}</option>
                 <option value="siliconflow">{{ $t('configuration.aiMode.providers.siliconflow') }}</option>
                 <option value="zhipu">{{ $t('configuration.aiMode.providers.zhipu') }}</option>
@@ -208,6 +221,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Connection, Delete, EditPen, Plus } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 
 const { t } = useI18n()
@@ -240,7 +254,7 @@ const modelBaseUrlMap = {
   openai: 'https://api.openai.com/v1',
   azure_openai: '',
   anthropic: 'https://api.anthropic.com',
-  google_gemini: '',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
   deepseek: 'https://api.deepseek.com',
   siliconflow: 'https://api.siliconflow.cn/v1',
   zhipu: 'https://open.bigmodel.cn/api/paas/v4',
@@ -589,99 +603,108 @@ onMounted(() => {
 
 <style scoped>
 .ai-mode-config {
-  padding: 20px;
-  max-width: 1400px;
+  padding: 8px 0 36px;
+  max-width: 1280px;
   margin: 0 auto;
 }
 
 .page-header {
-  text-align: center;
-  margin-bottom: 40px;
+  text-align: left;
+  margin: 0 0 28px;
 }
 
 .page-header h1 {
-  font-size: 2.5rem;
+  font-size: 1.75rem;
   color: #2c3e50;
-  margin-bottom: 10px;
+  margin: 0 0 6px;
 }
 
 .page-header p {
-  color: #666;
-  font-size: 1.1rem;
+  color: #667085;
+  font-size: 0.95rem;
+  margin: 0;
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 30px;
+  margin-bottom: 16px;
 }
 
 .section-header h2 {
   color: #2c3e50;
   margin: 0;
+  font-size: 1.15rem;
 }
 
 .add-config-btn {
-  background: #27ae60;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: #15803d;
   color: white;
   border: none;
-  padding: 12px 24px;
-  border-radius: 8px;
+  padding: 9px 14px;
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 1rem;
-  transition: background 0.3s ease;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: background 0.2s ease;
 }
 
 .add-config-btn:hover {
-  background: #219a52;
+  background: #166534;
 }
 
 .configs-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(500px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 14px;
 }
 
 .config-card {
   background: white;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-  border: 1px solid #e1e8ed;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  border-radius: 8px;
+  padding: 18px;
+  border: 1px solid #dfe5ec;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .config-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 15px rgba(0, 0, 0, 0.15);
+  border-color: #a8c5e5;
+  box-shadow: 0 5px 14px rgba(15, 23, 42, 0.08);
 }
 
 .config-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 20px;
-  gap: 15px;
+  margin-bottom: 18px;
+  gap: 12px;
 }
 
 .config-title h3 {
   color: #2c3e50;
-  margin: 0 0 10px 0;
-  font-size: 1.3rem;
+  margin: 0 0 9px;
+  font-size: 1.15rem;
+  line-height: 1.35;
 }
 
 .config-badges {
-  display: flex;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 6px;
   flex-wrap: wrap;
 }
 
 .provider-badge, .model-name-badge, .status-badge, .role-badge {
-  padding: 4px 12px;
+  padding: 4px 9px;
   border-radius: 20px;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
+  line-height: 1.2;
 }
 
 .role-badge.browser_use_text {
@@ -702,6 +725,12 @@ onMounted(() => {
 .provider-badge.openai {
   background: #e3f2fd;
   color: #1976d2;
+}
+
+.provider-badge.gemini,
+.provider-badge.google_gemini {
+  background: #e7f2ff;
+  color: #1769aa;
 }
 
 .provider-badge.anthropic {
@@ -746,27 +775,41 @@ onMounted(() => {
 
 .config-actions {
   display: flex;
-  gap: 10px;
+  gap: 7px;
   align-items: center;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
-.test-btn, .edit-btn, .delete-btn {
-  padding: 6px 12px;
+.config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #667085;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.test-btn, .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   border: none;
-  border-radius: 6px;
+  border-radius: 5px;
   cursor: pointer;
-  font-size: 0.85rem;
-  transition: background 0.3s ease;
+  font-size: 0.8rem;
+  transition: background 0.2s ease;
 }
 
 .test-btn {
-  background: #3498db;
+  background: #2563eb;
   color: white;
+  padding: 7px 9px;
 }
 
 .test-btn:hover:not(:disabled) {
-  background: #2980b9;
+  background: #1d4ed8;
 }
 
 .test-btn:disabled {
@@ -775,7 +818,7 @@ onMounted(() => {
 }
 
 .edit-btn {
-  background: #f39c12;
+  background: #f59e0b;
   color: white;
 }
 
@@ -784,18 +827,27 @@ onMounted(() => {
 }
 
 .delete-btn {
-  background: #e74c3c;
+  background: #dc2626;
   color: white;
 }
 
 .delete-btn:hover {
-  background: #c0392b;
+  background: #b91c1c;
+}
+
+.icon-btn {
+  width: 31px;
+  height: 31px;
+  padding: 0;
+  font-size: 1rem;
 }
 
 .config-details {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1.5fr) minmax(130px, 0.75fr);
   gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid #edf0f4;
 }
 
 .detail-item {
@@ -805,15 +857,18 @@ onMounted(() => {
 }
 
 .detail-item label {
-  font-size: 0.85rem;
-  color: #666;
+  font-size: 0.72rem;
+  color: #667085;
   font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
 }
 
 .detail-item span {
   color: #2c3e50;
-  font-size: 0.9rem;
-  word-break: break-all;
+  font-size: 0.84rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .empty-state {
@@ -1010,6 +1065,10 @@ onMounted(() => {
     flex-direction: column;
     gap: 15px;
     align-items: flex-start;
+  }
+
+  .config-actions {
+    justify-content: flex-start;
   }
 
   .config-details {

@@ -5,6 +5,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
 from apps.ai_testing.models import AIExecutionRecord, AiProject
+from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
 from apps.ai_testing.ai_agent import BrowserAgent, HermesAgent, PyUICompatAgent, get_agent_class
 from apps.unified_projects.models import MetaProject
 from apps.users.models import User
@@ -13,6 +14,7 @@ from apps.ai_testing.views import (
     build_step_thinking,
     normalize_planner_artifact_path,
     normalize_step_thinking,
+    resolve_api_automation_configuration_from_task,
 )
 
 
@@ -148,8 +150,70 @@ class AIAgentRoutingTests(SimpleTestCase):
             '点击搜索框中的放大镜图标，展开高级搜索面板',
         )
 
+    def test_execution_report_includes_device_step_output(self) -> None:
+        record = type('Record', (), {
+            'steps_completed': [{
+                'step': 0,
+                'action': 'device_cli',
+                'status': 'completed',
+                'output': '2360 root /custom/agi7/manager',
+            }],
+            'planned_tasks': [{'id': 1, 'description': '检查 manager 进程', 'status': 'completed'}],
+            'status': 'passed',
+            'duration': 1,
+            'execution_mode': 'planner_v2',
+            'logs': '',
+            'gif_path': None,
+            'artifacts': [],
+            'cache_stats': {},
+            'planner_trace': {'case_report': {'steps': []}},
+        })()
+
+        report = AIExecutionRecordViewSet()._build_execution_report(record)
+
+        self.assertEqual(report['detailed_steps'][0]['output'], '2360 root /custom/agi7/manager')
+
 
 class AIExecutionRecordViewSetQuerysetTests(TestCase):
+    def test_resolve_environment_uses_longest_natural_language_alias(self) -> None:
+        user = User.objects.create_user(username='planner_owner', password='pass123')
+        api_project = ApiAutomationProject.objects.create(name='Planner API', owner=user)
+        test_configuration = ApiAutomationConfiguration.objects.create(
+            project=api_project,
+            name='test 环境',
+            environment='test',
+        )
+        test_two_configuration = ApiAutomationConfiguration.objects.create(
+            project=api_project,
+            name='test-2 环境',
+            environment='test-2',
+        )
+
+        resolved = resolve_api_automation_configuration_from_task(
+            '在 test-2 环境连接设备 nvr_5003 并检查 manager 进程',
+            user,
+        )
+
+        self.assertEqual(resolved.id, test_two_configuration.id)
+        self.assertNotEqual(resolved.id, test_configuration.id)
+
+    def test_resolve_environment_uses_default_when_task_has_no_environment(self) -> None:
+        user = User.objects.create_user(username='default_env_owner', password='pass123')
+        api_project = ApiAutomationProject.objects.create(name='Default API', owner=user)
+        default_configuration = ApiAutomationConfiguration.objects.create(
+            project=api_project,
+            name='test-2 环境',
+            environment='test-2',
+            is_default=True,
+        )
+
+        resolved = resolve_api_automation_configuration_from_task(
+            '连接 nvr_5003 并确认 manager 进程存在',
+            user,
+        )
+
+        self.assertEqual(resolved.id, default_configuration.id)
+
     def test_get_queryset_only_returns_accessible_project_records(self) -> None:
         owner = User.objects.create_user(username='owner', password='pass123')
         other_user = User.objects.create_user(username='other', password='pass123')

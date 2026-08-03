@@ -124,6 +124,7 @@
                 <option value="">{{ $t('configuration.aiModel.selectModelType') }}</option>
                 <option value="deepseek">{{ $t('configuration.aiModel.modelTypes.deepseek') }}</option>
                 <option value="qwen">{{ $t('configuration.aiModel.modelTypes.qwen') }}</option>
+                <option value="gemini">{{ $t('configuration.aiModel.modelTypes.gemini') }}</option>
                 <option value="siliconflow">{{ $t('configuration.aiModel.modelTypes.siliconflow') }}</option>
                 <option value="zhipu">{{ $t('configuration.aiModel.modelTypes.zhipu') }}</option>
                 <option value="other">{{ $t('configuration.aiModel.modelTypes.other') }}</option>
@@ -309,6 +310,7 @@ export default {
       modelBaseUrlMap: {
         deepseek: 'https://api.deepseek.com',
         qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
         siliconflow: 'https://api.siliconflow.cn/v1',
         zhipu: 'https://open.bigmodel.cn/api/paas/v4',
         other: ''

@@ -57,6 +57,8 @@ from .serializers import (
     ApiAutomationRunSerializer,
     ApiAutomationSuiteSerializer,
 )
+from .device_cli_serializers import DeviceCliExecuteSerializer
+from .device_cli_skill import DeviceCliSkill, DeviceCliSkillError
 
 
 class ProjectAccessMixin:
@@ -281,6 +283,17 @@ class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSe
         configuration.is_default = True
         configuration.save(update_fields=['is_default'])
         return Response(ApiAutomationConfigurationSerializer(configuration).data)
+
+    @action(detail=True, methods=['post'], url_path='device-cli')
+    def execute_device_cli(self, request, pk=None):
+        configuration = self.get_object()
+        serializer = DeviceCliExecuteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = DeviceCliSkill().execute(configuration, **serializer.validated_data)
+        except DeviceCliSkillError as error:
+            return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
 
     def _load_template(self):
         template_path = Path(__file__).resolve().parent / 'test_assets' / 'config' / 'config.template.yaml'

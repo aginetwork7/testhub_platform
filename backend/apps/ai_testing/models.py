@@ -34,6 +34,14 @@ class AICase(models.Model):
     task_description = models.TextField(verbose_name='任务描述', help_text='自然语言任务描述')
     case_mode = models.CharField(max_length=20, choices=CASE_MODE_CHOICES, default='freeform', verbose_name='用例模式')
     task_steps = models.JSONField(default=list, blank=True, verbose_name='结构化步骤')
+    api_automation_configuration = models.ForeignKey(
+        'api_automation.ApiAutomationConfiguration',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ai_testing_cases',
+        verbose_name='设备 CLI 环境',
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='创建者', related_name='ai_testing_created_cases')
@@ -52,7 +60,7 @@ class AIExecutionRecord(models.Model):
     EXECUTION_MODE_CHOICES = [
         ('text', '文本模式'),
         ('hermes', 'Hermes模式'),
-        ('planner_v2', '结构化规划模式'),
+        ('planner_v2', 'Planner'),
     ]
 
     STATUS_CHOICES = [
@@ -67,7 +75,7 @@ class AIExecutionRecord(models.Model):
     ai_case = models.ForeignKey(AICase, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='关联AI用例')
     case_name = models.CharField(max_length=200, verbose_name='用例名称快照')
     task_description = models.TextField(blank=True, default='', verbose_name='任务描述', help_text='用户输入的原始任务描述')
-    execution_mode = models.CharField(max_length=20, choices=EXECUTION_MODE_CHOICES, default='text', verbose_name='执行模式')
+    execution_mode = models.CharField(max_length=20, choices=EXECUTION_MODE_CHOICES, default='planner_v2', verbose_name='执行模式')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name='执行状态')
     start_time = models.DateTimeField(auto_now_add=True, verbose_name='开始时间')
     end_time = models.DateTimeField(null=True, blank=True, verbose_name='结束时间')

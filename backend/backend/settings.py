@@ -35,6 +35,8 @@ API_AUTOMATION_SWAGGER_TIMEOUT_SECONDS = config(
     cast=int,
 )
 API_AUTOMATION_SWAGGER_TOKEN = config('API_AUTOMATION_SWAGGER_TOKEN', default='')
+DEVICE_CLI_RUNNER_URL = config('DEVICE_CLI_RUNNER_URL', default=config_loader.get('device_cli.runner_url', ''))
+DEVICE_CLI_RUNNER_TOKEN = config('DEVICE_CLI_RUNNER_TOKEN', default='')
 
 # 根据DEBUG模式设置ALLOWED_HOSTS，生产环境不应使用通配符
 if DEBUG:

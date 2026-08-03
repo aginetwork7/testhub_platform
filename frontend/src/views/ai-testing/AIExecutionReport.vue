@@ -161,6 +161,10 @@
                   <div v-if="step.thinking" class="step-thinking">
                     <strong>{{ $t('uiAutomation.ai.executionReport.thinking') }}:</strong> {{ step.thinking }}
                   </div>
+                  <div v-if="step.output" class="step-output">
+                    <strong>执行输出:</strong>
+                    <pre>{{ step.output }}</pre>
+                  </div>
                 </div>
               </el-card>
             </div>
@@ -949,6 +953,18 @@ const handleClose = () => {
 .step-thinking {
   color: #909399;
   font-style: italic;
+}
+
+.step-output pre {
+  max-height: 260px;
+  margin: 6px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #d0d5dd;
+  background: #101828;
+  color: #d0d5dd;
+  font: 12px/1.55 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
 }
 
 .performance-metrics {

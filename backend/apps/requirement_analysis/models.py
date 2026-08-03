@@ -334,6 +334,7 @@ class AIModelConfig(models.Model):
     MODEL_CHOICES = [
         ('deepseek', 'DeepSeek'),
         ('qwen', '通义千问'),
+        ('gemini', 'Google Gemini'),
         ('siliconflow', '硅基流动'),
         ('zhipu', '智谱'),
         ('other', '其他'),
@@ -628,6 +629,20 @@ class AIModelService:
         return data
 
     @staticmethod
+    def _build_chat_completions_url(config: AIModelConfig) -> str:
+        base_url = config.base_url.rstrip('/')
+        if base_url.endswith('/chat/completions'):
+            return base_url
+
+        if config.model_type in {'gemini', 'google_gemini'}:
+            return f'{base_url}/chat/completions'
+
+        version_match = re.search(r'/v(\d+)/?$', base_url)
+        if version_match:
+            return f'{base_url}/chat/completions'
+        return f'{base_url}/v1/chat/completions'
+
+    @staticmethod
     async def call_openai_compatible_api(
             config: AIModelConfig,
             messages: List[Dict[str, str]],
@@ -661,22 +676,7 @@ class AIModelService:
             response_format=response_format,
         )
 
-        # 确保base_url不以/结尾
-        base_url = config.base_url.rstrip('/')
-        # 如果用户没有输入完整的/chat/completions路径，尝试智能补全
-        if not base_url.endswith('/chat/completions'):
-            # 检查是否已经包含版本号（如v1, v4等）
-            import re
-            version_match = re.search(r'/v(\d+)/?$', base_url)
-            if version_match:
-                # 如果已经以版本号结尾（如/v1, /v4），直接添加/chat/completions
-                url = f"{base_url}/chat/completions"
-            else:
-                # 默认假设是根路径，尝试添加 v1/chat/completions
-                # 但对于某些API（如DeepSeek），base_url可能已经是 https://api.deepseek.com
-                url = f"{base_url}/v1/chat/completions"
-        else:
-            url = base_url
+        url = AIModelService._build_chat_completions_url(config)
 
         logger.info(f"=== API调用详情 ===")
         logger.info(f"原始base_url: {config.base_url}")
@@ -755,20 +755,7 @@ class AIModelService:
         # 使用传入的max_tokens或默认使用config.max_tokens
         actual_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
 
-        # 确保base_url不以/结尾
-        base_url = config.base_url.rstrip('/')
-        if not base_url.endswith('/chat/completions'):
-            # 检查是否已经包含版本号（如v1, v4等）
-            import re
-            version_match = re.search(r'/v(\d+)/?$', base_url)
-            if version_match:
-                # 如果已经以版本号结尾（如/v1, /v4），直接添加/chat/completions
-                url = f"{base_url}/chat/completions"
-            else:
-                # 默认假设是根路径，尝试添加 v1/chat/completions
-                url = f"{base_url}/v1/chat/completions"
-        else:
-            url = base_url
+        url = AIModelService._build_chat_completions_url(config)
 
         # 续写控制
         current_messages = list(messages)  # 浅拷贝

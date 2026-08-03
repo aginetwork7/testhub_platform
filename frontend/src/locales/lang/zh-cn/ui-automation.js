@@ -472,9 +472,9 @@ export default {
     taskDescription: '任务描述',
     executionBackend: '执行后端',
     caseMode: '用例模式',
-    caseModeTip: '自由描述适合现有 Browser/Hermes 模式，结构化步骤适合 planner_v2。',
+    caseModeTip: '自由描述适合现有 Browser/Hermes 模式，结构化步骤适合 Planner。',
     hybridCaseModeTip: '混合步骤允许自然语言步骤与系统直执行步骤并存，适合逐步编排测试用例。',
-    plannerV2Tip: 'planner_v2 当前按结构化或混合步骤执行，请填写步骤列表。',
+    plannerV2Tip: 'Planner 当前按结构化或混合步骤执行，请填写步骤列表。',
     taskPlaceholder: '请用自然语言描述要执行的任务，例如：\n1. 访问 https://www.baidu.com\n2. 搜索 \'TestHub\'\n3. 点击第一条搜索结果',
     gifRecording: 'GIF录制',
     on: '开启',
@@ -514,7 +514,7 @@ export default {
     backends: {
       browser: 'Browser',
       hermes: 'Hermes',
-      plannerV2: 'Planner V2'
+      plannerV2: 'Planner'
     },
     caseModes: {
       freeform: '自由描述',
@@ -582,7 +582,7 @@ export default {
         deleteFailed: '删除AI用例失败',
         runSuccess: '用例开始执行',
         runFailed: '执行AI用例失败',
-        structuredCasePlannerModeRequired: '结构化或混合步骤用例请使用 Planner V2 执行',
+        structuredCasePlannerModeRequired: '结构化或混合步骤用例请使用 Planner 执行',
         hybridCaseExecutionPending: '混合步骤用例已支持新建和维护，混合执行链路仍在接入中'
       }
     },
@@ -595,7 +595,7 @@ export default {
       executionMode: '执行模式',
       browserMode: 'Browser',
       hermesMode: 'Hermes',
-      plannerV2Mode: 'Planner V2',
+      plannerV2Mode: 'Planner',
       adhocExecution: '临时执行',
       caseExecution: '用例执行',
       status: '状态',

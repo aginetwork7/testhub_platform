@@ -1,6 +1,6 @@
 airtest>=1.4.3
 asgiref==3.11.1
-#argon2-cffi  # 可选
+argon2-cffi
 barcode_generator==0.1rc15
 browser_use==0.12.6
 channels==4.3.2

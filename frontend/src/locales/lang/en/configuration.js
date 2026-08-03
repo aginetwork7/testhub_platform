@@ -145,6 +145,7 @@ export default {
       openai: 'OpenAI',
       azure_openai: 'Azure OpenAI',
       anthropic: 'Anthropic',
+      gemini: 'Google Gemini',
       google_gemini: 'Google Gemini',
       deepseek: 'DeepSeek',
       siliconflow: 'SiliconFlow',
@@ -258,6 +259,7 @@ export default {
     modelTypes: {
       deepseek: 'DeepSeek',
       qwen: 'Qwen',
+      gemini: 'Google Gemini',
       siliconflow: 'SiliconFlow',
       zhipu: 'Zhipu AI',
       other: 'Other'

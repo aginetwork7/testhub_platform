@@ -12,7 +12,6 @@
         </el-select>
         <el-select v-model="executionMode" :placeholder="$t('uiAutomation.ai.caseList.executionBackend')" style="width: 140px;">
           <el-option :label="$t('uiAutomation.ai.backends.browser')" value="text" />
-          <el-option :label="$t('uiAutomation.ai.backends.hermes')" value="hermes" />
           <el-option :label="$t('uiAutomation.ai.backends.plannerV2')" value="planner_v2" />
         </el-select>
         <el-switch
@@ -228,7 +227,7 @@ const projectId = ref('')
 const cases = ref([])
 const loading = ref(false)
 const searchText = ref('')
-const executionMode = ref('text')
+const executionMode = ref('planner_v2')
 const disableCache = ref(false)
 const total = ref(0)
 const pagination = reactive({

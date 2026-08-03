@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+WORKDIR /runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends expect openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pexpect \
+    && addgroup --system runner \
+    && adduser --system --ingroup runner runner
+
+COPY backend/apps/api_automation/device_cli_runner/server.py ./server.py
+
+USER runner
+EXPOSE 19001
+
+CMD ["python", "server.py"]
