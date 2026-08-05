@@ -34,6 +34,7 @@ class AICase(models.Model):
     task_description = models.TextField(verbose_name='任务描述', help_text='自然语言任务描述')
     case_mode = models.CharField(max_length=20, choices=CASE_MODE_CHOICES, default='freeform', verbose_name='用例模式')
     task_steps = models.JSONField(default=list, blank=True, verbose_name='结构化步骤')
+    planned_steps = models.JSONField(default=list, blank=True, verbose_name='Planner执行步骤')
     api_automation_configuration = models.ForeignKey(
         'api_automation.ApiAutomationConfiguration',
         on_delete=models.SET_NULL,

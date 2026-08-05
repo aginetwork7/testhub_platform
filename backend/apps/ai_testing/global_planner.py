@@ -11,6 +11,115 @@ class GlobalPlanError(ValueError):
     """Raised when a global test plan cannot be generated or validated."""
 
 
+class VisualStepReplanner:
+    """Planner-side visual replanning from executor evidence."""
+
+    async def create_actions(self, step_description: str, evidence: dict[str, Any]) -> list[dict[str, Any]]:
+        config = await self._get_active_model_config()
+        if config is None:
+            raise GlobalPlanError('未配置可用的 Planner Vision 模型。')
+
+        from apps.requirement_analysis.models import AIModelService
+
+        visible_text = str(evidence.get('visible_text') or '')[:600]
+        messages: list[dict[str, Any]] = [
+            {
+                'role': 'system',
+                'content': (
+                    'Return only one JSON object: {"actions":[...]}. No prose. '
+                    'Actions allowed: click, wait, assert, assert_text_contains, assert_url_contains. '
+                    'A click needs selector or loc="(x,y)". '
+                    'For camera lists use {"action":"assert","assert_kind":"camera_list","expected":"true"}. '
+                    'For live streams use {"action":"assert","assert_kind":"stream_active","expected":"true"}. '
+                    'When opening Cameras from an icon-only sidebar, return two actions: '
+                    'click the sidebar icon with loc, then {"action":"assert","assert_kind":"site_list","expected":"true"}. '
+                    'Do not click a Cameras text menu item unless it is actually visible in the screenshot. '
+                    'Each navigation sequence must be followed by an assertion.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'text',
+                        'text': (
+                            f'Step: {step_description}\n'
+                            f'URL: {evidence.get("url", "")}\n'
+                            f'Failure: {str(evidence.get("error", ""))[:300]}\n'
+                            f'Visible text:\n{visible_text}'
+                        ),
+                    },
+                ],
+            },
+        ]
+        screenshot = evidence.get('screenshot')
+        if screenshot:
+            messages[1]['content'].append({'type': 'image_url', 'image_url': {'url': screenshot}})
+
+        response = await AIModelService.call_openai_compatible_api(
+            config,
+            messages,
+            max_tokens=config.max_tokens,
+            response_format={'type': 'json_object'},
+        )
+        try:
+            content = response['choices'][0]['message']['content']
+            payload = json.loads(str(content or ''))
+            actions = payload.get('actions') if isinstance(payload, dict) else None
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+            raise GlobalPlanError('Planner Vision 未返回有效 JSON 动作计划。') from error
+        if not isinstance(actions, list) or not actions or not all(isinstance(item, dict) for item in actions):
+            raise GlobalPlanError('Planner Vision 动作计划为空或格式无效。')
+        return actions
+
+    async def assess_playback_advance(self, before_screenshot: str, after_screenshot: str) -> dict[str, Any]:
+        config = await self._get_active_model_config()
+        if config is None:
+            raise GlobalPlanError('未配置可用的 Planner Vision 模型。')
+
+        from apps.requirement_analysis.models import AIModelService
+
+        messages = [
+            {
+                'role': 'system',
+                'content': (
+                    'Compare two playback screenshots. Read the burned-in HH:MM:SS timestamps. '
+                    'Return only JSON: {"before_time":"HH:MM:SS","after_time":"HH:MM:SS",'
+                    '"advanced_seconds":number,"confidence":number}. No prose.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'First image is before clicking 10s Forward; second image is after.'},
+                    {'type': 'image_url', 'image_url': {'url': before_screenshot}},
+                    {'type': 'image_url', 'image_url': {'url': after_screenshot}},
+                ],
+            },
+        ]
+        response = await AIModelService.call_openai_compatible_api(
+            config,
+            messages,
+            max_tokens=config.max_tokens,
+            response_format={'type': 'json_object'},
+        )
+        try:
+            payload = json.loads(str(response['choices'][0]['message']['content'] or ''))
+            seconds = float(payload['advanced_seconds'])
+        except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise GlobalPlanError('Planner Vision 未返回有效的 Playback 时间证据。') from error
+        return {**payload, 'advanced_seconds': seconds}
+
+    @staticmethod
+    def _load_active_model_config():
+        from apps.requirement_analysis.models import AIModelConfig
+
+        return AIModelConfig.objects.filter(role='planner_vision', is_active=True).first()
+
+    async def _get_active_model_config(self):
+        return await sync_to_async(self._load_active_model_config)()
+
+
 class GlobalTestPlanner:
     """Builds a typed cross-executor plan from one natural-language test goal."""
 
@@ -19,19 +128,32 @@ class GlobalTestPlanner:
         task_description: str,
         api_automation_configuration_id: int | None,
     ) -> list[dict[str, Any]]:
-        config = await self._get_active_model_config()
-        if config is None:
+        configs = await self._get_active_model_configs()
+        if not configs:
             raise GlobalPlanError('未配置可用的 Planner 模型。')
 
         from apps.requirement_analysis.models import AIModelService
 
-        response = await AIModelService.call_openai_compatible_api(
-            config,
-            self._build_messages(task_description, api_automation_configuration_id),
-            max_tokens=1600,
-            response_format={'type': 'json_object'},
-        )
-        return self.normalize_response(response, api_automation_configuration_id, task_description)
+        messages = self._build_messages(task_description, api_automation_configuration_id)
+        last_error: GlobalPlanError | None = None
+        for config in configs:
+            retry_messages = list(messages)
+            for attempt in range(3):
+                response = await AIModelService.call_openai_compatible_api(
+                    config,
+                    retry_messages,
+                    max_tokens=1600,
+                    response_format={'type': 'json_object'},
+                )
+                try:
+                    return self.normalize_response(response, api_automation_configuration_id, task_description)
+                except GlobalPlanError as error:
+                    last_error = error
+                    retry_messages.append({
+                        'role': 'user',
+                        'content': 'Your previous response was empty or invalid. Return only a complete JSON object with a non-empty steps array.',
+                    })
+        raise GlobalPlanError('Planner 连续返回空或无效 JSON 计划。') from last_error
 
     @staticmethod
     def _build_messages(task_description: str, configuration_id: int | None) -> list[dict[str, Any]]:
@@ -51,6 +173,9 @@ class GlobalTestPlanner:
                     'For device_cli, output device_id and optionally command. '
                     'For data_factory, use action="report_vehicle_event" and copy camera_name exactly '
                     'from the user goal when the task asks to construct or report a real Vehicle event. '
+                    'For a camera browsing goal, create separate browser steps: open Cameras and verify the Site list '
+                    'with camera online/offline counts; select a Site whose online camera count is greater than zero; '
+                    'expand that Site, verify its Camera list and thumbnails, then select an online Camera and verify the live stream. '
                     'Copy device_id exactly from the user goal. Never use an internal environment ID, '
                     'never infer a device ID, and never substitute a short numeric value. '
                     'Device commands must be non-interactive: use systemctl is-active for service checks, '
@@ -92,6 +217,26 @@ class GlobalTestPlanner:
             if executor == 'browser':
                 if not description:
                     raise GlobalPlanError(f'Planner 浏览器步骤 {index} 缺少 description。')
+                normalized_description = description.lower()
+                camera_browse_markers = ('camera', '摄像头', '摄像机')
+                if (
+                    any(marker in normalized_description for marker in camera_browse_markers)
+                    and ('缩略图' in description or 'thumbnail' in normalized_description)
+                    and ('在线' in description or 'online' in normalized_description)
+                ):
+                    normalized_steps.extend([
+                        {
+                            'executor': 'browser',
+                            'step_mode': 'ai',
+                            'description': '打开 Cameras 页面，断言 Site 列表展示各 Site 的摄像头在线/离线数量。',
+                        },
+                        {
+                            'executor': 'browser',
+                            'step_mode': 'ai',
+                            'description': '选择摄像头在线数量大于 0 的 Site 并展开，断言其 Camera 列表及缩略图可见。',
+                        },
+                    ])
+                    continue
                 camera_name = GlobalTestPlanner._event_camera_name(description, task_description)
                 if camera_name:
                     if configuration_id is None:
@@ -150,6 +295,35 @@ class GlobalTestPlanner:
             if command is not None and str(command).strip():
                 step['command'] = str(command).strip()
             normalized_steps.append(step)
+        camera_workflow_markers = ('cameras', 'camera', '摄像头', '摄像机', '缩略图', 'thumbnail')
+        if sum(marker in task_description.lower() for marker in camera_workflow_markers) >= 2:
+            playback_index = next(
+                (
+                    index for index, step in enumerate(normalized_steps)
+                    if step.get('executor') == 'browser'
+                    and any(token in str(step.get('description') or '').lower() for token in ('playback', '回放'))
+                ),
+                None,
+            )
+            if playback_index is not None:
+                normalized_steps = [
+                    {
+                        'executor': 'browser',
+                        'step_mode': 'ai',
+                        'description': '打开 Cameras 页面，断言 Site 列表展示各 Site 的摄像头在线/离线数量。',
+                    },
+                    {
+                        'executor': 'browser',
+                        'step_mode': 'ai',
+                        'description': '选择摄像头在线数量大于 0 的 Site 并展开，断言其 Camera 列表及缩略图可见。',
+                    },
+                    {
+                        'executor': 'browser',
+                        'step_mode': 'ai',
+                        'description': '选择在线 Camera 的缩略图，断言直播流持续播放。',
+                    },
+                    *normalized_steps[playback_index:],
+                ]
         return normalized_steps
 
     @staticmethod
@@ -169,13 +343,23 @@ class GlobalTestPlanner:
         return match.group(0) if match else None
 
     @staticmethod
-    def _load_active_model_config():
+    def _load_active_model_configs():
         from apps.requirement_analysis.models import AIModelConfig
 
-        return (
-            AIModelConfig.objects.filter(role='browser_use_vision', is_active=True).first()
-            or AIModelConfig.objects.filter(role='browser_use_text', is_active=True).first()
+        configs = list(
+            AIModelConfig.objects.filter(
+                role='planner_text',
+                is_active=True,
+            ).order_by('id')
         )
+        seen = set()
+        unique_configs = []
+        for config in configs:
+            fingerprint = (config.model_type, config.base_url, config.model_name)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                unique_configs.append(config)
+        return unique_configs
 
-    async def _get_active_model_config(self):
-        return await sync_to_async(self._load_active_model_config)()
+    async def _get_active_model_configs(self):
+        return await sync_to_async(self._load_active_model_configs)()

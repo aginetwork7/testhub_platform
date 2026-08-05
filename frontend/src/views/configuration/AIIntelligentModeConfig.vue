@@ -16,62 +16,52 @@
           </button>
         </div>
 
-        <div class="configs-grid">
-          <div v-for="config in configs" :key="config.id" class="config-card">
-            <div class="config-header">
-              <div class="config-title">
-                <h3>{{ config.name || $t('configuration.common.unnamed') }}</h3>
-                <div class="config-badges">
-                  <span class="provider-badge" :class="config.model_type">
-                    {{ getProviderLabel(config.model_type) }}
-                  </span>
-                  <span class="role-badge" :class="config.role">
-                    {{ getRoleLabel(config.role) }}
-                  </span>
-                  <span class="model-name-badge">{{ config.model_name }}</span>
-                  <span class="status-badge" :class="{ active: config.is_active }">
-                    {{ config.is_active ? $t('configuration.common.enabled') : $t('configuration.common.disabled') }}
-                  </span>
-                </div>
+        <div class="model-workflows">
+          <section v-for="group in primaryGroups" :key="group.key" class="role-group" :class="group.key">
+            <header class="role-group-header">
+              <div>
+                <h3>{{ group.title }}</h3>
+                <p>{{ group.description }}</p>
               </div>
-              <div class="config-actions">
-                <div class="config-toggle">
-                  <span>{{ config.is_active ? $t('configuration.common.enabled') : $t('configuration.common.disabled') }}</span>
-                  <el-switch
-                    v-model="config.is_active"
-                    @change="toggleActive(config)"
-                    :loading="config.toggling"
-                  />
-                </div>
-                <button class="test-btn" @click="testConnection(config)" :disabled="config.testing">
-                  <el-icon><Connection /></el-icon>
-                  {{ $t('configuration.aiMode.testConnection') }}
-                </button>
-                <el-tooltip :content="$t('configuration.aiMode.editConfig')" placement="top">
-                  <button class="icon-btn edit-btn" @click="editConfig(config)" type="button">
-                    <el-icon><EditPen /></el-icon>
-                  </button>
-                </el-tooltip>
-                <el-tooltip :content="$t('configuration.aiMode.messages.deleteConfirm')" placement="top">
-                  <button class="icon-btn delete-btn" @click="deleteConfig(config.id)" type="button">
-                    <el-icon><Delete /></el-icon>
-                  </button>
-                </el-tooltip>
+            </header>
+            <div class="role-slots">
+              <div v-for="slot in group.slots" :key="slot.role" class="role-slot">
+                <div class="slot-label">{{ slot.label }}</div>
+                <template v-if="configsByRole(slot.role).length">
+                  <div v-for="config in configsByRole(slot.role)" :key="config.id" class="config-card">
+                    <div class="config-header">
+                      <div class="config-title">
+                        <h4>{{ config.name || $t('configuration.common.unnamed') }}</h4>
+                        <div class="config-badges">
+                          <span class="provider-badge" :class="config.model_type">{{ getProviderLabel(config.model_type) }}</span>
+                          <span class="model-name-badge">{{ config.model_name }}</span>
+                          <span class="status-badge" :class="{ active: config.is_active }">{{ config.is_active ? $t('configuration.common.enabled') : $t('configuration.common.disabled') }}</span>
+                        </div>
+                      </div>
+                      <div class="config-actions">
+                        <el-switch v-model="config.is_active" @change="toggleActive(config)" :loading="config.toggling" />
+                        <button class="test-btn" @click="testConnection(config)" :disabled="config.testing"><el-icon><Connection /></el-icon></button>
+                        <el-tooltip :content="$t('configuration.aiMode.editConfig')" placement="top"><button class="icon-btn edit-btn" @click="editConfig(config)" type="button"><el-icon><EditPen /></el-icon></button></el-tooltip>
+                        <el-tooltip :content="$t('configuration.aiMode.messages.deleteConfirm')" placement="top"><button class="icon-btn delete-btn" @click="deleteConfig(config.id)" type="button"><el-icon><Delete /></el-icon></button></el-tooltip>
+                      </div>
+                    </div>
+                    <div class="config-details"><div class="detail-item"><label>{{ $t('configuration.aiMode.baseUrl') }}:</label><span>{{ config.base_url || $t('configuration.common.notSet') }}</span></div></div>
+                  </div>
+                </template>
+                <button v-else class="empty-slot" @click="openAddModal">{{ $t('configuration.aiMode.addConfig') }}</button>
               </div>
             </div>
+          </section>
+        </div>
 
-            <div class="config-details">
-              <div class="detail-item">
-                <label>{{ $t('configuration.aiMode.baseUrl') }}:</label>
-                <span>{{ config.base_url || $t('configuration.common.notSet') }}</span>
-              </div>
-              <div class="detail-item">
-                <label>{{ $t('configuration.common.createdAt') }}:</label>
-                <span>{{ formatDateTime(config.created_at) }}</span>
-              </div>
+        <section v-if="legacyConfigs.length" class="legacy-configs">
+          <h3>Legacy / Hermes</h3>
+          <div class="configs-grid">
+            <div v-for="config in legacyConfigs" :key="config.id" class="config-card legacy-card">
+              <div class="config-header"><div class="config-title"><h4>{{ config.name }}</h4><div class="config-badges"><span class="role-badge">{{ getRoleLabel(config.role) }}</span><span class="model-name-badge">{{ config.model_name }}</span></div></div><div class="config-actions"><el-switch v-model="config.is_active" @change="toggleActive(config)" :loading="config.toggling" /><button class="test-btn" @click="testConnection(config)" :disabled="config.testing"><el-icon><Connection /></el-icon></button><el-tooltip :content="$t('configuration.aiMode.editConfig')"><button class="icon-btn edit-btn" @click="editConfig(config)" type="button"><el-icon><EditPen /></el-icon></button></el-tooltip><el-tooltip :content="$t('configuration.aiMode.messages.deleteConfirm')"><button class="icon-btn delete-btn" @click="deleteConfig(config.id)" type="button"><el-icon><Delete /></el-icon></button></el-tooltip></div></div>
             </div>
           </div>
-        </div>
+        </section>
 
         <div v-if="configs.length === 0" class="empty-state">
           <div class="empty-icon"></div>
@@ -106,8 +96,10 @@
             <div class="form-group">
               <label>{{ $t('configuration.aiMode.executionMode') }} <span class="required">*</span></label>
               <select v-model="configForm.role" class="form-select" required>
-                <option value="browser_use_text">{{ $t('configuration.aiMode.roles.text') }}</option>
-                <option value="browser_use_vision">{{ $t('configuration.aiMode.roles.vision') }}</option>
+                <option value="planner_text">Planner - {{ $t('configuration.aiMode.roles.text') }}</option>
+                <option value="planner_vision">Planner - {{ $t('configuration.aiMode.roles.vision') }}</option>
+                <option value="executor_text">Executor - {{ $t('configuration.aiMode.roles.text') }}</option>
+                <option value="executor_vision">Executor - {{ $t('configuration.aiMode.roles.vision') }}</option>
                 <option value="hermes_agent">{{ $t('configuration.aiMode.roles.hermes') }}</option>
               </select>
               <small class="form-hint">{{ $t('configuration.aiMode.executionModeHint') }}</small>
@@ -122,6 +114,7 @@
                 @change="onModelTypeChange">
                 <option value="">{{ $t('configuration.aiMode.selectProvider') }}</option>
                 <option value="openai">{{ $t('configuration.aiMode.providers.openai') }}</option>
+                <option value="qwen">Qwen</option>
                 <option value="azure_openai">{{ $t('configuration.aiMode.providers.azure_openai') }}</option>
                 <option value="anthropic">{{ $t('configuration.aiMode.providers.anthropic') }}</option>
                 <option value="gemini">{{ $t('configuration.aiMode.providers.gemini') }}</option>
@@ -242,7 +235,7 @@ const testResult = ref({
 const configForm = ref({
   name: '',
   model_type: '',
-  role: 'browser_use_text',
+  role: 'executor_text',
   model_name: '',
   api_key: '',
   base_url: '',
@@ -252,6 +245,7 @@ const configForm = ref({
 // 模型提供商与Base URL的映射关系
 const modelBaseUrlMap = {
   openai: 'https://api.openai.com/v1',
+  qwen: '',
   azure_openai: '',
   anthropic: 'https://api.anthropic.com',
   gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
@@ -263,6 +257,30 @@ const modelBaseUrlMap = {
 
 const shouldShowModal = computed(() => showAddModal.value || showEditModal.value)
 
+const primaryGroups = computed(() => [
+  {
+    key: 'planner',
+    title: 'Planner Models',
+    description: 'Turn test intent into an ordered, verifiable execution plan.',
+    slots: [
+      { role: 'planner_vision', label: 'Vision Planner' },
+      { role: 'planner_text', label: 'Text Planner' }
+    ]
+  },
+  {
+    key: 'executor',
+    title: 'Executor Models',
+    description: 'Resolve the current page into actions and evidence for each plan step.',
+    slots: [
+      { role: 'executor_vision', label: 'Vision Executor' },
+      { role: 'executor_text', label: 'Text Executor' }
+    ]
+  }
+])
+
+const configsByRole = (role) => configs.value.filter(config => config.role === role)
+const legacyConfigs = computed(() => configs.value.filter(config => !['planner_text', 'planner_vision', 'executor_text', 'executor_vision'].includes(config.role)))
+
 const getProviderLabel = (modelType) => {
   const key = `configuration.aiMode.providers.${modelType}`
   const translated = t(key)
@@ -271,8 +289,17 @@ const getProviderLabel = (modelType) => {
 }
 
 const getRoleLabel = (role) => {
-  if (role === 'browser_use_vision') {
-    return t('configuration.aiMode.roles.vision')
+  if (role === 'planner_vision') {
+    return `Planner - ${t('configuration.aiMode.roles.vision')}`
+  }
+  if (role === 'planner_text') {
+    return `Planner - ${t('configuration.aiMode.roles.text')}`
+  }
+  if (role === 'executor_vision') {
+    return `Executor - ${t('configuration.aiMode.roles.vision')}`
+  }
+  if (role === 'executor_text') {
+    return `Executor - ${t('configuration.aiMode.roles.text')}`
   }
   if (role === 'hermes_agent') {
     return t('configuration.aiMode.roles.hermes')
@@ -306,7 +333,7 @@ const resetForm = () => {
   configForm.value = {
     name: '',
     model_type: '',
-    role: 'browser_use_text',
+    role: 'executor_text',
     model_name: '',
     api_key: '',
     base_url: '',
@@ -325,7 +352,7 @@ const editConfig = (config) => {
   configForm.value = {
     name: config.name,
     model_type: config.model_type,
-    role: config.role || 'browser_use_text',
+    role: config.role || 'executor_text',
     model_name: config.model_name,
     api_key: maskedKey, // 显示与原API Key相同长度的掩码
     base_url: config.base_url,
@@ -661,6 +688,95 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
   gap: 14px;
+}
+
+.model-workflows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.role-group {
+  border: 1px solid #dfe5ec;
+  border-top: 3px solid #0f766e;
+  padding: 16px;
+  background: #f8fafc;
+}
+
+.role-group.executor {
+  border-top-color: #2563eb;
+}
+
+.role-group-header h3,
+.legacy-configs h3 {
+  margin: 0;
+  color: #1e293b;
+  font-size: 1.1rem;
+}
+
+.role-group-header p {
+  margin: 5px 0 16px;
+  color: #64748b;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.role-slots {
+  display: grid;
+  gap: 12px;
+}
+
+.role-slot {
+  min-width: 0;
+}
+
+.slot-label {
+  margin-bottom: 7px;
+  color: #475569;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.config-card {
+  padding: 14px;
+}
+
+.config-title h4 {
+  color: #2c3e50;
+  margin: 0 0 8px;
+  font-size: 0.98rem;
+  line-height: 1.35;
+}
+
+.empty-slot {
+  width: 100%;
+  min-height: 76px;
+  border: 1px dashed #94a3b8;
+  background: transparent;
+  color: #475569;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.empty-slot:hover {
+  border-color: #2563eb;
+  color: #1d4ed8;
+}
+
+.legacy-configs {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid #dfe5ec;
+}
+
+.legacy-configs h3 {
+  margin-bottom: 12px;
+  color: #64748b;
+}
+
+.legacy-card {
+  background: #f8fafc;
 }
 
 .config-card {

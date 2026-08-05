@@ -72,6 +72,7 @@ class AICaseSerializer(serializers.Serializer):
     task_description = serializers.CharField(required=False, allow_blank=True)
     case_mode = serializers.ChoiceField(choices=AICase.CASE_MODE_CHOICES, required=False, default='freeform')
     task_steps = serializers.JSONField(required=False)
+    planned_steps = serializers.JSONField(required=False)
     created_by_name = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)
@@ -133,6 +134,7 @@ class AICaseSerializer(serializers.Serializer):
         instance.task_description = validated_data.get('task_description', instance.task_description)
         instance.case_mode = validated_data.get('case_mode', instance.case_mode)
         instance.task_steps = validated_data.get('task_steps', instance.task_steps)
+        instance.planned_steps = validated_data.get('planned_steps', instance.planned_steps)
         instance.save()
         return instance
 
