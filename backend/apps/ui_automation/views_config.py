@@ -204,8 +204,11 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     AI智能模式配置视图集 (Browser-use) - 使用ModelViewSet支持标准CRUD
     """
     permission_classes = [IsAuthenticated]
-    BROWSER_USE_ROLES = ['browser_use_text', 'browser_use_vision', 'hermes_agent']
-    queryset = AIModelConfig.objects.filter(role__in=['browser_use_text', 'browser_use_vision', 'hermes_agent'])
+    BROWSER_USE_ROLES = [
+        'planner_text', 'planner_vision', 'executor_text', 'executor_vision',
+        'hermes_agent',
+    ]
+    queryset = AIModelConfig.objects.filter(role__in=BROWSER_USE_ROLES)
 
     @staticmethod
     def _running_in_docker():
@@ -378,7 +381,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         user = request.user
 
         # 验证必填字段
-        role = data.get('role', 'browser_use_text')
+        role = data.get('role', 'executor_text')
         required_fields = ['name', 'model_type', 'model_name']
         if role != 'hermes_agent':
             required_fields.append('api_key')
@@ -451,13 +454,19 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         try:
             config = self.queryset.get(pk=pk)
             data = request.data
+            new_role = data.get('role', config.role)
+            if new_role not in self.BROWSER_USE_ROLES:
+                return Response(
+                    {'error': f'role must be one of {self.BROWSER_USE_ROLES}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # 如果启用此配置，先禁用同一role的其他配置
             new_is_active = data.get('is_active', config.is_active)
             disabled_config_names = []
             if new_is_active:
                 # 查找同一role下将被禁用的配置
-                active_configs = AIModelConfig.objects.filter(role=config.role, is_active=True).exclude(pk=pk)
+                active_configs = AIModelConfig.objects.filter(role=new_role, is_active=True).exclude(pk=pk)
                 disabled_config_names = [c.name for c in active_configs]
                 active_configs.update(is_active=False)
 
@@ -466,6 +475,8 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 config.name = data['name']
             if 'model_type' in data:
                 config.model_type = data['model_type']
+            if 'role' in data:
+                config.role = new_role
             if 'model_name' in data:
                 config.model_name = data['model_name']
             if 'api_key' in data and data['api_key']:
@@ -481,6 +492,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 'id': config.id,
                 'name': config.name,
                 'model_type': config.model_type,
+                'role': config.role,
                 'model_name': config.model_name,
                 'base_url': config.base_url,
                 'is_active': config.is_active,
@@ -536,7 +548,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         base_url = request.data.get('base_url')
         api_key = request.data.get('api_key')
         model_name = request.data.get('model_name')
-        role = request.data.get('role', 'browser_use_text')
+        role = request.data.get('role', 'executor_text')
 
         if role != 'hermes_agent' and not api_key:
             return Response(

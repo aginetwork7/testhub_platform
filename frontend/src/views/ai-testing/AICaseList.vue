@@ -69,6 +69,24 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="执行步骤" min-width="280">
+          <template #default="{ row }">
+            <div class="task-description-cell">
+              <div class="task-description-text" :class="{ expanded: isTaskDescriptionExpanded(`planned-${row.id}`) }">
+                {{ formatPlannedSteps(row.planned_steps) || '-' }}
+              </div>
+              <el-button
+                v-if="shouldShowTaskDescriptionToggle(formatPlannedSteps(row.planned_steps))"
+                link
+                type="primary"
+                class="task-description-toggle"
+                @click="toggleTaskDescription(`planned-${row.id}`)"
+              >
+                {{ isTaskDescriptionExpanded(`planned-${row.id}`) ? $t('uiAutomation.ai.caseList.collapseTaskDescription') : $t('uiAutomation.ai.caseList.expandTaskDescription') }}
+              </el-button>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="created_at" :label="$t('uiAutomation.common.createTime')" width="180" :formatter="formatDate" />
         <el-table-column :label="$t('uiAutomation.common.operation')" width="140" fixed="right">
           <template #default="{ row }">
@@ -132,6 +150,20 @@
             :rows="6"
             :placeholder="$t('uiAutomation.ai.taskPlaceholder')"
           />
+        </el-form-item>
+        <el-form-item v-if="editForm.case_mode === 'freeform'" label="执行步骤">
+          <div class="planned-steps-editor">
+            <div v-for="(step, index) in editForm.planned_steps" :key="step.id || index" class="planned-step-row">
+              <span class="planned-step-number">{{ index + 1 }}</span>
+              <el-select v-model="step.step_mode" class="planned-step-mode">
+                <el-option :label="$t('uiAutomation.ai.stepModes.ai')" value="ai" />
+                <el-option :label="$t('uiAutomation.ai.stepModes.direct')" value="direct" />
+              </el-select>
+              <el-input v-model="step.description" type="textarea" :rows="2" placeholder="执行步骤描述" />
+              <el-button text type="danger" @click="removePlannedStep(index)"><el-icon><Delete /></el-icon></el-button>
+            </div>
+            <el-button plain type="primary" @click="addPlannedStep"><el-icon><Plus /></el-icon>新增执行步骤</el-button>
+          </div>
         </el-form-item>
         <el-form-item v-else :label="stepsSectionTitle" prop="task_steps">
           <div class="structured-steps">
@@ -257,6 +289,7 @@ const editForm = reactive({
   description: '',
   task_description: '',
   case_mode: 'freeform',
+  planned_steps: [],
   task_steps: [createStructuredStep()]
 })
 const editFormRef = ref(null)
@@ -343,6 +376,19 @@ const removeStructuredStep = (index) => {
   editForm.task_steps.splice(index, 1)
 }
 
+const addPlannedStep = () => {
+  editForm.planned_steps.push({
+    id: editForm.planned_steps.length + 1,
+    executor: 'browser',
+    step_mode: 'ai',
+    description: ''
+  })
+}
+
+const removePlannedStep = (index) => {
+  editForm.planned_steps.splice(index, 1)
+}
+
 const validateStructuredSteps = () => {
   if (!Array.isArray(editForm.task_steps) || editForm.task_steps.length === 0) {
     ElMessage.error(t('uiAutomation.ai.messages.structuredStepsRequired'))
@@ -389,6 +435,7 @@ const resetEditForm = () => {
   editForm.description = ''
   editForm.task_description = ''
   editForm.case_mode = 'freeform'
+  editForm.planned_steps = []
   editForm.task_steps = [createStructuredStep('ai')]
 }
 
@@ -468,6 +515,11 @@ const handleSearch = () => {
 
 const shouldShowTaskDescriptionToggle = (text) => String(text || '').trim().length > 90
 
+const formatPlannedSteps = (steps) => {
+  if (!Array.isArray(steps)) return ''
+  return steps.map((step, index) => `${index + 1}. ${step.description || step.name || step}`).join('\n')
+}
+
 const isTaskDescriptionExpanded = (caseId) => expandedTaskDescriptionIds.value.includes(caseId)
 
 const toggleTaskDescription = (caseId) => {
@@ -495,6 +547,14 @@ const editCase = (row) => {
   editForm.description = row.description
   editForm.task_description = row.task_description
   editForm.case_mode = row.case_mode || 'freeform'
+  editForm.planned_steps = Array.isArray(row.planned_steps)
+    ? row.planned_steps.map((step, index) => ({
+      id: step.id || index + 1,
+      executor: step.executor || 'browser',
+      step_mode: step.step_mode || 'ai',
+      description: step.description || ''
+    }))
+    : []
   editForm.task_steps = Array.isArray(row.task_steps) && row.task_steps.length > 0
     ? row.task_steps.map((step, index) => normalizeStructuredStep(step, index))
     : [createStructuredStep(row.case_mode === 'hybrid' ? 'ai' : 'direct')]
@@ -520,6 +580,9 @@ const confirmEdit = async () => {
             : buildTaskDescriptionFromSteps(editForm.task_steps),
           case_mode: editForm.case_mode,
           task_steps: editForm.case_mode === 'freeform' ? [] : buildTaskStepsPayload(),
+          planned_steps: editForm.case_mode === 'freeform'
+            ? editForm.planned_steps.filter(step => String(step.description || '').trim())
+            : [],
           project_id: projectId.value || null,
         }
 
@@ -685,6 +748,33 @@ onMounted(async () => {
 
 .structured-steps {
   width: 100%;
+}
+
+.planned-steps-editor {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
+.planned-step-row {
+  display: grid;
+  grid-template-columns: 28px 110px minmax(0, 1fr) 32px;
+  gap: 8px;
+  align-items: start;
+}
+
+.planned-step-number {
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.planned-step-mode {
+  width: 110px;
 }
 
 .structured-step-card {

@@ -357,6 +357,9 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
+                    if ai_case.case_mode == 'freeform':
+                        ai_case.planned_steps = execution_record.planned_tasks
+                        await sync_to_async(ai_case.save)(update_fields=['planned_steps'])
 
                 async def on_step_update(step_info):
                     try:

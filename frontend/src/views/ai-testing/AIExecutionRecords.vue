@@ -28,8 +28,8 @@
       >
         <el-table-column type="selection" width="55" />
         <el-table-column :label="$t('uiAutomation.ai.executionRecords.serialNumber')" width="80">
-          <template #default="{ $index }">
-            {{ getSerialNumber($index) }}
+          <template #default="{ row }">
+            {{ row.id }}
           </template>
         </el-table-column>
         <el-table-column prop="case_name" :label="$t('uiAutomation.ai.executionRecords.caseName')" min-width="200" show-overflow-tooltip />
@@ -372,11 +372,6 @@ const getExecutionModeTag = (executionMode) => {
 const formatDate = (row, column, cellValue) => {
   if (!cellValue) return ''
   return new Date(cellValue).toLocaleString()
-}
-
-// 获取序号
-const getSerialNumber = (index) => {
-  return (pagination.currentPage - 1) * pagination.pageSize + index + 1
 }
 
 // 处理选择变化

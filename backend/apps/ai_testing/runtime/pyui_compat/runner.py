@@ -85,7 +85,7 @@ class PyUICompatAgent:
                 task_description,
                 getattr(self.api_automation_configuration, 'id', None),
             )
-            resolved_case_mode = 'structured'
+            resolved_case_mode = 'hybrid'
 
         planned_tasks = self._build_planned_tasks(task_description, case_mode=resolved_case_mode, task_steps=execution_steps)
         if analysis_callback is not None:
@@ -190,7 +190,13 @@ class PyUICompatAgent:
         async with async_playwright() as playwright:
             launch_kwargs = {
                 'headless': True,
-                'args': ['--use-gl=swiftshader', '--ignore-gpu-blocklist', '--no-sandbox'],
+                'args': [
+                    '--use-gl=swiftshader',
+                    '--ignore-gpu-blocklist',
+                    '--no-sandbox',
+                    '--enable-features=PlatformHEVCDecoderSupport',
+                    '--autoplay-policy=no-user-gesture-required',
+                ],
             }
             browser_executable = self._resolve_browser_executable()
             if browser_executable:
@@ -198,6 +204,7 @@ class PyUICompatAgent:
             browser = await playwright.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
                 viewport={'width': 1760, 'height': 900},
+                accept_downloads=True,
             )
             page = await context.new_page()
             self._attach_runtime_observers(page)
@@ -344,6 +351,7 @@ class PyUICompatAgent:
                             {'type': 'log', 'content': f"[planner_v2] Step {index} failed: {error_message}\n"},
                         )
 
+                    await page.wait_for_timeout(300)
                     screenshot_path = await self._capture_screenshot(
                         page,
                         artifact_dir,
@@ -435,8 +443,14 @@ class PyUICompatAgent:
                     history.artifacts.extend(report_artifacts)
                 history.planner_trace['case_report'] = history.case_report
             finally:
-                await context.close()
-                await browser.close()
+                try:
+                    await asyncio.wait_for(context.close(), timeout=10)
+                except Exception as exc:
+                    logger.warning('planner_v2 context close timed out or failed: %s', exc)
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=10)
+                except Exception as exc:
+                    logger.warning('planner_v2 browser close timed out or failed: %s', exc)
 
         for task in planned_tasks:
             if task.get('id') > len(history.steps):
@@ -634,7 +648,17 @@ class PyUICompatAgent:
                         step_callback,
                         {'type': 'log', 'content': f"[planner_v2] Step {step_index} planner retry {attempt}/{max_attempts}.\n"},
                     )
-                return await self._plan_ai_step(page, step)
+                planning_step = dict(step)
+                if last_error is not None:
+                    planning_step['_planner_failure'] = f'{type(last_error).__name__}: {last_error}'
+                    planning_step['description'] = (
+                        f"{step['description']}\n"
+                        f"Previous plan was rejected: {type(last_error).__name__}: {last_error}. "
+                        'Return a different valid action sequence based on the current screenshot.'
+                    )
+                    if 'selector is not visible' in str(last_error):
+                        planning_step['_planner_force_visual_loc'] = True
+                return await self._plan_ai_step(page, planning_step)
             except Exception as exc:
                 last_error = exc
                 history.artifacts.append(
@@ -652,7 +676,7 @@ class PyUICompatAgent:
 
         raise ValueError(f'Hybrid AI step planner failed after {max_attempts} attempts: {last_error}')
 
-    async def _execute_ai_actions(self, page, step, ai_actions, index, step_callback, timeout_error, history=None):
+    async def _execute_ai_actions(self, page, step, ai_actions, index, step_callback, timeout_error, history=None, allow_replan=True):
         history_artifact = {
             'type': 'ai_plan',
             'step': index,
@@ -672,23 +696,79 @@ class PyUICompatAgent:
                 {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {self._describe_action(ai_action)}\n"},
             )
             try:
-                await self._execute_step(page, ai_action, timeout_error=timeout_error)
-            except Exception:
+                action_result = await self._execute_step(page, ai_action, timeout_error=timeout_error)
+                if history is not None and isinstance(action_result, dict) and action_result.get('before_path'):
+                    history.artifacts.extend([
+                        {'type': 'playback_before_forward', 'step': index, 'path': action_result['before_path']},
+                        {'type': 'playback_after_forward', 'step': index, 'path': action_result['after_path']},
+                    ])
+                if history is not None and isinstance(action_result, dict) and action_result.get('download_dialog_path'):
+                    history.artifacts.extend([
+                        {'type': 'playback_download_dialog', 'step': index, 'path': action_result['download_dialog_path']},
+                        {'type': 'playback_download_completed', 'step': index, 'path': action_result['download_completed_path']},
+                    ])
+            except Exception as error:
                 fallback_actions = self._fallback_actions_for_step(
                     {'description': self._describe_action(ai_action)}
                 )
-                if not fallback_actions:
+                if fallback_actions:
+                    await self._emit(
+                        step_callback,
+                        {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: using deterministic fallback.\n"},
+                    )
+                    for fallback_action in fallback_actions:
+                        normalized_fallback = self._normalize_step(
+                            {**fallback_action, 'step_mode': 'direct'},
+                            sub_index,
+                        )
+                        fallback_result = await self._execute_step(page, normalized_fallback, timeout_error=timeout_error)
+                        if history is not None and isinstance(fallback_result, dict) and fallback_result.get('download_dialog_path'):
+                            history.artifacts.extend([
+                                {'type': 'playback_download_dialog', 'step': index, 'path': fallback_result['download_dialog_path']},
+                                {'type': 'playback_download_completed', 'step': index, 'path': fallback_result['download_completed_path']},
+                            ])
+                    continue
+                if not allow_replan:
                     raise
+
+                replanning_step = {
+                    **step,
+                    'description': (
+                        f"{step['description']}\n"
+                        f"Previous action failed: {type(error).__name__}: {error}. "
+                        'Inspect the current page and choose a different valid action sequence.'
+                    ),
+                }
+                replan_actions = await self._plan_ai_step_with_retries(
+                    page,
+                    replanning_step,
+                    history,
+                    step_callback=step_callback,
+                    step_index=index,
+                )
+                if history is not None:
+                    history.artifacts.append({
+                        'type': 'ai_replan',
+                        'step': index,
+                        'failed_action': ai_action,
+                        'error': f'{type(error).__name__}: {error}',
+                        'actions': replan_actions,
+                    })
                 await self._emit(
                     step_callback,
-                    {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: using deterministic fallback.\n"},
+                    {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: replanning from current page.\n"},
                 )
-                for fallback_action in fallback_actions:
-                    normalized_fallback = self._normalize_step(
-                        {**fallback_action, 'step_mode': 'direct'},
-                        sub_index,
-                    )
-                    await self._execute_step(page, normalized_fallback, timeout_error=timeout_error)
+                await self._execute_ai_actions(
+                    page,
+                    step,
+                    replan_actions,
+                    index,
+                    step_callback,
+                    timeout_error,
+                    history=history,
+                    allow_replan=False,
+                )
+                return
 
     def _cache_file_path(self):
         try:
@@ -934,8 +1014,32 @@ class PyUICompatAgent:
         description = str(raw_step.get('description') or raw_step.get('name') or f'步骤 {index}').strip()
         selector = raw_step.get('selector') or raw_step.get('locator') or raw_step.get('target')
         expected = raw_step.get('expected') or raw_step.get('assert_value') or raw_step.get('url_contains')
+        if expected is None and action in {'assert_url_contains', 'url_contains'}:
+            expected = raw_step.get('url')
         if expected is None and action in {'assert_text_contains', 'text_contains', 'assert_url_contains', 'url_contains'}:
             expected = raw_step.get('value') or raw_step.get('text')
+        assert_kind = str(raw_step.get('assert_kind') or '').strip().lower()
+        semantic_assertions = {
+            'site_list': (["[class*='site-item']", "[class*='site'] [class*='item']", '#btnSite'], 80, 120, 120, 20),
+            'camera_list': (["div[class*='grid'] > div", "div[class*='grid'] > button", "[class*='camera-item']", "[class*='preview']"], 80, 120, 40, 20),
+            'camera_previews': (["[class*='preview']", "[class*='thumbnail']", 'img', 'video', 'canvas'], 80, 120, 40, 20),
+        }
+        semantic_assertion = semantic_assertions.get(assert_kind)
+        if action == 'assert' and semantic_assertion:
+            selector_candidates, min_x, min_y, min_width, min_height = semantic_assertion
+            raw_step = {
+                **raw_step,
+                'assert_kind': 'selector_non_empty',
+                'param': assert_kind,
+                'expected': raw_step.get('expected') or 'true',
+                'selector_candidates': raw_step.get('selector_candidates') or selector_candidates,
+                'min_count': raw_step.get('min_count') or 1,
+                'min_x': raw_step.get('min_x') or min_x,
+                'min_y': raw_step.get('min_y') or min_y,
+                'min_width': raw_step.get('min_width') or min_width,
+                'min_height': raw_step.get('min_height') or min_height,
+            }
+            assert_kind = 'selector_non_empty'
         return {
             'index': index,
             'executor': str(raw_step.get('executor') or 'browser').strip().lower(),
@@ -947,8 +1051,8 @@ class PyUICompatAgent:
             'param': raw_step.get('param'),
             'url': raw_step.get('url') or raw_step.get('target_url'),
             'value': raw_step.get('value') or raw_step.get('text') or raw_step.get('input_value'),
-            'expected': expected,
-            'assert_kind': raw_step.get('assert_kind'),
+            'expected': raw_step.get('expected') or expected,
+            'assert_kind': assert_kind,
             'fields': raw_step.get('fields'),
             'selector_candidates': raw_step.get('selector_candidates'),
             'environment_id': raw_step.get('environment_id'),
@@ -1094,77 +1198,22 @@ class PyUICompatAgent:
             page_text = ''
 
         normalized_text = str(page_text or '').strip()
-        if len(normalized_text) > 4000:
-            normalized_text = normalized_text[:4000]
+        if len(normalized_text) > 1600:
+            normalized_text = normalized_text[:1600]
 
-        config, planner_role = await self._get_active_planner_config()
-        if config is None:
-            raise ValueError('No active browser_use_text or browser_use_vision AI model config found for hybrid AI step planning')
+        from apps.ai_testing.global_planner import VisualStepReplanner
 
-        from apps.requirement_analysis.models import AIModelService
-
-        user_content = [
+        actions = await VisualStepReplanner().create_actions(
+            step['description'],
             {
-                'type': 'text',
-                'text': (
-                    f"Step description: {step['description']}\n"
-                    f"Current URL: {current_url}\n"
-                    f"Page title: {page_title}\n"
-                    f"Planner role: {planner_role}\n"
-                    f"Visible page text excerpt:\n{normalized_text}\n"
-                    'Output a JSON object only with a single key named "actions".'
-                ),
-            }
-        ]
-
-        if planner_role == 'browser_use_vision':
-            screenshot_data = await self._capture_inline_screenshot_data(page)
-            if screenshot_data:
-                user_content.append(
-                    {
-                        'type': 'image_url',
-                        'image_url': {
-                            'url': screenshot_data,
-                        },
-                    }
-                )
-
-        messages = [
-            {
-                'role': 'system',
-                'content': (
-                    'You convert one natural-language browser test step into a minimal set of direct browser actions. '
-                    'Return JSON only as an object with schema {"actions": [...]} and no extra prose. '
-                    'Allowed action values: navigate, click, hover, fill, press, select, wait, assert_url_contains, assert_text_contains. '
-                    'Each item may contain: description, action, selector, url, value, expected, timeout_ms. '
-                    'Prefer text-based selectors like text=Submit when stable. '
-                    'When a screenshot is provided, use visual cues such as icons, color, and spatial placement to infer a robust nearby selector or a minimal direct action. '
-                    'Keep the plan short, usually 1-3 actions.'
-                ),
+                'url': current_url,
+                'visible_text': normalized_text,
+                'error': step.get('_planner_failure', ''),
+                'screenshot': await self._capture_inline_screenshot_data(page),
             },
-            {
-                'role': 'user',
-                'content': user_content,
-            },
-        ]
-
-        response = await self._call_planner_model(AIModelService, config, messages)
-        content = self._extract_response_content(response)
-        try:
-            parsed_actions = self._parse_ai_actions(content)
-        except Exception:
-            fallback_actions = self._fallback_actions_for_step(step)
-            if fallback_actions:
-                return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)]
-            raise
-        if not parsed_actions:
-            fallback_actions = self._fallback_actions_for_step(step)
-            if fallback_actions:
-                return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)]
-            raise ValueError('Hybrid AI step planner returned no executable actions')
-
+        )
         normalized_actions = []
-        for offset, action in enumerate(parsed_actions, start=1):
+        for offset, action in enumerate(actions, start=1):
             normalized_action = self._normalize_step(
                 {
                     **action,
@@ -1173,61 +1222,10 @@ class PyUICompatAgent:
                 },
                 offset,
             )
-            normalized_action['thinking'] = f'planned_by={planner_role}'
+            normalized_action['thinking'] = 'planned_by=planner_vision'
             normalized_actions.append(normalized_action)
+        self._validate_planned_actions(normalized_actions, step['description'])
         return normalized_actions
-
-    async def _call_planner_model(self, ai_model_service, config, messages):
-        response_format = {'type': 'json_object'}
-        try:
-            return await ai_model_service.call_openai_compatible_api(
-                config,
-                messages,
-                max_tokens=800,
-                response_format=response_format,
-            )
-        except Exception as exc:
-            if not self._planner_response_format_unsupported(exc):
-                raise
-            logger.warning('planner_v2 structured response fallback to plain completion: %s', exc)
-            return await ai_model_service.call_openai_compatible_api(config, messages, max_tokens=800)
-
-    def _planner_response_format_unsupported(self, exc):
-        message = str(exc or '').lower()
-        if not message:
-            return False
-        markers = (
-            'response_format',
-            'json_object',
-            'json schema',
-            'json_schema',
-            'unsupported',
-            'invalid parameter',
-            'extra inputs',
-            'not permitted',
-        )
-        return any(marker in message for marker in markers)
-
-    async def _get_active_planner_config(self):
-        config = await self._get_active_browser_vision_config()
-        if config is not None:
-            return config, 'browser_use_vision'
-
-        config = await self._get_active_browser_text_config()
-        if config is not None:
-            return config, 'browser_use_text'
-
-        return None, None
-
-    async def _get_active_browser_text_config(self):
-        from apps.requirement_analysis.models import AIModelConfig
-
-        return await sync_to_async(lambda: AIModelConfig.objects.filter(role='browser_use_text', is_active=True).first())()
-
-    async def _get_active_browser_vision_config(self):
-        from apps.requirement_analysis.models import AIModelConfig
-
-        return await sync_to_async(lambda: AIModelConfig.objects.filter(role='browser_use_vision', is_active=True).first())()
 
     async def _capture_inline_screenshot_data(self, page):
         try:
@@ -1305,8 +1303,88 @@ class PyUICompatAgent:
             raise ValueError('Hybrid AI step planner must return a JSON array')
         return [item for item in parsed if isinstance(item, dict)]
 
+    @staticmethod
+    def _validate_planned_actions(actions, step_description=''):
+        for index, action in enumerate(actions, start=1):
+            name = str(action.get('action') or '').strip()
+            if not name:
+                raise ValueError(f'Planner action {index} is missing action')
+            if name in {'click', 'hover'} and not (action.get('selector') or action.get('loc')):
+                raise ValueError(f'Planner action {index} {name} requires selector or loc')
+            if name == 'navigate' and not action.get('url'):
+                raise ValueError(f'Planner action {index} navigate requires url')
+            if name in {'assert_url_contains', 'assert_text_contains'} and not action.get('expected'):
+                raise ValueError(f'Planner action {index} {name} requires expected')
+            if name in {'fill', 'press', 'select'} and not action.get('value'):
+                raise ValueError(f'Planner action {index} {name} requires value')
+        assertion_markers = ('断言', 'assert', '检查', 'verify', '确认', '正常')
+        requires_assertion = any(marker in str(step_description).lower() for marker in assertion_markers)
+        assertion_actions = {
+            'assert',
+            'assert_text_contains',
+            'assert_url_contains',
+            'assert_popup_contains',
+            'assert_reported_alert_gpt_analysis',
+            'assert_reported_alert_note_matches_gpt',
+        }
+        if requires_assertion and not any(str(action.get('action') or '') in assertion_actions for action in actions):
+            raise ValueError('Planner step with an assertion intent requires an assertion action')
+        live_stream_markers = ('直播流', '直播视频流', '实时视频流', 'live stream')
+        if any(marker in str(step_description).lower() for marker in live_stream_markers):
+            has_media_assertion = any(
+                str(action.get('action') or '') == 'assert'
+                and str(action.get('assert_kind') or '') in {'stream_active', 'video_visible'}
+                for action in actions
+            )
+            if not has_media_assertion:
+                raise ValueError('Planner live-stream step requires stream_active or video_visible assertion')
+        camera_list_markers = ('cameras列表', '摄像头列表', '摄像机列表', '缩略图')
+        if any(marker in str(step_description).lower() for marker in camera_list_markers):
+            has_camera_list_assertion = any(
+                str(action.get('action') or '') == 'assert'
+                and str(action.get('assert_kind') or '') == 'selector_non_empty'
+                and str(action.get('param') or '') in {'site_list', 'camera_list', 'camera_previews'}
+                for action in actions
+            )
+            if not has_camera_list_assertion:
+                raise ValueError('Planner camera-list step requires site_list, camera_list, or camera_previews assertion')
+
     def _fallback_actions_for_step(self, step):
         text = str(step.get('description') or '')
+        normalized_text = text.lower()
+        if '打开 cameras 页面' in normalized_text and 'site 列表' in normalized_text:
+            return [{'action': 'open_camera_list', 'reason': 'camera workflow capability'}]
+        if '摄像头在线数量大于 0 的 site' in normalized_text and '展开' in normalized_text:
+            return [{'action': 'select_site_with_online_cameras', 'reason': 'camera workflow capability'}]
+        if '选择在线 camera' in normalized_text and '直播流' in text:
+            return [
+                {'action': 'select_online_camera', 'reason': 'camera workflow capability'},
+                {'action': 'assert', 'assert_kind': 'stream_active', 'expected': 'true', 'reason': 'camera workflow live stream assertion'},
+            ]
+        if '10s forward' in normalized_text and any(keyword in normalized_text for keyword in ('playback', '回放')):
+            return [{'action': 'seek_playback_forward_ten_seconds', 'reason': 'playback capability'}]
+        if 'View Playback' in text:
+            return [
+                {
+                    'action': 'wait',
+                    'value': 3000,
+                    'reason': 'fallback wait for live-stream toolbar',
+                },
+                {
+                    'action': 'click_exact_text',
+                    'value': 'View Playback',
+                    'reason': 'fallback deterministic view-playback click',
+                },
+                {
+                    'action': 'assert_playback_loaded',
+                    'reason': 'fallback playback media and toolbar assertion',
+                },
+            ]
+        if 'download' in text.lower() and ('playback' in text.lower() or '回放' in text):
+            return [{
+                'action': 'download_playback',
+                'reason': 'fallback deterministic playback download',
+            }]
         popup_expected = self._extract_popup_expected_text(text)
         if self._looks_like_popup_assertion(text):
             return [{
@@ -1655,7 +1733,7 @@ class PyUICompatAgent:
                         'canvas',
                     ],
                     'min_count': 1,
-                    'min_x': 180,
+                    'min_x': 80,
                     'min_y': 120,
                     'min_width': 40,
                     'min_height': 20,
@@ -1681,7 +1759,7 @@ class PyUICompatAgent:
                     'canvas',
                 ],
                 'min_count': 1,
-                'min_x': 180,
+                'min_x': 80,
                 'min_y': 120,
                 'min_width': 40,
                 'min_height': 20,
@@ -1691,12 +1769,33 @@ class PyUICompatAgent:
             }]
         if '第一个在线的摄像头' in text and '预览图' in text and '点击' in text:
             return [{
-                'action': 'click',
-                'selector': "div[class*='grid'] > div, div[class*='grid'] > button, [class*='camera'] [class*='preview'], [class*='camera'] [class*='thumbnail'], [class*='camera-item'] img, [class*='camera-item'] video, [class*='camera-item'] canvas",
-                'param': 'first camera preview',
-                'reason': 'fallback deterministic first camera preview click',
+                'action': 'click_first_online_camera',
+                'reason': 'fallback semantic online camera selection',
             }]
-        if '实时视频流' in text and ('展示出' in text or '播放' in text):
+        if '摄像头在线数量大于 0 的 site' in text.lower() and '展开' in text:
+            return [{
+                'action': 'select_site_with_online_cameras',
+                'reason': 'fallback select and expand site with online cameras',
+            }]
+        if any(marker in text.lower() for marker in ('目标摄像头', '目标camera', 'target camera')) and '点击' in text and any(keyword in text for keyword in ('直播流', '直播视频流', '实时视频流')):
+            return [
+                {
+                    'action': 'click_first_online_camera',
+                    'reason': 'fallback semantic target camera selection',
+                },
+                {
+                    'action': 'assert',
+                    'assert_kind': 'stream_active',
+                    'expected': 'True',
+                    'reason': 'fallback media-level live stream assertion',
+                },
+            ]
+        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
+            return [{
+                'action': 'close_active_stream',
+                'reason': 'fallback semantic trash-button stream close',
+            }]
+        if '实时视频流' in text and any(keyword in text for keyword in ('展示出', '持续播放', '时间戳', '画面随时间刷新')):
             return [{
                 'action': 'assert',
                 'assert_kind': 'stream_active',
@@ -1704,32 +1803,10 @@ class PyUICompatAgent:
                 'expected': 'True',
                 'reason': 'fallback deterministic active stream assertion',
             }]
-        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
-            return [{
-                'action': 'click',
-                'loc': '(1154,834)',
-                'param': 'stream close button',
-                'reason': 'fallback deterministic stream close button click',
-            }]
         if '实时视频流页面关闭' in text:
             return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': [
-                    'video',
-                    'canvas',
-                    "[class*='stream']",
-                    "[class*='player']",
-                    "[class*='live']",
-                ],
-                'min_count': 1,
-                'min_x': 420,
-                'min_y': 140,
-                'min_width': 600,
-                'min_height': 320,
-                'param': 'stream_view',
-                'expected': 'False',
-                'reason': 'fallback deterministic stream view closed assertion',
+                'action': 'assert_stream_closed',
+                'reason': 'fallback semantic stream-close assertion',
             }]
         if 'Dark Mode' in text or '深色模式' in text or '浅色模式' in text or '三角形和菱形' in text:
             return [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}]
@@ -1846,15 +1923,25 @@ class PyUICompatAgent:
         target = str(selector or '').strip()
         if not target:
             return None
+        text_target = target[5:].strip() if target.startswith('text=') else target
         try:
             locator = page.locator(target)
+            try:
+                await locator.first.wait_for(state='visible', timeout=3000)
+            except Exception:
+                pass
             visible_locator = await self._first_visible_locator(locator)
             if visible_locator is not None:
                 return visible_locator
         except Exception:
             pass
         try:
-            return await self._first_visible_locator(page.get_by_text(target, exact=False))
+            text_locator = page.get_by_text(text_target, exact=False)
+            try:
+                await text_locator.first.wait_for(state='visible', timeout=3000)
+            except Exception:
+                pass
+            return await self._first_visible_locator(text_locator)
         except Exception:
             return None
 
@@ -1995,22 +2082,126 @@ class PyUICompatAgent:
                 continue
             online_count = int(match.group('online'))
             offline_count = int(match.group('offline'))
-            if online_count + offline_count > 0:
+            if online_count > 0:
                 target_site = str(match.group('name') or '').strip()
                 break
 
-        if not target_site and site_rows:
-            first_row = str(site_rows[0].get('text') or '').strip()
-            target_site = re.sub(r'\s+\d+\s*/\s*\d+$', '', first_row).strip() or first_row
-
         if not target_site:
-            raise AssertionError('search_site_with_cameras could not find any visible site rows')
+            raise AssertionError('search_site_with_cameras could not find any visible site with online cameras')
 
         locator = await self._resolve_locator(page, selector or "input[placeholder*='Search site name' i], input[placeholder*='Search' i]")
         if locator is None:
             raise ValueError('search_site_with_cameras requires a searchable site input')
         await locator.fill(target_site, timeout=timeout_ms)
         await page.wait_for_timeout(300)
+
+    async def _select_site_with_online_cameras(self, page, timeout_ms):
+        selector = "input[placeholder*='Search site name' i], input[placeholder*='Search' i]"
+        await self._search_site_with_cameras(page, selector, timeout_ms)
+        await page.locator('body').press('Enter')
+        await page.wait_for_timeout(500)
+        site = page.locator('#btnSite').first
+        await site.wait_for(state='visible', timeout=timeout_ms)
+        await site.click(timeout=timeout_ms)
+        await page.wait_for_timeout(800)
+
+    async def _click_first_online_camera(self, page, timeout_ms):
+        async def has_visible_camera_card():
+            for selector in (
+                "div[class*='grid'] > div",
+                "div[class*='grid'] > button",
+                "[class*='camera-item']",
+                "[class*='camera'] [class*='preview']",
+            ):
+                locator = page.locator(selector)
+                for index in range(await locator.count()):
+                    try:
+                        if await locator.nth(index).is_visible(timeout=200):
+                            return True
+                    except Exception:
+                        continue
+            return False
+
+        if not await has_visible_camera_card():
+            site_rows = []
+            for selector in ("[class*='site-item']", "[class*='site'] [class*='item']", "button"):
+                try:
+                    site_rows = await page.locator(selector).evaluate_all(
+                        "els => els.map(el => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()).filter(Boolean)"
+                    )
+                except Exception:
+                    site_rows = []
+                for row_text in site_rows:
+                    match = re.search(r'^(?P<name>.+?)\s+(?P<online>\d+)\s*/\s*(?P<offline>\d+)$', str(row_text))
+                    if match and int(match.group('online')) > 0:
+                        site = page.get_by_role('button', name=match.group('name').strip(), exact=True)
+                        await site.click(timeout=timeout_ms)
+                        await page.wait_for_timeout(800)
+                        break
+                if await has_visible_camera_card():
+                    break
+
+        selectors = (
+            "div[class*='grid'] > div",
+            "div[class*='grid'] > button",
+            "[class*='camera-item']",
+            "[class*='camera'] [class*='preview']",
+        )
+        for selector in selectors:
+            locator = page.locator(selector)
+            for index in range(await locator.count()):
+                candidate = locator.nth(index)
+                try:
+                    if not await candidate.is_visible(timeout=300):
+                        continue
+                    online = await candidate.evaluate(
+                        """
+                        element => {
+                          const nodes = [element, ...element.querySelectorAll('*')];
+                          return nodes.some(node => {
+                            const className = String(node.className || '').toLowerCase();
+                            if (/(online|status-green|bg-green|text-green)/.test(className)) return true;
+                                                        const styles = getComputedStyle(node);
+                                                        return [styles.color, styles.backgroundColor, styles.fill, styles.stroke, styles.borderColor].some(color => {
+                                                            const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+                                                            return match && Number(match[2]) > Number(match[1]) * 1.15 && Number(match[2]) > Number(match[3]) * 1.15;
+                                                        });
+                          });
+                        }
+                        """
+                    )
+                    if online:
+                        await candidate.click(timeout=timeout_ms)
+                        return
+                except Exception:
+                    continue
+        raise AssertionError('no visible online camera card was found')
+
+    async def _close_active_stream(self, page, timeout_ms):
+        trash_button = page.locator("button:has(svg path[d*='M16 9V19H8V9H16'])").first
+        await trash_button.wait_for(state='visible', timeout=timeout_ms)
+        await trash_button.click(timeout=timeout_ms)
+
+    async def _assert_stream_closed(self, page, timeout_ms):
+        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000.0
+        while time.monotonic() < deadline:
+            media = page.locator('img, canvas, video')
+            has_stream_surface = False
+            for index in range(min(await media.count(), 20)):
+                candidate = media.nth(index)
+                try:
+                    if not await candidate.is_visible(timeout=200):
+                        continue
+                    box = await candidate.bounding_box()
+                    if box and box['x'] >= 80 and box['width'] >= 600 and box['height'] >= 320:
+                        has_stream_surface = True
+                        break
+                except Exception:
+                    continue
+            if not has_stream_surface:
+                return
+            await page.wait_for_timeout(300)
+        raise AssertionError('stream close did not remove the active player surface')
 
     def _sidebar_hover_keywords(self, step):
         haystack = ' '.join(
@@ -2080,6 +2271,56 @@ class PyUICompatAgent:
                 await page.mouse.click(point[0], point[1])
             else:
                 raise ValueError('click step requires selector or loc')
+            return
+
+        if action == 'click_first_online_camera':
+            await self._click_first_online_camera(page, timeout_ms)
+            return
+
+        if action in {'open_camera_list', 'select_site_with_online_cameras', 'select_online_camera', 'seek_playback_forward_ten_seconds', 'assert_playback_loaded'}:
+            from apps.ai_testing.runtime.pyui_compat.capabilities import CameraWorkflowCapabilities
+
+            capability = CameraWorkflowCapabilities(page)
+            if action == 'open_camera_list':
+                await capability.open_camera_list(timeout_ms)
+            elif action == 'select_site_with_online_cameras':
+                await capability.select_site_with_online_cameras(timeout_ms)
+            elif action == 'select_online_camera':
+                await capability.select_online_camera(timeout_ms)
+            elif action == 'seek_playback_forward_ten_seconds':
+                evidence = await capability.seek_forward_ten_seconds(timeout_ms)
+                from apps.ai_testing.global_planner import VisualStepReplanner
+
+                assessment = await VisualStepReplanner().assess_playback_advance(
+                    evidence['before_screenshot'],
+                    evidence['after_screenshot'],
+                )
+                if not 8 <= assessment['advanced_seconds'] <= 15:
+                    raise AssertionError(
+                        f"Playback advanced {assessment['advanced_seconds']:.2f}s, expected 10s within OCR tolerance"
+                    )
+                return evidence
+            else:
+                await capability.assert_playback_loaded(timeout_ms)
+            return
+
+        if action == 'select_site_with_online_cameras':
+            await self._select_site_with_online_cameras(page, timeout_ms)
+            return
+
+        if action == 'close_active_stream':
+            await self._close_active_stream(page, timeout_ms)
+            return
+
+        if action == 'assert_stream_closed':
+            await self._assert_stream_closed(page, timeout_ms)
+            return
+
+        if action == 'click_exact_text':
+            target_text = str(step.get('value') or param or '').strip()
+            if not target_text:
+                raise ValueError('click_exact_text requires text')
+            await page.get_by_text(target_text, exact=True).click(timeout=timeout_ms)
             return
 
         if action in {'double_click'}:
@@ -2180,6 +2421,9 @@ class PyUICompatAgent:
                 timeout_ms=timeout_ms,
             )
             return
+
+        if action == 'download_playback':
+            return await self._download_playback(page, timeout_ms)
 
         if action == 'ensure_switch_enabled':
             label = str(step.get('value') or param or '').strip()
@@ -2535,6 +2779,47 @@ class PyUICompatAgent:
 
         raise ValueError(f"unsupported planner_v2 action: {action}")
 
+    async def _download_playback(self, page, timeout_ms):
+        toolbar = page.locator('#playerContainer').locator('xpath=..')
+        download_button = toolbar.locator("button:has(svg path[d*='M19.3552 11.0833'])").first
+        await download_button.wait_for(state='visible', timeout=timeout_ms)
+        await download_button.click(timeout=timeout_ms, force=True)
+        dialog_text = ''
+        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000.0
+        while time.monotonic() < deadline:
+            dialog_text = str(await page.locator('body').inner_text() or '')
+            if 'Start Time' in dialog_text and 'End Time' in dialog_text:
+                break
+            await page.wait_for_timeout(200)
+        if 'Start Time' not in dialog_text or 'End Time' not in dialog_text:
+            raise AssertionError('Playback download dialog did not open')
+        dialog_path = await self._save_playback_screenshot(page, 'download_dialog')
+
+        download_button = page.get_by_text('Download', exact=True).last
+        async with page.expect_download(timeout=min(max(timeout_ms, 1000), 180000)) as download_info:
+            await download_button.click(timeout=timeout_ms)
+        download = await download_info.value
+        if not str(download.suggested_filename or '').strip():
+            raise AssertionError('Playback download did not provide a filename')
+        try:
+            await asyncio.wait_for(download.path(), timeout=180)
+        except asyncio.TimeoutError as error:
+            raise AssertionError('Playback download did not complete within 3 minutes') from error
+        failure = await download.failure()
+        if failure:
+            raise AssertionError(f'Playback download failed: {failure}')
+        completed_path = await self._save_playback_screenshot(page, 'download_completed')
+        return {'download_dialog_path': dialog_path, 'download_completed_path': completed_path}
+
+    async def _save_playback_screenshot(self, page, label):
+        from django.conf import settings
+
+        directory = Path(settings.MEDIA_ROOT) / 'ai_testing' / 'playback_evidence'
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f'{label}_{datetime.now().strftime("%Y%m%d%H%M%S%f")}.png'
+        await page.screenshot(path=str(path), type='png')
+        return self._relative_media_path(path)
+
     async def _assert_stream_active(self, page, timeout_ms):
         loading_markers = ['Loading streaming...', 'No Signal', 'Reconnect', 'Stream unavailable']
 
@@ -2590,32 +2875,37 @@ class PyUICompatAgent:
             ):
                 return
 
-        media_locator = page.locator('img, canvas, video')
-        media_count = await media_locator.count()
         candidate_box = None
-        candidate_area = 0.0
-        for idx in range(min(media_count, 20)):
-            target = media_locator.nth(idx)
-            try:
-                if not await target.is_visible(timeout=300):
+        candidate_media = None
+        surface_deadline = time.monotonic() + max(timeout_ms, 1000) / 1000.0
+        while time.monotonic() < surface_deadline and candidate_box is None:
+            media_locator = page.locator('img, canvas, video')
+            candidate_area = 0.0
+            for idx in range(min(await media_locator.count(), 20)):
+                target = media_locator.nth(idx)
+                try:
+                    if not await target.is_visible(timeout=300):
+                        continue
+                    box = await target.bounding_box()
+                    if not isinstance(box, dict):
+                        continue
+                    width = float(box.get('width') or 0)
+                    height = float(box.get('height') or 0)
+                    if (
+                        float(box.get('x') or 0) >= 420
+                        and float(box.get('y') or 0) >= 60
+                        and width >= 600
+                        and height >= 320
+                    ):
+                        area = width * height
+                        if area > candidate_area:
+                            candidate_area = area
+                            candidate_box = box
+                            candidate_media = target
+                except Exception:
                     continue
-                box = await target.bounding_box()
-                if not isinstance(box, dict):
-                    continue
-                width = float(box.get('width') or 0)
-                height = float(box.get('height') or 0)
-                if (
-                    float(box.get('x') or 0) >= 420
-                    and float(box.get('y') or 0) >= 140
-                    and width >= 600
-                    and height >= 320
-                ):
-                    area = width * height
-                    if area > candidate_area:
-                        candidate_area = area
-                        candidate_box = box
-            except Exception:
-                continue
+            if candidate_box is None:
+                await page.wait_for_timeout(500)
 
         if candidate_box is None:
             raise AssertionError('stream is not active: no large visible media surface found')
@@ -2643,7 +2933,12 @@ class PyUICompatAgent:
         # otherwise static image cannot be mistaken for live playback.
         required_distinct = 3
         while True:
-            screenshot_bytes = await page.screenshot(type='png', clip=clip)
+            if hasattr(page, 'screenshot'):
+                screenshot_bytes = await page.screenshot(type='png', clip=clip)
+            elif candidate_media is not None:
+                screenshot_bytes = await candidate_media.screenshot(type='png')
+            else:
+                raise AssertionError('stream preview could not be captured')
             hashes.add(hashlib.md5(screenshot_bytes).hexdigest())
             if len(hashes) >= required_distinct:
                 return
@@ -2652,7 +2947,7 @@ class PyUICompatAgent:
             await page.wait_for_timeout(sample_interval_ms)
 
         raise AssertionError(
-            'stream is not active: rendered video did not advance '
+            'stream preview did not change '
             f'(only {len(hashes)} distinct frame(s) across samples)'
         )
 

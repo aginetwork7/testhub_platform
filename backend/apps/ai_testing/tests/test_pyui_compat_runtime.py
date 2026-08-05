@@ -1013,7 +1013,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                         'canvas',
                     ],
                     'min_count': 1,
-                    'min_x': 180,
+                    'min_x': 80,
                     'min_y': 120,
                     'min_width': 40,
                     'min_height': 20,
@@ -1027,10 +1027,8 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             agent._fallback_actions_for_step({'description': '从摄像头列表中找到第一个在线的摄像头, 点击该摄像头的预览图'}),
             [
                 {
-                    'action': 'click',
-                    'selector': "div[class*='grid'] > div, div[class*='grid'] > button, [class*='camera'] [class*='preview'], [class*='camera'] [class*='thumbnail'], [class*='camera-item'] img, [class*='camera-item'] video, [class*='camera-item'] canvas",
-                    'param': 'first camera preview',
-                    'reason': 'fallback deterministic first camera preview click',
+                    'action': 'click_first_online_camera',
+                    'reason': 'fallback semantic online camera selection',
                 }
             ],
         )
@@ -1050,10 +1048,8 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             agent._fallback_actions_for_step({'description': '点击页面正下方的视频流关闭按钮, 该按钮为带盖垃圾桶形状'}),
             [
                 {
-                    'action': 'click',
-                    'loc': '(1154,834)',
-                    'param': 'stream close button',
-                    'reason': 'fallback deterministic stream close button click',
+                    'action': 'close_active_stream',
+                    'reason': 'fallback semantic trash-button stream close',
                 }
             ],
         )
@@ -1061,23 +1057,8 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             agent._fallback_actions_for_step({'description': '断言实时视频流页面关闭'}),
             [
                 {
-                    'action': 'assert',
-                    'assert_kind': 'selector_non_empty',
-                    'selector_candidates': [
-                        'video',
-                        'canvas',
-                        "[class*='stream']",
-                        "[class*='player']",
-                        "[class*='live']",
-                    ],
-                    'min_count': 1,
-                    'min_x': 420,
-                    'min_y': 140,
-                    'min_width': 600,
-                    'min_height': 320,
-                    'param': 'stream_view',
-                    'expected': 'False',
-                    'reason': 'fallback deterministic stream view closed assertion',
+                    'action': 'assert_stream_closed',
+                    'reason': 'fallback semantic stream-close assertion',
                 }
             ],
         )

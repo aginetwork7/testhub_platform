@@ -1835,12 +1835,12 @@ class BaseBrowserAgent:
         # Load Config from DB
         from apps.requirement_analysis.models import AIModelConfig
 
-        # Select Config: prefer vision mode, fallback to text mode
-        config_obj = AIModelConfig.objects.filter(role='browser_use_vision', is_active=True).first()
+        # Select Config: prefer Executor vision mode, fallback to Executor text mode
+        config_obj = AIModelConfig.objects.filter(role='executor_vision', is_active=True).first()
         if config_obj:
             self.use_vision = True
         else:
-            config_obj = AIModelConfig.objects.filter(role='browser_use_text', is_active=True).first()
+            config_obj = AIModelConfig.objects.filter(role='executor_text', is_active=True).first()
             self.use_vision = False
 
         model_config = {}
