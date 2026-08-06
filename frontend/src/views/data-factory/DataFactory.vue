@@ -122,6 +122,7 @@
               <el-form-item label="设备"><el-select v-model="toolForm.device" :disabled="!eventDevices.length"><el-option v-for="device in eventDevices" :key="device.value" :label="device.label" :value="device.value" /></el-select></el-form-item>
               <el-form-item label="摄像头"><el-select v-model="toolForm.camera_index" :disabled="!eventCameras.length"><el-option v-for="(camera, index) in eventCameras" :key="`${camera.camera_mac}-${index}`" :label="`${camera.camera_name} (${camera.camera_mac})`" :value="index" /></el-select></el-form-item>
               <el-form-item label="事件类型"><el-select v-model="toolForm.alert_type"><el-option label="人员事件" value="person" /><el-option label="车辆事件" value="vehicle" /></el-select></el-form-item>
+              <el-form-item label="规则类型"><el-select v-model="toolForm.rule_type"><el-option label="入侵检测" :value="0" /><el-option label="越线检测" :value="1" /><el-option label="离开区域" :value="2" /><el-option label="进入区域" :value="3" /></el-select></el-form-item>
               <el-form-item label="事件时间"><el-input-number v-model="toolForm.created_at" :min="1" /></el-form-item>
               <el-form-item v-if="toolForm.alert_type === 'person'" label="上衣颜色"><el-input-number v-model="toolForm.coat_color" :min="0" /></el-form-item>
               <el-form-item v-if="toolForm.alert_type === 'person'" label="裤子颜色"><el-input-number v-model="toolForm.trousers_color" :min="0" /></el-form-item>
@@ -1511,6 +1512,7 @@ const buildInputData = () => {
     if (toolName === 'construct_alert_event') {
       return {
         alert_type: form.alert_type,
+        rule_type: form.rule_type,
         environment_id: form.environment_id,
         device: form.device,
         camera_index: form.camera_index,
@@ -1743,6 +1745,7 @@ const resetToolForm = () => {
     algorithm: 'md5',
     password: '',
     mode: 'CBC',
+    rule_type: 0,
     iv: '',
     json_str: '',
     json_str1: '',
