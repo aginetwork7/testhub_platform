@@ -357,9 +357,6 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
-                    if ai_case.case_mode == 'freeform':
-                        ai_case.planned_steps = execution_record.planned_tasks
-                        await sync_to_async(ai_case.save)(update_fields=['planned_steps'])
 
                 async def on_step_update(step_info):
                     try:
@@ -407,8 +404,8 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_mode=execution_mode,
                     enable_gif=(execution_mode == 'text'),
                     case_name=ai_case.name,
-                    case_mode=ai_case.case_mode,
-                    task_steps=ai_case.task_steps,
+                    case_mode='hybrid' if ai_case.case_mode == 'freeform' and ai_case.planned_steps else ai_case.case_mode,
+                    task_steps=ai_case.planned_steps if ai_case.case_mode == 'freeform' and ai_case.planned_steps else ai_case.task_steps,
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
                     api_automation_configuration=api_automation_configuration,
