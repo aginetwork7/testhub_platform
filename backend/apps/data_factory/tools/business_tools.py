@@ -31,6 +31,7 @@ class BusinessTools:
         coat_color: int = 1,
         trousers_color: int = 2,
         vehicle_color: int = 1,
+        rule_type: int = 0,
         count: int = 1,
     ) -> dict[str, Any]:
         if alert_type not in {'person', 'vehicle'}:
@@ -39,6 +40,8 @@ class BusinessTools:
             return {'success': False, 'error': '摄像头 MAC 和名称不能为空。'}
         if count < 1 or count > 100:
             return {'success': False, 'error': '构造数量必须介于 1 到 100。'}
+        if rule_type not in {0, 1, 2, 3}:
+            return {'success': False, 'error': '规则类型仅支持 0（入侵检测）至 3（进入区域）。'}
 
         timestamp = int(created_at if created_at is not None else time())
         events = [
@@ -50,6 +53,7 @@ class BusinessTools:
                 coat_color=coat_color,
                 trousers_color=trousers_color,
                 vehicle_color=vehicle_color,
+                rule_type=rule_type,
             )
             for _ in range(count)
         ]
@@ -64,6 +68,7 @@ class BusinessTools:
         coat_color: int,
         trousers_color: int,
         vehicle_color: int,
+        rule_type: int,
     ) -> dict[str, Any]:
         event = deepcopy(BusinessTools._template(alert_type))
         structure = event['event']['raw']['struct']['StructureInfo']
@@ -75,10 +80,14 @@ class BusinessTools:
         for image in structure['ImageInfoList']:
             image['CaptureTime'] = created_at
         if alert_type == 'person':
+            rule_info = structure['ObjInfo']['PersonInfoList'][0]['RuleInfo']
+            rule_info['RuleType'] = rule_type
             attributes = structure['ObjInfo']['PersonInfoList'][0]['AttributeInfo']
             attributes['CoatColor'] = coat_color
             attributes['TrousersColor'] = trousers_color
         else:
+            rule_info = structure['ObjInfo']['VehicleInfoList'][0]['RuleInfo']
+            rule_info['RuleType'] = rule_type
             attributes = structure['ObjInfo']['VehicleInfoList'][0]['VehicleAttributeInfo']
             attributes['Color'] = vehicle_color
         return event
@@ -323,7 +332,7 @@ class BusinessTools:
                 'AppearTime': '', 'DisAppearTime': '', 'Feature': '', 'FeatureVersion': '',
                 'LargePicAttachIndex': 1, 'SmallPicAttachIndex': 2, 'PersonID': 1047,
                 'Position': '2395,6450;3242,9196', 'Confidence': 0,
-                'RuleInfo': {'PointList': None, 'PointNum': 0, 'RuleType': 5, 'TriggerType': 0},
+                'RuleInfo': {'PointList': None, 'PointNum': 0, 'RuleType': 0, 'TriggerType': 0},
                 'AttributeInfo': {
                     'AgeRange': 98, 'BagFlag': 98, 'BodyToward': 0, 'CoatColor': 2,
                     'Gender': 98, 'HairLength': 0, 'ShoesTubeLength': 0,
@@ -336,6 +345,7 @@ class BusinessTools:
                 'ID': 1, 'Position': '3109,6136;5390,8266', 'LargePicAttachIndex': 1,
                 'SmallPicAttachIndex': 2, 'Feature': '', 'FeatureVersion': '', 'Confidence': 0,
                 'AppearTime': '', 'DisAppearTime': '',
+                'RuleInfo': {'PointList': None, 'PointNum': 0, 'RuleType': 0, 'TriggerType': 0},
                 'VehicleAttributeInfo': {
                     'DriverSeatBeltStatus': '', 'Type': 998, 'VehicleBrand': '99',
                     'AimStatus': '', 'ImageDirection': 0, 'Color': 100,
