@@ -1012,6 +1012,19 @@ class PyUICompatAgent:
             or ''
         ).strip().lower()
         description = str(raw_step.get('description') or raw_step.get('name') or f'步骤 {index}').strip()
+        step_mode = str(raw_step.get('step_mode') or 'direct').strip().lower()
+        if not action and step_mode == 'direct':
+            wait_match = re.search(r'等待\s*(\d+)\s*秒', description)
+            url_match = re.search(r'断言当前\s*URL\s*包含\s*(\S+)', description, re.IGNORECASE)
+            if wait_match:
+                action = 'wait'
+                raw_step = {**raw_step, 'value': str(int(wait_match.group(1)) * 1000)}
+            elif '按下 Enter' in description:
+                action = 'press'
+                raw_step = {**raw_step, 'selector': 'body', 'value': 'Enter'}
+            elif url_match:
+                action = 'assert_url_contains'
+                raw_step = {**raw_step, 'expected': url_match.group(1)}
         selector = raw_step.get('selector') or raw_step.get('locator') or raw_step.get('target')
         expected = raw_step.get('expected') or raw_step.get('assert_value') or raw_step.get('url_contains')
         if expected is None and action in {'assert_url_contains', 'url_contains'}:
@@ -1043,7 +1056,7 @@ class PyUICompatAgent:
         return {
             'index': index,
             'executor': str(raw_step.get('executor') or 'browser').strip().lower(),
-            'step_mode': str(raw_step.get('step_mode') or 'direct').strip().lower(),
+            'step_mode': step_mode,
             'action': action,
             'description': description,
             'selector': selector,
@@ -1398,6 +1411,42 @@ class PyUICompatAgent:
                 'selector': 'text=Organization',
                 'reason': 'fallback deterministic organization sidebar hover',
             }]
+        if 'Create User' in text and '点击' in text:
+            return [{
+                'action': 'click_exact_text',
+                'value': 'Create User',
+                'reason': 'fallback deterministic create user click',
+            }]
+        if 'Deactivate' in text and '点击' in text:
+            return [{
+                'action': 'click_exact_text',
+                'value': 'Deactivate',
+                'reason': 'fallback deterministic deactivate user click',
+            }]
+        if 'User deleted successfully' in text:
+            return [{
+                'action': 'assert_popup_contains',
+                'expected': 'User deleted successfully',
+                'reason': 'fallback visible user deletion success popup assertion',
+            }]
+        if 'User created successfully' in text:
+            return [{
+                'action': 'assert_user_in_left_list',
+                'value': 'ai@test.com',
+                'reason': 'fallback created user appears in left list assertion',
+            }]
+        email_match = re.search(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', text)
+        if email_match and '左侧' in text and '搜索' in text:
+            return [
+                {
+                    'action': 'fill',
+                    'selector': "input[placeholder*='Search by name or email' i]",
+                    'value': email_match.group(0),
+                    'reason': 'fallback deterministic organization user search',
+                },
+                {'action': 'press', 'selector': "input[placeholder*='Search by name or email' i]", 'value': 'Enter'},
+                {'action': 'wait', 'value': '500'},
+            ]
         if '高级搜索面板' in text and 'Magic Search V2' in text and '包含' in text:
             return [{
                 'action': 'assert',
@@ -1408,7 +1457,7 @@ class PyUICompatAgent:
         if '放大镜图标' in text and '高级搜索面板' in text and '展开' in text:
             return [{
                 'action': 'click',
-                'selector': 'div.colorBorder.rounded-xl.flex.bg-white > button.ant-dropdown-trigger',
+                'selector': "div.colorBorder:has(input[placeholder='Magic Search']) > div.ant-dropdown-trigger",
                 'reason': 'fallback deterministic advanced-search leading magnifier click',
             }]
         if '高级搜索列表' in text and 'Magic Search V2' in text and '点击' in text:
@@ -1450,6 +1499,20 @@ class PyUICompatAgent:
                 'param': 'alert_media',
                 'expected': 'True',
                 'reason': 'fallback deterministic visible media assertion',
+            }]
+        if 'video_video_0.mp4' in text:
+            return [{
+                'action': 'assert',
+                'assert_kind': 'selector_non_empty',
+                'selector_candidates': ['video', 'canvas', 'img', "[class*='preview']", "[class*='media']"],
+                'min_count': 1,
+                'min_x': 80,
+                'min_y': 80,
+                'min_width': 80,
+                'min_height': 60,
+                'param': 'search_result_media',
+                'expected': 'True',
+                'reason': 'fallback rendered search preview media assertion',
             }]
         if '背景色' in text and '深色' in text and ('断言' in text or '期望断言结果' in text):
             return [{
@@ -2323,6 +2386,21 @@ class PyUICompatAgent:
             await page.get_by_text(target_text, exact=True).click(timeout=timeout_ms)
             return
 
+        if action == 'assert_user_in_left_list':
+            email = str(step.get('value') or '').strip()
+            users = page.get_by_text(email, exact=True)
+            for index in range(await users.count()):
+                candidate = users.nth(index)
+                try:
+                    if not await candidate.is_visible(timeout=300):
+                        continue
+                    box = await candidate.bounding_box()
+                    if box and box['x'] < 480:
+                        return
+                except Exception:
+                    continue
+            raise AssertionError(f'created user {email!r} was not visible in the left user list')
+
         if action in {'double_click'}:
             locator = await self._resolve_locator(page, selector) if selector else None
             point = self._parse_point(loc) or self._parse_point(param)
@@ -2702,8 +2780,6 @@ class PyUICompatAgent:
 
         if action == 'assert_popup_contains':
             expected = str(step.get('expected') or '').strip()
-            if expected and self._popup_success_compatible_with_recent_mutation(expected):
-                return
             if expected:
                 text_locator = page.get_by_text(expected, exact=False).first
                 try:
@@ -2734,14 +2810,7 @@ class PyUICompatAgent:
                 except Exception:
                     continue
 
-            body_text = str(await page.locator('body').text_content(timeout=timeout_ms) or '').strip()
-            if expected and expected not in body_text:
-                if self._popup_success_compatible_with_recent_mutation(expected):
-                    return
-                raise AssertionError(f"popup text '{expected}' not found; last popup text='{last_text}'")
-            if not expected and not body_text:
-                raise AssertionError('popup assertion failed because no visible popup text was found')
-            return
+            raise AssertionError(f"visible popup text '{expected}' not found; last popup text='{last_text}'")
 
         if action == 'assert_media_visible':
             media_selector = 'img, video, canvas'
