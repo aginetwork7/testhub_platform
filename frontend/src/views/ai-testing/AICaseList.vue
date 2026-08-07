@@ -585,6 +585,10 @@ const loadAutomationConfigurations = async () => {
     const response = await getAutomationConfigurations({ page_size: 100 })
     automationConfigurations.value = response.data.results || response.data || []
   } catch (error) {
+    if (error.response?.status === 403) {
+      automationConfigurations.value = []
+      return
+    }
     console.error('获取运行环境失败:', error)
     ElMessage.error('获取运行环境失败')
   }

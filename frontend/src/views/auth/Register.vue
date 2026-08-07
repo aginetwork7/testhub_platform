@@ -31,27 +31,6 @@
           />
         </el-form-item>
 
-        <el-row :gutter="20">
-          <el-col :span="12">
-            <el-form-item prop="first_name">
-              <el-input
-                v-model="form.first_name"
-                :placeholder="$t('auth.firstName')"
-                size="large"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item prop="last_name">
-              <el-input
-                v-model="form.last_name"
-                :placeholder="$t('auth.lastName')"
-                size="large"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
         <el-form-item prop="password">
           <el-input
             v-model="form.password"
@@ -73,27 +52,6 @@
             show-password
           />
         </el-form-item>
-
-        <el-row :gutter="20">
-          <el-col :span="12">
-            <el-form-item prop="department">
-              <el-input
-                v-model="form.department"
-                :placeholder="$t('auth.department')"
-                size="large"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item prop="position">
-              <el-input
-                v-model="form.position"
-                :placeholder="$t('auth.position')"
-                size="large"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
 
         <el-form-item>
           <el-button
@@ -132,12 +90,8 @@ const loading = ref(false)
 const form = reactive({
   username: '',
   email: '',
-  first_name: '',
-  last_name: '',
   password: '',
-  password_confirm: '',
-  department: '',
-  position: ''
+  password_confirm: ''
 })
 
 const rules = {

@@ -5,7 +5,7 @@ from django.contrib.auth import login, logout
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .models import User, UserProfile
-from .serializers import UserSerializer, UserCreateSerializer, LoginSerializer, UserProfileSerializer
+from .serializers import UserSimpleSerializer, UserSerializer, UserCreateSerializer, LoginSerializer, UserProfileSerializer
 
 # JWT 相关导入
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -16,6 +16,13 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 def get_current_user(request):
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def get_assignable_users(request):
+    users = User.objects.filter(is_active=True).order_by('username')
+    return Response(UserSimpleSerializer(users, many=True).data)
 
 @method_decorator(csrf_exempt, name='dispatch')
 class RegisterView(generics.CreateAPIView):
@@ -132,12 +139,12 @@ def profile_view(request):
     serializer = UserSerializer(request.user)
     return Response(serializer.data)
 
-class UserListView(generics.ListCreateAPIView):
+class UserListView(generics.ListAPIView):
     queryset = User.objects.all().order_by('username')
     serializer_class = UserSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]
 
 class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all().order_by('username')
     serializer_class = UserSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]
