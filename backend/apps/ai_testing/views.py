@@ -272,15 +272,27 @@ class AICaseViewSet(viewsets.ModelViewSet):
         instance.delete()
 
     @action(detail=True, methods=['post'])
-    def run(self, request, pk=None):
+    def run(self, request, pk=None, ai_case=None):
         """执行 AI 用例"""
-        ai_case = self.get_object()
+        ai_case = ai_case or self.get_object()
         execution_mode = request.data.get('execution_mode', 'planner_v2')
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
-        api_automation_configuration = (
-            ai_case.api_automation_configuration
-            or resolve_api_automation_configuration_from_task(ai_case.task_description, request.user)
-        )
+        configuration_id = request.data.get('api_automation_configuration_id')
+        if configuration_id is not None:
+            try:
+                configuration_id = int(configuration_id)
+            except (TypeError, ValueError):
+                return Response({'error': '设备 CLI 环境参数无效'}, status=status.HTTP_400_BAD_REQUEST)
+            api_automation_configuration = build_accessible_api_automation_configuration_queryset(
+                request.user,
+            ).filter(id=configuration_id).first()
+            if api_automation_configuration is None:
+                return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
+        else:
+            api_automation_configuration = (
+                ai_case.api_automation_configuration
+                or resolve_api_automation_configuration_from_task(ai_case.task_description, request.user)
+            )
         if api_automation_configuration is not None:
             has_configuration_access = build_accessible_api_automation_configuration_queryset(request.user).filter(
                 id=api_automation_configuration.id,
@@ -525,6 +537,48 @@ class AICaseViewSet(viewsets.ModelViewSet):
             'message': 'AI 用例开始执行',
             'execution_id': execution_record.id
         })
+
+    @action(detail=False, methods=['post'])
+    def batch_run(self, request):
+        """批量启动 AI 用例执行。"""
+        case_ids = request.data.get('case_ids')
+        if not isinstance(case_ids, list) or not case_ids:
+            return Response({'error': '请至少选择一个用例'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            normalized_case_ids = [int(case_id) for case_id in case_ids]
+        except (TypeError, ValueError):
+            return Response({'error': '用例 ID 参数无效'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(normalized_case_ids) != len(set(normalized_case_ids)):
+            return Response({'error': '用例 ID 不能重复'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ai_cases = list(self.get_queryset().filter(id__in=normalized_case_ids))
+        if len(ai_cases) != len(normalized_case_ids):
+            return Response({'error': '部分用例不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
+
+        configuration_id = request.data.get('api_automation_configuration_id')
+        if configuration_id is not None:
+            try:
+                configuration_id = int(configuration_id)
+            except (TypeError, ValueError):
+                return Response({'error': '设备 CLI 环境参数无效'}, status=status.HTTP_400_BAD_REQUEST)
+            if not build_accessible_api_automation_configuration_queryset(
+                request.user,
+            ).filter(id=configuration_id).exists():
+                return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
+
+        execution_ids = []
+        for ai_case in ai_cases:
+            response = self.run(request, ai_case=ai_case)
+            if response.status_code >= status.HTTP_400_BAD_REQUEST:
+                return response
+            execution_ids.append(response.data['execution_id'])
+
+        return Response({
+            'message': f'已启动 {len(execution_ids)} 个 AI 用例执行',
+            'execution_ids': execution_ids,
+        }, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['post'], url_path='execute')
     def execute(self, request, pk=None):
