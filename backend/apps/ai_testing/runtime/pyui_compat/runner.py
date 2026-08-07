@@ -1025,6 +1025,8 @@ class PyUICompatAgent:
             elif url_match:
                 action = 'assert_url_contains'
                 raw_step = {**raw_step, 'expected': url_match.group(1)}
+            else:
+                step_mode = 'ai'
         selector = raw_step.get('selector') or raw_step.get('locator') or raw_step.get('target')
         expected = raw_step.get('expected') or raw_step.get('assert_value') or raw_step.get('url_contains')
         if expected is None and action in {'assert_url_contains', 'url_contains'}:

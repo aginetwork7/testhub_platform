@@ -35,9 +35,14 @@
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
+        <el-button type="success" :disabled="selectedCases.length === 0" @click="openBatchRunDialog">
+          <el-icon><VideoPlay /></el-icon>
+          批量执行 ({{ selectedCases.length }})
+        </el-button>
       </div>
 
-      <el-table :data="cases" v-loading="loading" style="width: 100%">
+      <el-table :data="cases" v-loading="loading" style="width: 100%" @selection-change="handleSelectionChange">
+        <el-table-column type="selection" width="50" />
         <el-table-column prop="name" :label="$t('uiAutomation.ai.caseList.caseName')" min-width="200" show-overflow-tooltip />
         <el-table-column :label="$t('uiAutomation.ai.caseMode')" width="140">
           <template #default="{ row }">
@@ -123,6 +128,28 @@
         />
       </div>
     </div>
+
+    <el-dialog v-model="showRunDialog" title="执行用例" width="480px" :close-on-click-modal="false">
+      <el-form label-width="100px">
+        <el-form-item label="待执行用例">
+          <span>已选择 {{ runTargetCases.length }} 个用例</span>
+        </el-form-item>
+        <el-form-item label="运行环境">
+          <el-select v-model="executionEnvironmentId" clearable placeholder="使用用例或默认环境" style="width: 100%">
+            <el-option
+              v-for="configuration in automationConfigurations"
+              :key="configuration.id"
+              :label="formatEnvironmentLabel(configuration)"
+              :value="configuration.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showRunDialog = false">{{ $t('uiAutomation.common.cancel') }}</el-button>
+        <el-button type="primary" :loading="submittingRun" @click="confirmRun">执行</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 编辑对话框 -->
     <el-dialog v-model="showEditDialog" :title="dialogTitle" width="720px" :close-on-click-modal="false">
@@ -250,7 +277,8 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, VideoPlay, Edit, Delete, Plus } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
-import { getAICases, createAICase, updateAICase, deleteAICase, executeAICase, getAiProjects } from '@/api/ai-testing'
+import { getAICases, createAICase, updateAICase, deleteAICase, executeAICase, batchExecuteAICases, getAiProjects } from '@/api/ai-testing'
+import { getAutomationConfigurations } from '@/api/api-automation'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -261,6 +289,12 @@ const loading = ref(false)
 const searchText = ref('')
 const executionMode = ref('planner_v2')
 const disableCache = ref(false)
+const selectedCases = ref([])
+const runTargetCases = ref([])
+const showRunDialog = ref(false)
+const submittingRun = ref(false)
+const automationConfigurations = ref([])
+const executionEnvironmentId = ref(null)
 const total = ref(0)
 const pagination = reactive({
   currentPage: 1,
@@ -478,6 +512,7 @@ const loadProjects = async () => {
 
 const onProjectChange = () => {
   pagination.currentPage = 1
+  selectedCases.value = []
   loadCases()
 }
 
@@ -485,11 +520,13 @@ const onProjectChange = () => {
 const loadCases = async () => {
   if (!projectId.value) {
     cases.value = []
+    selectedCases.value = []
     total.value = 0
     return
   }
 
   loading.value = true
+  selectedCases.value = []
   try {
     const response = await getAICases({
       project: projectId.value,
@@ -537,6 +574,76 @@ const handleSizeChange = () => {
 
 const handleCurrentChange = () => {
   loadCases()
+}
+
+const handleSelectionChange = (rows) => {
+  selectedCases.value = rows
+}
+
+const loadAutomationConfigurations = async () => {
+  try {
+    const response = await getAutomationConfigurations({ page_size: 100 })
+    automationConfigurations.value = response.data.results || response.data || []
+  } catch (error) {
+    console.error('获取运行环境失败:', error)
+    ElMessage.error('获取运行环境失败')
+  }
+}
+
+const formatEnvironmentLabel = (configuration) => {
+  return configuration.environment
+    ? `${configuration.name} (${configuration.environment})`
+    : configuration.name
+}
+
+const validateRunCases = (targetCases) => {
+  if (targetCases.some((testCase) => ['structured', 'hybrid'].includes(testCase.case_mode) && executionMode.value !== 'planner_v2')) {
+    ElMessage.warning(t('uiAutomation.ai.caseList.messages.structuredCasePlannerModeRequired'))
+    return false
+  }
+  return true
+}
+
+const openRunDialog = async (targetCases) => {
+  if (!validateRunCases(targetCases)) return
+  runTargetCases.value = targetCases
+  executionEnvironmentId.value = null
+  showRunDialog.value = true
+  if (automationConfigurations.value.length === 0) {
+    await loadAutomationConfigurations()
+  }
+}
+
+const openBatchRunDialog = () => {
+  openRunDialog(selectedCases.value)
+}
+
+const confirmRun = async () => {
+  submittingRun.value = true
+  const payload = {
+    execution_mode: executionMode.value,
+    use_cache: !disableCache.value,
+    ...(executionEnvironmentId.value !== null ? { api_automation_configuration_id: executionEnvironmentId.value } : {})
+  }
+
+  try {
+    if (runTargetCases.value.length === 1) {
+      await executeAICase(runTargetCases.value[0].id, payload)
+    } else {
+      await batchExecuteAICases({
+        ...payload,
+        case_ids: runTargetCases.value.map((testCase) => testCase.id)
+      })
+    }
+    ElMessage.success(t('uiAutomation.ai.caseList.messages.runSuccess'))
+    showRunDialog.value = false
+    router.push('/ai-intelligent-mode/execution-records')
+  } catch (error) {
+    console.error('执行失败:', error)
+    ElMessage.error(t('uiAutomation.ai.caseList.messages.runFailed'))
+  } finally {
+    submittingRun.value = false
+  }
 }
 
 // 编辑用例
@@ -633,24 +740,8 @@ const deleteCase = async (id) => {
 }
 
 // 执行用例
-const runCase = async (row) => {
-  try {
-    if (['structured', 'hybrid'].includes(row.case_mode) && executionMode.value !== 'planner_v2') {
-      ElMessage.warning(t('uiAutomation.ai.caseList.messages.structuredCasePlannerModeRequired'))
-      return
-    }
-
-    await executeAICase(row.id, {
-      execution_mode: executionMode.value,
-      use_cache: !disableCache.value,
-    })
-    ElMessage.success(t('uiAutomation.ai.caseList.messages.runSuccess'))
-    // 跳转到执行记录页面
-    router.push('/ai-intelligent-mode/execution-records')
-  } catch (error) {
-    console.error('执行失败:', error)
-    ElMessage.error(t('uiAutomation.ai.caseList.messages.runFailed'))
-  }
+const runCase = (row) => {
+  openRunDialog([row])
 }
 
 const formatDate = (row, column, cellValue) => {
@@ -660,6 +751,7 @@ const formatDate = (row, column, cellValue) => {
 
 onMounted(async () => {
   await loadProjects()
+  await loadAutomationConfigurations()
   if (projects.value.length > 0) {
     projectId.value = projects.value[0].id
     loadCases()
@@ -699,6 +791,9 @@ onMounted(async () => {
 }
 
 .filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 20px;
 }
 

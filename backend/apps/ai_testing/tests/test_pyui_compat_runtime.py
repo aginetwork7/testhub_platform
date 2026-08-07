@@ -1063,6 +1063,24 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             ],
         )
 
+    def test_empty_direct_step_uses_automatic_action_selection(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_006')
+
+        normalized_step = agent._normalize_step(
+            {
+                'step_mode': 'direct',
+                'description': '打开 Cameras 页面，断言 Site 列表展示各 Site 的摄像头在线/离线数量。',
+            },
+            1,
+        )
+
+        self.assertEqual(normalized_step['step_mode'], 'ai')
+        self.assertEqual(normalized_step['action'], '')
+        self.assertEqual(
+            agent._fallback_actions_for_step(normalized_step),
+            [{'action': 'open_camera_list', 'reason': 'camera workflow capability'}],
+        )
+
     def test_execute_step_selector_non_empty_applies_geometry_constraints(self) -> None:
         agent = PyUICompatAgent(case_name='TC_005')
         page = _VisibilityPageStub(

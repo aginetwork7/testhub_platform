@@ -81,6 +81,15 @@ export function executeAICase(id, data) {
   })
 }
 
+// 批量执行 AI 用例
+export function batchExecuteAICases(data) {
+  return request({
+    url: '/ai-testing/ai-cases/batch_run/',
+    method: 'post',
+    data
+  })
+}
+
 // 执行临时AI任务
 export function runAdhocAICase(data) {
   return request({
