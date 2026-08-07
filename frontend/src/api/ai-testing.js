@@ -72,6 +72,15 @@ export function deleteAICase(id) {
   })
 }
 
+// 批量删除AI用例
+export function batchDeleteAICases(data) {
+  return request({
+    url: '/ai-testing/ai-cases/batch-delete/',
+    method: 'post',
+    data
+  })
+}
+
 // 执行AI用例
 export function executeAICase(id, data) {
   return request({

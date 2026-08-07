@@ -35,15 +35,29 @@
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
-        <el-button type="success" :disabled="selectedCases.length === 0" @click="openBatchRunDialog">
-          <el-icon><VideoPlay /></el-icon>
-          批量执行 ({{ selectedCases.length }})
-        </el-button>
+        <el-tooltip content="批量执行" placement="top">
+          <el-button circle type="success" :disabled="selectedCases.length === 0" @click="openBatchRunDialog">
+            <el-icon><VideoPlay /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip content="批量删除" placement="top">
+          <el-button circle type="danger" :disabled="selectedCases.length === 0 || deleting" :loading="deleting" @click="deleteSelectedCases">
+            <el-icon><Delete /></el-icon>
+          </el-button>
+        </el-tooltip>
       </div>
 
       <el-table :data="cases" v-loading="loading" style="width: 100%" @selection-change="handleSelectionChange">
         <el-table-column type="selection" width="50" />
+        <el-table-column prop="case_number" label="用例编号" width="110" show-overflow-tooltip />
         <el-table-column prop="name" :label="$t('uiAutomation.ai.caseList.caseName')" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="priority" label="优先级" width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.priority === 'P0' ? 'danger' : row.priority === 'P1' ? 'warning' : 'info'">
+              {{ row.priority || 'P0' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column :label="$t('uiAutomation.ai.caseMode')" width="140">
           <template #default="{ row }">
             <el-tag :type="getCaseModeTag(row.case_mode)">
@@ -156,6 +170,16 @@
       <el-form :model="editForm" :rules="formRules" ref="editFormRef" label-width="100px">
         <el-form-item :label="$t('uiAutomation.ai.caseList.caseName')" prop="name">
           <el-input v-model="editForm.name" :placeholder="$t('uiAutomation.ai.caseNamePlaceholder')" />
+        </el-form-item>
+        <el-form-item label="用例编号" prop="case_number">
+          <el-input v-model="editForm.case_number" />
+        </el-form-item>
+        <el-form-item label="优先级" prop="priority">
+          <el-select v-model="editForm.priority" style="width: 160px">
+            <el-option label="P0" value="P0" />
+            <el-option label="P1" value="P1" />
+            <el-option label="P2" value="P2" />
+          </el-select>
         </el-form-item>
         <el-form-item :label="$t('uiAutomation.common.description')" prop="description">
           <el-input v-model="editForm.description" type="textarea" :placeholder="$t('uiAutomation.ai.caseDescPlaceholder')" />
@@ -277,7 +301,7 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, VideoPlay, Edit, Delete, Plus } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
-import { getAICases, createAICase, updateAICase, deleteAICase, executeAICase, batchExecuteAICases, getAiProjects } from '@/api/ai-testing'
+import { getAICases, createAICase, updateAICase, deleteAICase, batchDeleteAICases, executeAICase, batchExecuteAICases, getAiProjects } from '@/api/ai-testing'
 import { getAutomationConfigurations } from '@/api/api-automation'
 
 const { t } = useI18n()
@@ -290,6 +314,7 @@ const searchText = ref('')
 const executionMode = ref('planner_v2')
 const disableCache = ref(false)
 const selectedCases = ref([])
+const deleting = ref(false)
 const runTargetCases = ref([])
 const showRunDialog = ref(false)
 const submittingRun = ref(false)
@@ -320,6 +345,8 @@ const createStructuredStep = (stepMode = 'ai') => ({
 
 const editForm = reactive({
   name: '',
+  case_number: '',
+  priority: 'P0',
   description: '',
   task_description: '',
   case_mode: 'freeform',
@@ -466,6 +493,8 @@ const validateStructuredSteps = () => {
 const resetEditForm = () => {
   currentCaseId.value = null
   editForm.name = ''
+  editForm.case_number = ''
+  editForm.priority = 'P0'
   editForm.description = ''
   editForm.task_description = ''
   editForm.case_mode = 'freeform'
@@ -622,6 +651,34 @@ const openBatchRunDialog = () => {
   openRunDialog(selectedCases.value)
 }
 
+const deleteSelectedCases = async () => {
+  const caseIds = selectedCases.value.map((testCase) => testCase.id)
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${caseIds.length} 条用例吗？`,
+      t('uiAutomation.messages.confirm.tip'),
+      {
+        confirmButtonText: t('uiAutomation.common.confirm'),
+        cancelButtonText: t('uiAutomation.common.cancel'),
+        type: 'warning'
+      }
+    )
+
+    deleting.value = true
+    await batchDeleteAICases({ case_ids: caseIds })
+    ElMessage.success('批量删除成功')
+    selectedCases.value = []
+    loadCases()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('批量删除失败:', error)
+      ElMessage.error('批量删除失败')
+    }
+  } finally {
+    deleting.value = false
+  }
+}
+
 const confirmRun = async () => {
   submittingRun.value = true
   const payload = {
@@ -655,6 +712,8 @@ const editCase = (row) => {
   isCreateMode.value = false
   currentCaseId.value = row.id
   editForm.name = row.name
+  editForm.case_number = row.case_number || ''
+  editForm.priority = row.priority || 'P0'
   editForm.description = row.description
   editForm.task_description = row.task_description
   editForm.case_mode = row.case_mode || 'freeform'
@@ -685,6 +744,8 @@ const confirmEdit = async () => {
       try {
         const payload = {
           name: editForm.name,
+          case_number: editForm.case_number,
+          priority: editForm.priority,
           description: editForm.description,
           task_description: editForm.case_mode === 'freeform'
             ? editForm.task_description
