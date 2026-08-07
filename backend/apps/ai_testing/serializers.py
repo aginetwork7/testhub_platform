@@ -68,6 +68,8 @@ class AICaseSerializer(serializers.Serializer):
     api_automation_configuration_name = serializers.SerializerMethodField()
     project_name = serializers.SerializerMethodField()
     name = serializers.CharField(max_length=200)
+    case_number = serializers.CharField(max_length=50, required=False, allow_blank=True, default='')
+    priority = serializers.ChoiceField(choices=AICase.PRIORITY_CHOICES, required=False, default='P0')
     description = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     task_description = serializers.CharField(required=False, allow_blank=True)
     case_mode = serializers.ChoiceField(choices=AICase.CASE_MODE_CHOICES, required=False, default='freeform')
@@ -130,6 +132,8 @@ class AICaseSerializer(serializers.Serializer):
             instance.api_automation_configuration_id,
         )
         instance.name = validated_data.get('name', instance.name)
+        instance.case_number = validated_data.get('case_number', instance.case_number)
+        instance.priority = validated_data.get('priority', instance.priority)
         instance.description = validated_data.get('description', instance.description)
         instance.task_description = validated_data.get('task_description', instance.task_description)
         instance.case_mode = validated_data.get('case_mode', instance.case_mode)

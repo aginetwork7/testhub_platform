@@ -27,9 +27,16 @@ class AICase(models.Model):
         ('hybrid', '混合步骤'),
         ('structured', '结构化步骤'),
     ]
+    PRIORITY_CHOICES = [
+        ('P0', 'P0'),
+        ('P1', 'P1'),
+        ('P2', 'P2'),
+    ]
 
     project = models.ForeignKey(AiProject, on_delete=models.CASCADE, null=True, blank=True, verbose_name='所属项目')
     name = models.CharField(max_length=200, verbose_name='用例名称')
+    case_number = models.CharField(max_length=50, blank=True, default='', verbose_name='用例编号')
+    priority = models.CharField(max_length=2, choices=PRIORITY_CHOICES, default='P0', verbose_name='优先级')
     description = models.TextField(blank=True, null=True, verbose_name='描述')
     task_description = models.TextField(verbose_name='任务描述', help_text='自然语言任务描述')
     case_mode = models.CharField(max_length=20, choices=CASE_MODE_CHOICES, default='freeform', verbose_name='用例模式')

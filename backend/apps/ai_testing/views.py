@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from django.conf import settings
 from asgiref.sync import sync_to_async
-from django.db import connection, DatabaseError
+from django.db import connection, DatabaseError, transaction
 from django.utils import timezone
 from django.db import models
 from django.http import HttpResponse
@@ -253,7 +253,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['project']
     search_fields = ['name', 'description', 'task_description']
-    ordering = ['-created_at']
+    ordering = ['case_number', 'name']
 
     def get_queryset(self):
         accessible_projects = build_accessible_ai_project_queryset(self.request.user)
@@ -579,6 +579,30 @@ class AICaseViewSet(viewsets.ModelViewSet):
             'message': f'已启动 {len(execution_ids)} 个 AI 用例执行',
             'execution_ids': execution_ids,
         }, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=False, methods=['post'], url_path='batch-delete')
+    def batch_delete(self, request):
+        """批量删除当前用户有权访问的 AI 用例。"""
+        case_ids = request.data.get('case_ids')
+        if not isinstance(case_ids, list) or not case_ids:
+            return Response({'error': '请至少选择一个用例'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            normalized_case_ids = [int(case_id) for case_id in case_ids]
+        except (TypeError, ValueError):
+            return Response({'error': '用例 ID 参数无效'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(normalized_case_ids) != len(set(normalized_case_ids)):
+            return Response({'error': '用例 ID 不能重复'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ai_cases = self.get_queryset().filter(id__in=normalized_case_ids)
+        if ai_cases.count() != len(normalized_case_ids):
+            return Response({'error': '部分用例不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
+
+        with transaction.atomic():
+            deleted_count, _ = ai_cases.delete()
+
+        return Response({'deleted_count': deleted_count})
 
     @action(detail=True, methods=['post'], url_path='execute')
     def execute(self, request, pk=None):
