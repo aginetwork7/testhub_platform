@@ -16,7 +16,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 
 from .models import (
@@ -267,11 +267,11 @@ class ApiAutomationCoverageViewSet(ProjectAccessMixin, viewsets.ViewSet):
 
 class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSet):
     serializer_class = ApiAutomationConfigurationSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAdminUser]
     filterset_fields = ['project', 'is_default']
 
     def get_queryset(self):
-        return ApiAutomationConfiguration.objects.filter(project__in=self.accessible_projects())
+        return ApiAutomationConfiguration.objects.all()
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
@@ -309,7 +309,7 @@ class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSe
 
     @action(detail=False, methods=['post'])
     def initialize(self, request):
-        project = self.accessible_projects().filter(id=request.data.get('project')).first()
+        project = ApiAutomationProject.objects.filter(id=request.data.get('project')).first()
         if project is None:
             return Response({'error': '项目不存在或无权限访问。'}, status=status.HTTP_404_NOT_FOUND)
         try:

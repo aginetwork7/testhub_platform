@@ -264,7 +264,7 @@ const fetchProjects = async () => {
 
 const fetchProjectUsers = async () => {
   try {
-    const response = await api.get('/auth/users/')
+    const response = await api.get('/auth/assignable-users/')
     projectUsers.value = response.data.results || response.data || []
   } catch (error) {
     console.error('获取用户列表失败:', error)

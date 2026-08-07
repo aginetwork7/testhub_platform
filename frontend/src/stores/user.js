@@ -87,8 +87,7 @@ export const useUserStore = defineStore('user', () => {
 
   const register = async (userData) => {
     try {
-      // 临时使用测试接口
-      const response = await api.post('/auth/test-register/', userData)
+      const response = await api.post('/auth/register/', userData)
 
       // 注册成功后不自动登录，不保存token和用户信息
       // 让用户手动登录

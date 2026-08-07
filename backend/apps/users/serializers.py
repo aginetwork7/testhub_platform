@@ -8,21 +8,23 @@ class UserSimpleSerializer(serializers.ModelSerializer):
         fields = ('id', 'username', 'email', 'avatar')
 
 class UserSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True)
+
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 
-                 'avatar', 'phone', 'department', 'position', 'is_active',
+                 'avatar', 'department', 'position', 'is_active',
                  'date_joined', 'created_at', 'updated_at']
         read_only_fields = ['id', 'date_joined', 'created_at', 'updated_at']
 
 class UserCreateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, min_length=6)
     password_confirm = serializers.CharField(write_only=True)
     
     class Meta:
         model = User
-        fields = ['username', 'email', 'password', 'password_confirm',
-                 'first_name', 'last_name', 'phone', 'department', 'position']
+        fields = ['username', 'email', 'password', 'password_confirm']
     
     def validate(self, attrs):
         if attrs['password'] != attrs['password_confirm']:
