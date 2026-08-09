@@ -365,10 +365,42 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 self.assertEqual(history.cache_stats['hit'], 0)
                 agent._plan_ai_step_for_cacheable_step.assert_awaited_once()
 
-    def test_plan_ai_step_does_not_write_cache_when_disabled(self) -> None:
+    def test_cache_key_is_scoped_to_project_and_page_context(self) -> None:
+        step = {'index': 2, 'description': '输入邮箱'}
+        page_context = {'fingerprint': 'page-a'}
+        same_case_other_project = PyUICompatAgent(case_name='TC_004', ai_project_id=2)
+        same_project_other_page = PyUICompatAgent(case_name='TC_004', ai_project_id=1)
+        first_project = PyUICompatAgent(case_name='TC_004', ai_project_id=1)
+
+        project_key = first_project._cache_key_for_step(step, page_context)
+        other_project_key = same_case_other_project._cache_key_for_step(step, page_context)
+        other_page_key = same_project_other_page._cache_key_for_step(
+            step,
+            {'fingerprint': 'page-b'},
+        )
+
+        self.assertNotEqual(project_key, other_project_key)
+        self.assertNotEqual(project_key, other_page_key)
+
+    def test_get_ai_actions_prefers_verified_experience(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_004', ai_project_id=1)
+        step = {'index': 2, 'description': '输入邮箱'}
+        history = HistoryStub()
+        experience_actions = [{'action': 'fill', 'selector': 'input[type="email"]', 'value': 'demo@example.com'}]
+        agent._load_verified_experience = AsyncMock(return_value=experience_actions)
+        agent._plan_ai_step_for_cacheable_step = AsyncMock(return_value=[{'action': 'click'}])
+
+        actions, source = asyncio.run(agent._get_ai_actions_for_step(page=None, step=step, history=history))
+
+        self.assertEqual(actions, experience_actions)
+        self.assertEqual(source, 'experience')
+        self.assertEqual(history.cache_stats['experience_hit'], 1)
+        agent._plan_ai_step_for_cacheable_step.assert_not_awaited()
+
+    def test_plan_ai_step_does_not_write_cache_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
             with override_settings(MEDIA_ROOT=media_root):
-                agent = PyUICompatAgent(case_name='TC_004', use_cache=False)
+                agent = PyUICompatAgent(case_name='TC_004')
                 step = {'index': 3, 'description': '悬停组织管理按钮'}
                 history = HistoryStub(cache_stats={'enabled': False, 'hit': 0, 'miss': 0, 'model_retries': 0, 'model_attempts': 0, 'write': 0, 'ai_generated': 0})
                 agent._plan_ai_step_with_retries = AsyncMock(return_value=[{'action': 'hover', 'selector': 'nav >> text=Team'}])
@@ -1226,7 +1258,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 second = PyUICompatAgent(case_name='TC_005')
                 step = {'index': 1, 'description': '相同步骤'}
 
-                self.assertTrue(first._cache_key_for_step(step).startswith('v3::'))
+                self.assertTrue(first._cache_key_for_step(step).startswith('v4::'))
                 self.assertNotEqual(first._cache_key_for_step(step), second._cache_key_for_step(step))
 
     def test_history_step_action_uses_runtime_action_name(self) -> None:

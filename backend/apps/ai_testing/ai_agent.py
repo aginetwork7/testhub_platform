@@ -49,7 +49,7 @@ def analyze_task_sync(task_description: str, execution_mode='text', case_mode='f
     agent = agent_class(execution_mode=execution_mode)
     return asyncio.run(agent.analyze_task(task_description, case_mode=case_mode, task_steps=task_steps))
 
-def run_full_process_sync(task_description: str, analysis_callback=None, step_callback=None, should_stop=None, execution_mode='text', enable_gif=True, case_name=None, case_mode='freeform', task_steps=None, use_cache=True, execution_user_id=None, api_automation_configuration=None):
+def run_full_process_sync(task_description: str, analysis_callback=None, step_callback=None, should_stop=None, execution_mode='text', enable_gif=True, case_name=None, case_mode='freeform', task_steps=None, use_cache=True, execution_user_id=None, api_automation_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
     logger.info(f"DEBUG: Entering run_full_process_sync with execution_mode={execution_mode}, enable_gif={enable_gif}")
 
     agent_class = get_agent_class(execution_mode, case_mode=case_mode, task_steps=task_steps)
@@ -61,6 +61,9 @@ def run_full_process_sync(task_description: str, analysis_callback=None, step_ca
     if agent_class is PyUICompatAgent:
         agent_kwargs['execution_user_id'] = execution_user_id
         agent_kwargs['api_automation_configuration'] = api_automation_configuration
+        agent_kwargs['ai_project_id'] = ai_project_id
+        agent_kwargs['execution_record_id'] = execution_record_id
+        agent_kwargs['ai_case_id'] = ai_case_id
     agent = agent_class(**agent_kwargs)
     if hasattr(agent, 'use_cache'):
         agent.use_cache = bool(use_cache)

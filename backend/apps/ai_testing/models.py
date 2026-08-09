@@ -106,3 +106,49 @@ class AIExecutionRecord(models.Model):
 
     def __str__(self):
         return f"{self.case_name} - {self.get_status_display()}"
+
+
+class AIExecutionExperience(models.Model):
+    """A verified, reusable action sequence for one AI-planned step."""
+
+    STATUS_CHOICES = [
+        ('verified', '已验证'),
+        ('invalid', '已失效'),
+    ]
+    REVIEW_STATUS_CHOICES = [
+        ('auto_verified', '自动验证'),
+        ('confirmed', '人工确认'),
+        ('rejected', '人工拒绝'),
+    ]
+
+    project = models.ForeignKey(AiProject, on_delete=models.CASCADE, related_name='execution_experiences')
+    ai_case = models.ForeignKey(AICase, on_delete=models.SET_NULL, null=True, blank=True, related_name='execution_experiences')
+    execution_record = models.ForeignKey(AIExecutionRecord, on_delete=models.SET_NULL, null=True, blank=True, related_name='experiences')
+    step_description = models.TextField(verbose_name='步骤描述')
+    intent_hash = models.CharField(max_length=64, db_index=True, verbose_name='步骤语义哈希')
+    page_url = models.CharField(max_length=1000, blank=True, default='', verbose_name='页面地址')
+    page_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='页面指纹')
+    environment_key = models.CharField(max_length=200, blank=True, default='', verbose_name='环境标识')
+    action_sequence = models.JSONField(default=list, verbose_name='已验证动作序列')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='verified', db_index=True, verbose_name='状态')
+    review_status = models.CharField(max_length=20, choices=REVIEW_STATUS_CHOICES, default='auto_verified', verbose_name='审核状态')
+    review_note = models.TextField(blank=True, default='', verbose_name='审核备注')
+    success_count = models.PositiveIntegerField(default=1, verbose_name='成功次数')
+    failure_count = models.PositiveIntegerField(default=0, verbose_name='失败次数')
+    confidence = models.FloatField(default=0.7, verbose_name='置信度')
+    last_verified_at = models.DateTimeField(auto_now=True, verbose_name='最近验证时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ai_testing_execution_experiences'
+        verbose_name = 'AI执行经验'
+        verbose_name_plural = 'AI执行经验'
+        ordering = ['-confidence', '-last_verified_at']
+        indexes = [
+            models.Index(fields=['project', 'intent_hash', 'status']),
+            models.Index(fields=['project', 'page_fingerprint', 'status']),
+        ]
+
+    def __str__(self):
+        return f'{self.project.name}: {self.step_description[:60]}'

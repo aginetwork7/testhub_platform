@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db import models
-from .models import AiProject, AICase, AIExecutionRecord
+from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
 
 User = get_user_model()
 
@@ -173,3 +173,18 @@ class AIExecutionRecordSerializer(serializers.Serializer):
 
     def get_executed_by_name(self, obj):
         return obj.executed_by.username if obj.executed_by else ''
+
+
+class AIExecutionExperienceSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    ai_case_name = serializers.CharField(source='ai_case.name', read_only=True, default='')
+
+    class Meta:
+        model = AIExecutionExperience
+        fields = [
+            'id', 'project', 'project_name', 'ai_case', 'ai_case_name', 'execution_record',
+            'step_description', 'page_url', 'environment_key', 'action_sequence', 'status',
+            'review_status', 'review_note', 'success_count', 'failure_count', 'confidence',
+            'last_verified_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields

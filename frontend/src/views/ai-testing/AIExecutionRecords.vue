@@ -15,6 +15,9 @@
           <el-icon><Delete /></el-icon>
           {{ $t('uiAutomation.common.batchDelete') }}
         </el-button>
+        <el-button @click="openLearningDialog">
+          学习指标
+        </el-button>
       </div>
     </div>
 
@@ -146,6 +149,50 @@
       v-model="showReportDialog"
       :record-id="reportRecordId"
     />
+
+    <el-dialog v-model="showLearningDialog" title="AI 学习指标与经验审核" width="960px">
+      <el-descriptions v-if="learningMetrics" :column="3" border>
+        <el-descriptions-item label="首跑通过率">
+          {{ formatRate(learningMetrics.executions.first_run_pass_rate) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="经验命中">
+          {{ learningMetrics.learning.experience_hits }}
+        </el-descriptions-item>
+        <el-descriptions-item label="有效经验">
+          {{ learningMetrics.learning.experience_active }}
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <el-table v-loading="learningLoading" :data="experiences" style="margin-top: 16px">
+        <el-table-column prop="step_description" label="步骤" min-width="260" show-overflow-tooltip />
+        <el-table-column prop="environment_key" label="环境" min-width="120" show-overflow-tooltip />
+        <el-table-column label="状态" width="120">
+          <template #default="{ row }">
+            <el-tag :type="row.status === 'verified' ? 'success' : 'danger'">
+              {{ row.status === 'verified' ? '有效' : '已失效' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="success_count" label="成功次数" width="100" />
+        <el-table-column label="审核" width="110">
+          <template #default="{ row }">
+            <el-tag :type="row.review_status === 'confirmed' ? 'success' : 'info'">
+              {{ row.review_status === 'confirmed' ? '已确认' : '待确认' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" fixed="right">
+          <template #default="{ row }">
+            <el-tooltip content="确认经验" placement="top">
+              <el-button circle type="success" :icon="Check" :disabled="row.status !== 'verified'" @click="confirmExperience(row)" />
+            </el-tooltip>
+            <el-tooltip content="禁用经验" placement="top">
+              <el-button circle type="danger" :icon="Close" :disabled="row.status !== 'verified'" @click="rejectExperience(row)" />
+            </el-tooltip>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
@@ -153,8 +200,8 @@
 import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete } from '@element-plus/icons-vue'
-import { getAIExecutionRecord, getAIExecutionRecords, batchDeleteAIExecutionRecords, getAiProjects } from '@/api/ai-testing'
+import { Check, Close, Delete } from '@element-plus/icons-vue'
+import { batchDeleteAIExecutionRecords, confirmAIExecutionExperience, getAIExecutionExperiences, getAIExecutionRecord, getAIExecutionRecords, getAILearningMetrics, getAiProjects, rejectAIExecutionExperience } from '@/api/ai-testing'
 import AIExecutionReport from './AIExecutionReport.vue'
 
 const { t } = useI18n()
@@ -182,6 +229,10 @@ const tableRef = ref(null)
 // 报告相关状态
 const showReportDialog = ref(false)
 const reportRecordId = ref(null)
+const showLearningDialog = ref(false)
+const learningMetrics = ref(null)
+const learningLoading = ref(false)
+const experiences = ref([])
 
 const projectOptions = computed(() => [
   { id: ALL_PROJECT_VALUE, name: 'ALL' },
@@ -324,6 +375,67 @@ const openReportFromDetail = () => {
   if (currentRecord.value) {
     reportRecordId.value = currentRecord.value.id
     showReportDialog.value = true
+  }
+}
+
+const formatRate = (value) => `${((Number(value) || 0) * 100).toFixed(1)}%`
+
+const learningQueryParams = () => {
+  if (projectId.value && projectId.value !== ALL_PROJECT_VALUE && projectId.value !== UNARCHIVED_PROJECT_VALUE) {
+    return { project: projectId.value }
+  }
+  return {}
+}
+
+const loadLearningData = async () => {
+  learningLoading.value = true
+  try {
+    const params = learningQueryParams()
+    const [metricsResponse, experiencesResponse] = await Promise.all([
+      getAILearningMetrics(params),
+      getAIExecutionExperiences({ ...params, page_size: 100 })
+    ])
+    learningMetrics.value = metricsResponse.data
+    experiences.value = experiencesResponse.data.results || experiencesResponse.data
+  } catch (error) {
+    console.error('获取 AI 学习数据失败:', error)
+    ElMessage.error('获取 AI 学习数据失败')
+  } finally {
+    learningLoading.value = false
+  }
+}
+
+const openLearningDialog = async () => {
+  showLearningDialog.value = true
+  await loadLearningData()
+}
+
+const confirmExperience = async (experience) => {
+  try {
+    await confirmAIExecutionExperience(experience.id)
+    ElMessage.success('经验已确认')
+    await loadLearningData()
+  } catch (error) {
+    console.error('确认 AI 经验失败:', error)
+    ElMessage.error('确认 AI 经验失败')
+  }
+}
+
+const rejectExperience = async (experience) => {
+  try {
+    await ElMessageBox.confirm('禁用后，AI 将不再复用该经验。', '禁用经验', {
+      confirmButtonText: '确认禁用',
+      cancelButtonText: t('uiAutomation.common.cancel'),
+      type: 'warning'
+    })
+    await rejectAIExecutionExperience(experience.id)
+    ElMessage.success('经验已禁用')
+    await loadLearningData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('禁用 AI 经验失败:', error)
+      ElMessage.error('禁用 AI 经验失败')
+    }
   }
 }
 
