@@ -160,6 +160,41 @@ export function batchDeleteAIExecutionRecords(ids) {
   })
 }
 
+// 获取 AI 经验学习指标
+export function getAILearningMetrics() {
+  return request({
+    url: '/ai-testing/ai-execution-records/learning-metrics/',
+    method: 'get'
+  })
+}
+
+// 获取已沉淀的 AI 执行经验
+export function getAIExecutionExperiences(params) {
+  return request({
+    url: '/ai-testing/ai-execution-experiences/',
+    method: 'get',
+    params
+  })
+}
+
+// 人工确认一条可复用经验
+export function confirmAIExecutionExperience(id, reviewNote = '') {
+  return request({
+    url: `/ai-testing/ai-execution-experiences/${id}/confirm/`,
+    method: 'post',
+    data: { review_note: reviewNote }
+  })
+}
+
+// 拒绝并禁用一条错误经验
+export function rejectAIExecutionExperience(id, reviewNote = '') {
+  return request({
+    url: `/ai-testing/ai-execution-experiences/${id}/reject/`,
+    method: 'post',
+    data: { review_note: reviewNote }
+  })
+}
+
 // ================= 报告相关 =================
 // 获取执行报告
 export function getAIExecutionReport(id, params = {}) {

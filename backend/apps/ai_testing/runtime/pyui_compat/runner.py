@@ -9,12 +9,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from asgiref.sync import sync_to_async
+from django.db import DatabaseError, models, transaction
 
 
 logger = logging.getLogger('django')
 
-ACTION_CACHE_SCHEMA_VERSION = 'v3'
+ACTION_CACHE_SCHEMA_VERSION = 'v4'
 
 
 def _is_false_like(value):
@@ -33,13 +35,17 @@ class PyUICompatHistory:
 class PyUICompatAgent:
     """Initial pyuitest-inspired runtime scaffold for AI intelligent mode."""
 
-    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, api_automation_configuration=None):
+    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, api_automation_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
         self.execution_mode = execution_mode
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
         self.use_cache = bool(use_cache)
         self.execution_user_id = execution_user_id
         self.api_automation_configuration = api_automation_configuration
+        self.ai_project_id = ai_project_id
+        self.execution_record_id = execution_record_id
+        self.ai_case_id = ai_case_id
+        self._cache_context_by_step = {}
         self._recent_network_events = []
         self._reported_event_ids = []
         self._reported_alert_gpt_description = ''
@@ -109,6 +115,8 @@ class PyUICompatAgent:
                 'fallback_replan': 0,
                 'model_retries': 0,
                 'model_attempts': 0,
+                'experience_hit': 0,
+                'experience_write': 0,
             },
             case_report={
                 'case_id': self.case_name,
@@ -233,6 +241,7 @@ class PyUICompatAgent:
                     last_executed_action = step.get('action')
                     action_source = 'direct'
                     screenshot_rel_path = None
+                    ai_actions = None
 
                     try:
                         if step.get('executor') == 'device_cli':
@@ -298,20 +307,21 @@ class PyUICompatAgent:
                                     history=history,
                                 )
                             except Exception:
-                                if action_source == 'cache':
+                                if action_source in {'cache', 'experience'}:
                                     history.cache_stats['fallback_replan'] = history.cache_stats.get('fallback_replan', 0) + 1
                                     history.planner_trace['step_retry_map'][str(index)] = 1
-                                    self._delete_cached_ai_actions(step)
+                                    if action_source == 'cache':
+                                        self._delete_cached_ai_actions(step)
+                                    else:
+                                        await self._invalidate_verified_experience(step)
                                     await self._emit(
                                         step_callback,
-                                        {'type': 'log', 'content': f"[planner_v2] Step {index} cached plan failed, retrying with fresh AI plan.\n"},
+                                        {'type': 'log', 'content': f"[planner_v2] Step {index} reused plan failed, retrying with fresh AI plan.\n"},
                                     )
                                     ai_actions = await self._plan_ai_step(page, step)
                                     action_source = 'model'
                                     last_executed_action = ai_actions[-1].get('action') if ai_actions else step.get('action')
-                                    await self._store_cached_ai_actions(step, ai_actions)
                                     history.cache_stats['ai_generated'] = history.cache_stats.get('ai_generated', 0) + len(ai_actions)
-                                    history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
                                     await self._execute_ai_actions(
                                         page,
                                         step,
@@ -350,6 +360,18 @@ class PyUICompatAgent:
                             step_callback,
                             {'type': 'log', 'content': f"[planner_v2] Step {index} failed: {error_message}\n"},
                         )
+
+                    if (
+                        status == 'completed'
+                        and action_source == 'model'
+                        and self.use_cache
+                        and isinstance(ai_actions, list)
+                    ):
+                        await self._store_cached_ai_actions(step, ai_actions)
+                        history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
+                        experience_written = await self._store_verified_experience(step, ai_actions)
+                        if experience_written:
+                            history.cache_stats['experience_write'] = history.cache_stats.get('experience_write', 0) + 1
 
                     await page.wait_for_timeout(300)
                     screenshot_path = await self._capture_screenshot(
@@ -611,12 +633,20 @@ class PyUICompatAgent:
         if fallback_actions:
             return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)], 'fallback'
 
+        page_context = await self._build_page_context(page)
+        self._cache_context_by_step[self._step_context_key(step)] = page_context
+
         if self.use_cache:
-            cached_actions = self._load_cached_ai_actions(step)
+            cached_actions = self._load_cached_ai_actions(step, page_context)
             if cached_actions:
                 history.cache_stats['hit'] = history.cache_stats.get('hit', 0) + 1
                 history.cache_stats['miss'] = max(0, history.cache_stats.get('miss', 0) - 1)
                 return cached_actions, 'cache'
+
+        experience_actions = await self._load_verified_experience(step, page_context)
+        if experience_actions:
+            history.cache_stats['experience_hit'] = history.cache_stats.get('experience_hit', 0) + 1
+            return experience_actions, 'experience'
 
         ai_actions = await self._plan_ai_step_for_cacheable_step(page, step, history, step_callback=step_callback, step_index=step_index)
         return ai_actions, 'model'
@@ -629,9 +659,6 @@ class PyUICompatAgent:
             step_callback=step_callback,
             step_index=step_index,
         )
-        if self.use_cache:
-            await self._store_cached_ai_actions(step, ai_actions)
-            history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
         history.cache_stats['ai_generated'] = history.cache_stats.get('ai_generated', 0) + len(ai_actions)
         return ai_actions
 
@@ -782,12 +809,23 @@ class PyUICompatAgent:
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir / 'action_cache.json'
 
-    def _cache_key_for_step(self, step):
+    def _cache_key_for_step(self, step, page_context=None):
         description = str(step.get('description') or '').strip()
         step_no = int(step.get('index') or 0)
         digest = hashlib.md5(description.encode('utf-8')).hexdigest()[:12] if description else 'no_desc'
         safe_case_name = self._safe_name(self.case_name)
-        return f'{ACTION_CACHE_SCHEMA_VERSION}::{safe_case_name}::step{step_no}::{digest}'
+        context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
+        context_payload = json.dumps(
+            {
+                'project_id': self.ai_project_id,
+                'environment': self._experience_environment_key(),
+                'page_fingerprint': context.get('fingerprint', ''),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        context_digest = hashlib.sha256(context_payload.encode('utf-8')).hexdigest()[:12]
+        return f'{ACTION_CACHE_SCHEMA_VERSION}::{safe_case_name}::step{step_no}::{digest}::{context_digest}'
 
     def _read_action_cache(self):
         cache_file = self._cache_file_path()
@@ -808,9 +846,9 @@ class PyUICompatAgent:
         except Exception as exc:
             logger.warning('planner_v2 failed to write action cache: %s', exc)
 
-    def _load_cached_ai_actions(self, step):
+    def _load_cached_ai_actions(self, step, page_context=None):
         cache = self._read_action_cache()
-        item = cache.get(self._cache_key_for_step(step))
+        item = cache.get(self._cache_key_for_step(step, page_context))
         if not isinstance(item, dict):
             return None
 
@@ -820,25 +858,171 @@ class PyUICompatAgent:
 
         return [action for action in actions if isinstance(action, dict)]
 
-    async def _store_cached_ai_actions(self, step, actions):
-        if not isinstance(actions, list) or not actions:
+    async def _store_cached_ai_actions(self, step, actions, page_context=None):
+        safe_actions = self._safe_experience_actions(actions)
+        if not safe_actions:
             return
 
         cache = self._read_action_cache()
-        cache[self._cache_key_for_step(step)] = {
+        context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
+        cache[self._cache_key_for_step(step, context)] = {
             'case_name': self.case_name,
             'step_num': int(step.get('index') or 0),
             'step_description': str(step.get('description') or '').strip(),
+            'page_url': context.get('url', ''),
+            'page_fingerprint': context.get('fingerprint', ''),
+            'environment_key': self._experience_environment_key(),
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'actions': [action for action in actions if isinstance(action, dict)],
+            'actions': safe_actions,
         }
         self._write_action_cache(cache)
 
-    def _delete_cached_ai_actions(self, step):
+    def _delete_cached_ai_actions(self, step, page_context=None):
         cache = self._read_action_cache()
-        removed = cache.pop(self._cache_key_for_step(step), None)
+        removed = cache.pop(self._cache_key_for_step(step, page_context), None)
         if removed is not None:
             self._write_action_cache(cache)
+
+    @staticmethod
+    def _step_context_key(step):
+        return f"{int(step.get('index') or 0)}::{str(step.get('description') or '').strip()}"
+
+    def _experience_environment_key(self):
+        configuration = self.api_automation_configuration
+        return str(getattr(configuration, 'environment', '') or '').strip()
+
+    async def _build_page_context(self, page):
+        if page is None:
+            return {}
+        raw_url = str(getattr(page, 'url', '') or '').strip()
+        parsed_url = urlsplit(raw_url)
+        normalized_url = urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', ''))
+        page_title = ''
+        page_text = ''
+        try:
+            page_title = str(await page.title()).strip()
+            page_text = str(await page.locator('body').inner_text(timeout=1000)).strip()
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        fingerprint_source = json.dumps(
+            {'url': normalized_url, 'title': page_title, 'text': re.sub(r'\s+', ' ', page_text)[:4000]},
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        return {
+            'url': normalized_url[:1000],
+            'fingerprint': hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest(),
+        }
+
+    @staticmethod
+    def _intent_hash(step):
+        description = re.sub(r'\s+', ' ', str(step.get('description') or '').strip().lower())
+        return hashlib.sha256(description.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _safe_experience_actions(actions):
+        if not isinstance(actions, list) or not actions:
+            return []
+        serialized = json.loads(json.dumps(actions))
+        for action in serialized:
+            selector = str(action.get('selector') or '').lower()
+            if action.get('action') == 'fill' and any(token in selector for token in ('password', 'secret', 'token')):
+                return []
+        return [action for action in serialized if isinstance(action, dict)]
+
+    async def _load_verified_experience(self, step, page_context):
+        if not self.ai_project_id:
+            return None
+
+        def find_experience():
+            from apps.ai_testing.models import AIExecutionExperience
+
+            queryset = AIExecutionExperience.objects.filter(
+                project_id=self.ai_project_id,
+                intent_hash=self._intent_hash(step),
+                status='verified',
+                confidence__gte=0.7,
+            )
+            if page_context.get('fingerprint'):
+                queryset = queryset.filter(page_fingerprint=page_context['fingerprint'])
+            environment_key = self._experience_environment_key()
+            if environment_key:
+                queryset = queryset.filter(environment_key=environment_key)
+            experience = queryset.order_by('-confidence', '-last_verified_at').first()
+            return experience.action_sequence if experience is not None else None
+
+        try:
+            actions = await sync_to_async(find_experience, thread_sensitive=True)()
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to load verified experience: %s', error)
+            return None
+        return actions if isinstance(actions, list) and actions else None
+
+    async def _store_verified_experience(self, step, actions):
+        if not self.ai_project_id:
+            return False
+        safe_actions = self._safe_experience_actions(actions)
+        if not safe_actions:
+            return False
+        page_context = self._cache_context_by_step.get(self._step_context_key(step), {})
+
+        def save_experience():
+            from apps.ai_testing.models import AIExecutionExperience
+
+            lookup = {
+                'project_id': self.ai_project_id,
+                'intent_hash': self._intent_hash(step),
+                'page_fingerprint': page_context.get('fingerprint', ''),
+                'environment_key': self._experience_environment_key(),
+            }
+            with transaction.atomic():
+                experience = AIExecutionExperience.objects.select_for_update().filter(**lookup).first()
+                if experience is None:
+                    AIExecutionExperience.objects.create(
+                        **lookup,
+                        ai_case_id=self.ai_case_id,
+                        execution_record_id=self.execution_record_id,
+                        step_description=str(step.get('description') or '').strip(),
+                        page_url=page_context.get('url', ''),
+                        action_sequence=safe_actions,
+                    )
+                    return True
+                experience.ai_case_id = self.ai_case_id
+                experience.execution_record_id = self.execution_record_id
+                experience.page_url = page_context.get('url', '')
+                experience.action_sequence = safe_actions
+                experience.status = 'verified'
+                experience.success_count += 1
+                experience.confidence = min(0.95, 0.7 + experience.success_count * 0.05)
+                experience.save()
+                return True
+
+        try:
+            return await sync_to_async(save_experience, thread_sensitive=True)()
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to store verified experience: %s', error)
+            return False
+
+    async def _invalidate_verified_experience(self, step):
+        if not self.ai_project_id:
+            return
+        page_context = self._cache_context_by_step.get(self._step_context_key(step), {})
+
+        def invalidate_experience():
+            from apps.ai_testing.models import AIExecutionExperience
+
+            return AIExecutionExperience.objects.filter(
+                project_id=self.ai_project_id,
+                intent_hash=self._intent_hash(step),
+                page_fingerprint=page_context.get('fingerprint', ''),
+                environment_key=self._experience_environment_key(),
+                status='verified',
+            ).update(status='invalid', failure_count=models.F('failure_count') + 1)
+
+        try:
+            await sync_to_async(invalidate_experience, thread_sensitive=True)()
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to invalidate reused experience: %s', error)
 
     def _write_case_report_artifacts(self, artifact_dir, artifact_prefix, history):
         if artifact_dir is None:

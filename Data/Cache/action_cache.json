@@ -1686,5 +1686,173 @@
         "thinking": "planned_by=planner_vision"
       }
     ]
+  },
+  "v4::Create_site_manager_role::step6::074a26d28bce::7677cb802773": {
+    "case_name": "Create site manager role",
+    "step_num": 6,
+    "step_description": "断言页面中显示用户创建页面",
+    "page_url": "https://test-web-2.agi7.ai/dashboard/organization",
+    "page_fingerprint": "eda4c9f73bf2a82991c6c6729171290b136896c6b4fe7f12b41cdfc5009810d9",
+    "environment_key": "test-2",
+    "updated_at": "2026-08-09 11:21:54",
+    "actions": [
+      {
+        "index": 1,
+        "executor": "browser",
+        "step_mode": "direct",
+        "action": "assert_text_contains",
+        "description": "断言页面中显示用户创建页面 - action 1",
+        "selector": null,
+        "loc": null,
+        "param": null,
+        "url": null,
+        "value": "Organization Users",
+        "expected": "Organization Users",
+        "assert_kind": "",
+        "fields": null,
+        "selector_candidates": null,
+        "environment_id": null,
+        "camera_name": null,
+        "device_id": null,
+        "command": null,
+        "operation": null,
+        "arguments": {},
+        "device": null,
+        "camera_index": null,
+        "media_path": null,
+        "vehicle_color": null,
+        "min_count": null,
+        "min_x": null,
+        "min_y": null,
+        "min_width": null,
+        "min_height": null,
+        "timeout_ms": 10000,
+        "thinking": "planned_by=planner_vision"
+      }
+    ]
+  },
+  "v4::Create_site_manager_role::step20::d5d350be9254::b646aad0eed0": {
+    "case_name": "Create site manager role",
+    "step_num": 20,
+    "step_description": "点击搜索结果中的ai@test.com用户",
+    "page_url": "https://test-web-2.agi7.ai/dashboard/organization",
+    "page_fingerprint": "afd5e9a826f3675e4a488ec786f8942737e9c68f41ad4fabf1e952c9483900a0",
+    "environment_key": "test-2",
+    "updated_at": "2026-08-09 11:22:08",
+    "actions": [
+      {
+        "index": 1,
+        "executor": "browser",
+        "step_mode": "direct",
+        "action": "click",
+        "description": "点击搜索结果中的ai@test.com用户 - action 1",
+        "selector": null,
+        "loc": "(163,264)",
+        "param": null,
+        "url": null,
+        "value": null,
+        "expected": null,
+        "assert_kind": "",
+        "fields": null,
+        "selector_candidates": null,
+        "environment_id": null,
+        "camera_name": null,
+        "device_id": null,
+        "command": null,
+        "operation": null,
+        "arguments": {},
+        "device": null,
+        "camera_index": null,
+        "media_path": null,
+        "vehicle_color": null,
+        "min_count": null,
+        "min_x": null,
+        "min_y": null,
+        "min_width": null,
+        "min_height": null,
+        "timeout_ms": 10000,
+        "thinking": "planned_by=planner_vision"
+      },
+      {
+        "index": 2,
+        "executor": "browser",
+        "step_mode": "direct",
+        "action": "assert_text_contains",
+        "description": "点击搜索结果中的ai@test.com用户 - action 2",
+        "selector": null,
+        "loc": null,
+        "param": null,
+        "url": null,
+        "value": "ai@test.com",
+        "expected": "ai@test.com",
+        "assert_kind": "",
+        "fields": null,
+        "selector_candidates": null,
+        "environment_id": null,
+        "camera_name": null,
+        "device_id": null,
+        "command": null,
+        "operation": null,
+        "arguments": {},
+        "device": null,
+        "camera_index": null,
+        "media_path": null,
+        "vehicle_color": null,
+        "min_count": null,
+        "min_x": null,
+        "min_y": null,
+        "min_width": null,
+        "min_height": null,
+        "timeout_ms": 10000,
+        "thinking": "planned_by=planner_vision"
+      }
+    ]
+  },
+  "v4::TC_004::step8::1f62cfbcfc8a::f8048802d4f1": {
+    "case_name": "TC_004",
+    "step_num": 8,
+    "step_description": "First Name输入框填写AI",
+    "page_url": "",
+    "page_fingerprint": "",
+    "environment_key": "",
+    "updated_at": "2026-08-09 11:24:08",
+    "actions": [
+      {
+        "action": "fill",
+        "selector": "text=First Name",
+        "value": "AI"
+      }
+    ]
+  },
+  "v4::TC_004::step2::41cb58b74531::f8048802d4f1": {
+    "case_name": "TC_004",
+    "step_num": 2,
+    "step_description": "输入邮箱",
+    "page_url": "",
+    "page_fingerprint": "",
+    "environment_key": "",
+    "updated_at": "2026-08-09 11:24:08",
+    "actions": [
+      {
+        "action": "fill",
+        "selector": "input[type=\"email\"]",
+        "value": "demo@example.com"
+      }
+    ]
+  },
+  "v4::TC_004::step1::ab7d1b1239a0::f8048802d4f1": {
+    "case_name": "TC_004",
+    "step_num": 1,
+    "step_description": "点击登录按钮",
+    "page_url": "",
+    "page_fingerprint": "",
+    "environment_key": "",
+    "updated_at": "2026-08-09 11:24:09",
+    "actions": [
+      {
+        "action": "click",
+        "selector": "text=Login"
+      }
+    ]
   }
 }

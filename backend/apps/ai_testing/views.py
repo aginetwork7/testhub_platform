@@ -15,8 +15,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
-from .models import AiProject, AICase, AIExecutionRecord
-from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionRecordSerializer
+from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
+from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionExperienceSerializer, AIExecutionRecordSerializer
 from .ai_agent import run_full_process_sync
 
 logger = logging.getLogger(__name__)
@@ -421,6 +421,9 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
                     api_automation_configuration=api_automation_configuration,
+                    ai_project_id=ai_case.project_id,
+                    execution_record_id=execution_record.id,
+                    ai_case_id=ai_case.id,
                 )
 
                 # 检查是否是手动停止
@@ -973,6 +976,40 @@ def is_infrastructure_failure(error_message: str) -> bool:
     return any(marker in message for marker in infra_markers)
 
 
+class AIExecutionExperienceViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = AIExecutionExperience.objects.all()
+    serializer_class = AIExecutionExperienceSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['project', 'ai_case', 'execution_record', 'status', 'review_status']
+    ordering = ['-confidence', '-last_verified_at']
+
+    def get_queryset(self):
+        return AIExecutionExperience.objects.filter(
+            project__in=build_accessible_ai_project_queryset(self.request.user),
+        ).select_related('project', 'ai_case', 'execution_record')
+
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, pk=None):
+        experience = self.get_object()
+        experience.status = 'verified'
+        experience.review_status = 'confirmed'
+        experience.review_note = str(request.data.get('review_note') or '').strip()
+        experience.confidence = max(experience.confidence, 0.95)
+        experience.save(update_fields=['status', 'review_status', 'review_note', 'confidence', 'updated_at'])
+        return Response(self.get_serializer(experience).data)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        experience = self.get_object()
+        experience.status = 'invalid'
+        experience.review_status = 'rejected'
+        experience.review_note = str(request.data.get('review_note') or '').strip()
+        experience.confidence = 0
+        experience.save(update_fields=['status', 'review_status', 'review_note', 'confidence', 'updated_at'])
+        return Response(self.get_serializer(experience).data)
+
+
 class AIExecutionRecordViewSet(viewsets.ModelViewSet):
     """AI执行记录视图集"""
     queryset = AIExecutionRecord.objects.all()
@@ -997,6 +1034,57 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             return queryset.filter(project__isnull=True)
 
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='learning-metrics')
+    def learning_metrics(self, request):
+        record_queryset = self.get_queryset()
+        accessible_projects = build_accessible_ai_project_queryset(request.user)
+        experiences = AIExecutionExperience.objects.filter(project__in=accessible_projects)
+        project_id = request.query_params.get('project')
+        if project_id:
+            try:
+                normalized_project_id = int(project_id)
+            except (TypeError, ValueError):
+                return Response({'error': 'project 参数无效'}, status=status.HTTP_400_BAD_REQUEST)
+            record_queryset = record_queryset.filter(project_id=normalized_project_id)
+            experiences = experiences.filter(project_id=normalized_project_id)
+        records = list(record_queryset.only('ai_case_id', 'status', 'cache_stats', 'start_time').order_by('start_time'))
+
+        first_records = {}
+        cache_hits = 0
+        experience_hits = 0
+        experience_writes = 0
+        for record in records:
+            if record.ai_case_id and record.ai_case_id not in first_records:
+                first_records[record.ai_case_id] = record.status
+            stats = record.cache_stats if isinstance(record.cache_stats, dict) else {}
+            cache_hits += int(stats.get('hit') or 0)
+            experience_hits += int(stats.get('experience_hit') or 0)
+            experience_writes += int(stats.get('experience_write') or 0)
+
+        first_run_total = len(first_records)
+        first_run_passed = sum(status == 'passed' for status in first_records.values())
+        total_records = len(records)
+        passed_records = sum(record.status == 'passed' for record in records)
+        return Response({
+            'executions': {
+                'total': total_records,
+                'passed': passed_records,
+                'pass_rate': round(passed_records / total_records, 4) if total_records else 0,
+                'first_run_total': first_run_total,
+                'first_run_passed': first_run_passed,
+                'first_run_pass_rate': round(first_run_passed / first_run_total, 4) if first_run_total else 0,
+            },
+            'learning': {
+                'experience_total': experiences.count(),
+                'experience_active': experiences.filter(status='verified').count(),
+                'experience_confirmed': experiences.filter(review_status='confirmed', status='verified').count(),
+                'experience_invalid': experiences.filter(status='invalid').count(),
+                'cache_hits': cache_hits,
+                'experience_hits': experience_hits,
+                'experience_writes': experience_writes,
+            },
+        })
 
     def _execution_record_artifact_paths(self, execution_record):
         paths = set()
