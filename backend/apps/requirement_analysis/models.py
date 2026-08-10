@@ -348,6 +348,8 @@ class AIModelConfig(models.Model):
         ('executor_text', 'AI智能测试 - Executor文本模型'),
         ('executor_vision', 'AI智能测试 - Executor视觉模型'),
         ('hermes_agent', 'Hermes Agent'),
+        ('alpha_planner', 'Alpha Planner'),
+        ('alpha_reflection', 'Alpha Reflection'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -616,11 +618,13 @@ class AIModelService:
         data: Dict[str, Any] = {
             'model': config.model_name,
             'messages': messages,
-            'max_tokens': max_tokens,
             'temperature': config.temperature,
             'top_p': config.top_p,
             'stream': stream,
         }
+        model_name = str(config.model_name or '').lower()
+        token_parameter = 'max_completion_tokens' if model_name.startswith(('gpt-5', 'o1', 'o3', 'o4')) else 'max_tokens'
+        data[token_parameter] = max_tokens
 
         if config.model_type == 'qwen':
             data['chat_template_kwargs'] = {'enable_thinking': False}

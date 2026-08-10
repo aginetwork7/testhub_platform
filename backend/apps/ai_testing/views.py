@@ -18,6 +18,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
 from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionExperienceSerializer, AIExecutionRecordSerializer
 from .ai_agent import run_full_process_sync
+from .alpha.access import accessible_ai_project_queryset
 
 logger = logging.getLogger(__name__)
 
@@ -173,14 +174,7 @@ def build_step_thinking(step):
 
 
 def build_accessible_ai_project_queryset(user):
-    if user is None or not getattr(user, 'is_authenticated', False):
-        return AiProject.objects.none()
-
-    return AiProject.objects.filter(
-        models.Q(unified_meta_project__owner=user)
-        | models.Q(unified_meta_project__members__user=user)
-        | models.Q(unified_meta_project__isnull=True, created_by=user)
-    ).distinct()
+    return accessible_ai_project_queryset(user)
 
 
 def build_accessible_api_automation_configuration_queryset(user):

@@ -22,7 +22,7 @@ TestHub 是一个功能强大的智能测试管理平台，集成了 **AI 需求
 
 - **AI 需求分析**: 自动解析需求文档（PDF/Word/TXT），智能提取业务需求
 - **智能测试用例生成**: 基于需求自动生成测试用例，支持多种测试类型
-- **智能助手**: 集成 Dify AI 助手，提供测试咨询和问题解答
+- **智能助手**: 通过 OpenAI 兼容云端模型提供测试咨询、Thinking、缓存与受限工具调用
 - **多模型支持**: 支持 DeepSeek、通义千问、硅基流动等多种 AI 模型
 - **AI 智能模式**: 基于 Browser-use 的智能浏览器自动化，AI 理解页面并自动完成测试
 
@@ -721,14 +721,14 @@ npm run build
 
 **功能**:
 
-- 集成 Dify AI 助手
+- 集成 OpenAI 兼容 Chat 模型与 AI Agent 模型
 - 多会话管理
 - 聊天历史记录
 - 测试咨询和问题解答
 
 **数据模型**:
 
-- `DifyConfig`: Dify API 配置
+- `AgentModelConfig`: Chat / Agent 模型配置
 - `AssistantSession`: 助手会话
 - `ChatMessage`: 聊天消息
 
@@ -963,12 +963,13 @@ SIMPLE_JWT = {
 - **硅基流动**: 备选 AI 模型
 - **自定义模型**: 支持配置自定义 API
 
-### Dify 助手配置
+### AI Agent 配置
 
-配置 Dify API 以启用智能助手功能：
+在配置中心的“AI Agent配置”中分别配置 Chat 模型与 Agent 模型：
 
-- API URL: Dify API 端点
-- API Key: Dify API 密钥
+- Chat 模型：用于普通聊天、SSE、Thinking、缓存和工具调用
+- Agent 模型：用于 Alpha Planner 与 Reflection
+- 支持 OpenAI 兼容云端 API 和主流模型提供商
 
 ### UI 自动化配置
 
@@ -998,7 +999,7 @@ SIMPLE_JWT = {
 - **核心配置**: `core_unifiednotificationconfig` - 统一通知配置
 - **需求分析**: `requirement_documents`, `requirement_analyses`, `business_requirements`, `generated_test_cases`
 - **AI 配置**: `ai_model_configs`, `prompt_configs` - AI 模型和提示词配置
-- **智能助手**: `dify_configs`, `assistant_sessions`, `chat_messages`
+- **智能助手**: `assistant_agent_model_configs`, `assistant_sessions`, `chat_messages`
 - **API 测试**: `api_projects`, `api_collections`, `api_requests`, `api_environments`, `test_suites`, `request_history`,
   `api_scheduled_tasks`
 - **UI 自动化**: `ui_projects`, `ui_elements`, `element_groups`, `ui_page_objects`, `ui_test_scripts`, `ui_test_cases`,

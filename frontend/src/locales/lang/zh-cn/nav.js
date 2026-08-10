@@ -94,7 +94,6 @@ export default {
     aiModeModelConfig: 'AI模型配置',
     aiModePromptConfig: 'AI提示词配置',
     scheduledTaskConfig: '消息通知配置',
-    difyConfig: 'AI智能体配置',
     projectManagementCenter: '项目管理'
   }
 }

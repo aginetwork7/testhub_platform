@@ -206,7 +206,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     BROWSER_USE_ROLES = [
         'planner_text', 'planner_vision', 'executor_text', 'executor_vision',
-        'hermes_agent',
+        'hermes_agent', 'alpha_planner', 'alpha_reflection',
     ]
     queryset = AIModelConfig.objects.filter(role__in=BROWSER_USE_ROLES)
 

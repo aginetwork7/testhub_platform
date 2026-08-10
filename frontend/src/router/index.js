@@ -481,9 +481,9 @@ const routes = [
             component: () => import('@/views/ui-automation/notification/NotificationConfigs.vue')
           },
           {
-            path: 'dify',
-            name: 'DifyConfig',
-            component: () => import('@/views/configuration/DifyConfig.vue')
+            path: 'agent-models',
+            name: 'ConfigAgentModels',
+            component: () => import('@/views/configuration/AgentModelConfig.vue')
           }
         ]
       }

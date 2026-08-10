@@ -22,37 +22,6 @@ export default {
     locale: 'zh-CN'
   },
 
-  // Dify 配置
-  dify: {
-    title: 'AI智能体配置',
-    description: '配置Dify API以启用AI智能体功能',
-    apiConfig: 'Dify API配置',
-    apiUrl: 'API URL',
-    apiUrlPlaceholder: 'https://api.dify.ai/v1',
-    apiUrlTip: 'Dify API的完整URL地址',
-    apiKey: 'API Key',
-    apiKeyPlaceholder: '请输入API Key',
-    apiKeyPlaceholderEdit: '留空则不修改API Key',
-    apiKeyTip: '从Dify平台获取的API密钥',
-    enableStatus: '启用状态',
-    testConnection: '测试连接',
-    currentConfig: '当前配置信息',
-    messages: {
-      testSuccess: '连接测试成功！',
-      testFailed: '连接测试失败',
-      saveSuccess: '配置保存成功！',
-      updateSuccess: '配置更新成功！',
-      saveFailed: '保存配置失败',
-      apiKeyRequired: '创建新配置时API Key是必填项',
-      loadFailed: '加载配置失败'
-    },
-    validation: {
-      apiUrlRequired: '请输入API URL',
-      apiUrlInvalid: '请输入有效的URL',
-      apiKeyMinLength: 'API Key长度至少8位'
-    }
-  },
-
   // 知识库配置
   knowledgeBase: {
     title: '知识库大模型配置',

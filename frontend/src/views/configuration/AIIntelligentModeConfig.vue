@@ -101,6 +101,8 @@
                 <option value="executor_text">Executor - {{ $t('configuration.aiMode.roles.text') }}</option>
                 <option value="executor_vision">Executor - {{ $t('configuration.aiMode.roles.vision') }}</option>
                 <option value="hermes_agent">{{ $t('configuration.aiMode.roles.hermes') }}</option>
+                <option value="alpha_planner">Alpha Planner</option>
+                <option value="alpha_reflection">Alpha Reflection</option>
               </select>
               <small class="form-hint">{{ $t('configuration.aiMode.executionModeHint') }}</small>
             </div>
@@ -275,11 +277,23 @@ const primaryGroups = computed(() => [
       { role: 'executor_vision', label: 'Vision Executor' },
       { role: 'executor_text', label: 'Text Executor' }
     ]
+  },
+  {
+    key: 'alpha',
+    title: 'Alpha Models',
+    description: 'Plan and reflect on durable Alpha workflow revisions.',
+    slots: [
+      { role: 'alpha_planner', label: 'Alpha Planner' },
+      { role: 'alpha_reflection', label: 'Alpha Reflection' }
+    ]
   }
 ])
 
 const configsByRole = (role) => configs.value.filter(config => config.role === role)
-const legacyConfigs = computed(() => configs.value.filter(config => !['planner_text', 'planner_vision', 'executor_text', 'executor_vision'].includes(config.role)))
+const legacyConfigs = computed(() => configs.value.filter(config => ![
+  'planner_text', 'planner_vision', 'executor_text', 'executor_vision',
+  'alpha_planner', 'alpha_reflection'
+].includes(config.role)))
 
 const getProviderLabel = (modelType) => {
   const key = `configuration.aiMode.providers.${modelType}`
@@ -303,6 +317,12 @@ const getRoleLabel = (role) => {
   }
   if (role === 'hermes_agent') {
     return t('configuration.aiMode.roles.hermes')
+  }
+  if (role === 'alpha_planner') {
+    return 'Alpha Planner'
+  }
+  if (role === 'alpha_reflection') {
+    return 'Alpha Reflection'
   }
   return t('configuration.aiMode.roles.text')
 }

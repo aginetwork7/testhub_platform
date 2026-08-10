@@ -22,37 +22,6 @@ export default {
     locale: 'en-US'
   },
 
-  // Dify Configuration
-  dify: {
-    title: 'AI Reviewer Configuration',
-    description: 'Configure Dify API to enable AI reviewer functionality',
-    apiConfig: 'Dify API Configuration',
-    apiUrl: 'API URL',
-    apiUrlPlaceholder: 'https://api.dify.ai/v1',
-    apiUrlTip: 'Complete URL of Dify API',
-    apiKey: 'API Key',
-    apiKeyPlaceholder: 'Enter API Key',
-    apiKeyPlaceholderEdit: 'Leave empty to keep current API Key',
-    apiKeyTip: 'API key obtained from Dify platform',
-    enableStatus: 'Enable Status',
-    testConnection: 'Test Connection',
-    currentConfig: 'Current Configuration',
-    messages: {
-      testSuccess: 'Connection test successful!',
-      testFailed: 'Connection test failed',
-      saveSuccess: 'Configuration saved successfully!',
-      updateSuccess: 'Configuration updated successfully!',
-      saveFailed: 'Failed to save configuration',
-      apiKeyRequired: 'API Key is required when creating new configuration',
-      loadFailed: 'Failed to load configuration'
-    },
-    validation: {
-      apiUrlRequired: 'Please enter API URL',
-      apiUrlInvalid: 'Please enter a valid URL',
-      apiKeyMinLength: 'API Key must be at least 8 characters'
-    }
-  },
-
   // Knowledge Base Configuration
   knowledgeBase: {
     title: 'Knowledge Base Model Config',
