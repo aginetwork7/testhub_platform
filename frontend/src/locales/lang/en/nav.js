@@ -94,7 +94,6 @@ export default {
     aiModeModelConfig: 'AI Model Config',
     aiModePromptConfig: 'AI Prompt Config',
     scheduledTaskConfig: 'Notification Configuration',
-    difyConfig: 'Dify Configuration',
     projectManagementCenter: 'Project Management Center'
   }
 }

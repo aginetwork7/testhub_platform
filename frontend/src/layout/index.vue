@@ -59,10 +59,41 @@
           </template>
 
           <template v-else-if="currentModule === 'assistant'">
-            <el-menu-item index="/assistant">
-              <el-icon><ChatDotRound /></el-icon>
-              <span>{{ $t('assistant.title') }}</span>
-            </el-menu-item>
+            <div class="assistant-session-sidebar">
+              <el-button type="primary" class="assistant-new-session" :icon="Plus" @click="startAssistantSession">
+                {{ $t('assistant.newChat') }}
+              </el-button>
+              <el-collapse v-model="assistantHistoryTabs" class="assistant-history">
+                <el-collapse-item name="chat">
+                  <template #title><span class="assistant-history-tab-title"><span class="assistant-chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-history-chat-gradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-history-chat-gradient)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/></svg></span><span>Chat</span></span></template>
+                  <button
+                    v-for="session in assistantHistory"
+                    :key="session.id"
+                    type="button"
+                    :class="{ active: assistantCurrentSession?.id === session.id && assistantMode === 'chat' }"
+                    @click="selectAssistantSession(session)"
+                  >
+                    <span class="assistant-chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-history-chat-item-gradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-history-chat-item-gradient)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/></svg></span>
+                    <span>{{ session.title || $t('assistant.newChat') }}</span>
+                    <el-icon class="assistant-history-delete" @click.stop="deleteAssistantSession(session.id)"><Delete /></el-icon>
+                  </button>
+                </el-collapse-item>
+                <el-collapse-item name="agent">
+                  <template #title><span class="assistant-history-tab-title"><span class="assistant-agent-symbol"><span class="assistant-robot-face"><i></i><i></i></span></span><span>Agent</span></span></template>
+                  <button
+                    v-for="run in assistantAlphaRuns"
+                    :key="run.id"
+                    type="button"
+                    :class="{ active: assistantActiveAlphaRun?.id === run.id && assistantMode === 'agent' }"
+                    @click="selectAssistantAlphaRun(run)"
+                  >
+                    <span class="assistant-agent-symbol"><span class="assistant-robot-face"><i></i><i></i></span></span>
+                    <span>{{ run.original_request }}</span>
+                    <el-icon class="assistant-history-delete" @click.stop="deleteAssistantAlphaRun(run.id)"><Delete /></el-icon>
+                  </button>
+                </el-collapse-item>
+              </el-collapse>
+            </div>
           </template>
 
           <template v-else-if="currentModule === 'data-factory'">
@@ -320,7 +351,7 @@
             </el-menu-item>
             <el-sub-menu index="ai-intelligent-config">
               <template #title>
-                <el-icon><MagicStick /></el-icon>
+                <el-icon><Cpu /></el-icon>
                 <span>{{ $t('menu.aiModeConfig') }}</span>
               </template>
               <el-menu-item index="/configuration/ai-mode">
@@ -330,13 +361,13 @@
                 <span>{{ $t('menu.aiModePromptConfig') }}</span>
               </el-menu-item>
             </el-sub-menu>
+            <el-menu-item index="/configuration/agent-models">
+              <el-icon><Cpu /></el-icon>
+              <span>AI Agent配置</span>
+            </el-menu-item>
             <el-menu-item index="/configuration/scheduled-task">
               <el-icon><Timer /></el-icon>
               <span>{{ $t('menu.scheduledTaskConfig') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/configuration/dify">
-              <el-icon><ChatDotRound /></el-icon>
-              <span>{{ $t('menu.difyConfig') }}</span>
             </el-menu-item>
           </template>
         </el-menu>
@@ -403,7 +434,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
@@ -416,12 +447,59 @@ import {
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
 import logoHomePng from '@/assets/images/logo_home.png'
+import { assistantSessionStore } from '@/stores/assistantSession'
 
 const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const appStore = useAppStore()
 const { t } = useI18n()
+const assistantHistory = assistantSessionStore.historySessions
+const assistantCurrentSession = assistantSessionStore.currentSession
+const assistantAlphaRuns = assistantSessionStore.alphaRuns
+const assistantActiveAlphaRun = assistantSessionStore.activeAlphaRun
+const assistantMode = assistantSessionStore.assistantMode
+const assistantHistoryTabs = ref(['chat', 'agent'])
+
+const startAssistantSession = () => {
+  assistantSessionStore.startNewChat()
+  assistantSessionStore.assistantMode.value = 'chat'
+}
+
+const selectAssistantSession = async (session) => {
+  try {
+    await assistantSessionStore.selectSession(session)
+    assistantSessionStore.assistantMode.value = 'chat'
+  } catch (error) {
+    ElMessage.error(t('assistant.messages.loadMessageFailed'))
+  }
+}
+
+const selectAssistantAlphaRun = async (run) => {
+  try {
+    await assistantSessionStore.selectAlphaRun(run)
+  } catch (error) {
+    ElMessage.error('无法加载 Alpha Agent 运行')
+  }
+}
+
+const deleteAssistantSession = async (sessionId) => {
+  try {
+    await assistantSessionStore.removeSession(sessionId)
+    ElMessage.success(t('assistant.messages.sessionDeleted'))
+  } catch (error) {
+    ElMessage.error(t('assistant.messages.deleteSessionFailed'))
+  }
+}
+
+const deleteAssistantAlphaRun = async (runId) => {
+  try {
+    await assistantSessionStore.removeAlphaRun(runId)
+    ElMessage.success('Alpha Agent 历史已删除')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '无法删除活动中的 Alpha Agent 任务')
+  }
+}
 
 const logoImage = computed(() => {
 		return route.path === '/home' ? logoSvg : logoHomePng
@@ -452,6 +530,18 @@ const currentModule = computed(() => {
   if (route.path.startsWith('/meta-projects')) return 'meta-projects'
   return ''
 })
+
+watch(currentModule, async (moduleName) => {
+  if (moduleName !== 'assistant') return
+  try {
+    await Promise.all([
+      assistantSessionStore.loadHistory(),
+      assistantSessionStore.loadAlphaRuns(),
+    ])
+  } catch (error) {
+    ElMessage.error('无法加载会话历史')
+  }
+}, { immediate: true })
 
 const moduleName = computed(() => {
   const map = {
@@ -549,7 +639,6 @@ const breadcrumbTitle = computed(() => {
     '/configuration/ai-mode': t('menu.aiModeModelConfig'),
     '/configuration/ai-mode-prompt': t('menu.aiModePromptConfig'),
     '/configuration/scheduled-task': t('menu.scheduledTaskConfig'),
-    '/configuration/dify': t('menu.difyConfig'),
 
     '/profile': t('nav.profile')
   }
@@ -639,6 +728,157 @@ const handleCommand = (command) => {
   :deep(.el-menu-item) {
     font-size: 14px;
   }
+}
+
+.assistant-session-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 12px;
+}
+
+.assistant-new-session {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.assistant-history {
+  margin-top: 16px;
+  border-top: 1px solid #1f3b55;
+  border-bottom: 0;
+  overflow: hidden;
+}
+
+.assistant-history :deep(.el-collapse-item__header) {
+  height: 36px;
+  border-bottom: 1px solid #1f3b55;
+  background: transparent;
+  color: #d6e4ff;
+  font-size: 12px;
+}
+
+.assistant-history :deep(.el-collapse-item__header .el-icon) {
+  margin-right: 8px;
+}
+
+.assistant-history-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+}
+
+.assistant-history-tab-title .el-icon {
+  margin-right: 0 !important;
+}
+
+.assistant-chat-symbol,
+.assistant-agent-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+
+.assistant-chat-symbol svg {
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+}
+
+.assistant-robot-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 14px;
+  height: 11px;
+  padding: 1.5px;
+  border: 0;
+  border-radius: 3px;
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+}
+
+.assistant-robot-face::after {
+  content: '';
+  position: absolute;
+  inset: 1.5px;
+  z-index: 0;
+  border-radius: 1.5px;
+  background: #001529;
+}
+
+.assistant-robot-face::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  z-index: 2;
+  width: 1.5px;
+  height: 3px;
+  background: linear-gradient(#3b82f6, #8b5cf6);
+}
+
+.assistant-robot-face i {
+  position: relative;
+  z-index: 1;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+}
+
+.assistant-history :deep(.el-collapse-item__wrap),
+.assistant-history :deep(.el-collapse-item__content) {
+  border-bottom: 0;
+  background: transparent;
+}
+
+.assistant-history :deep(.el-collapse-item__content) {
+  padding-bottom: 6px;
+}
+
+.assistant-history button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #d6e4ff;
+  cursor: pointer;
+  text-align: left;
+}
+
+.assistant-history button:hover,
+.assistant-history button.active {
+  background: #112a45;
+}
+
+.assistant-history button.active {
+  box-shadow: inset 3px 0 0 #1890ff;
+  color: #fff;
+}
+
+.assistant-history span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.assistant-history-delete {
+  opacity: 0;
+}
+
+.assistant-history button:hover .assistant-history-delete {
+  opacity: 1;
 }
 
 .el-menu--collapse {

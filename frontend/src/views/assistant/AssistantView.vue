@@ -1,68 +1,10 @@
 <template>
-  <div class="assistant-layout">
-    <!-- 左侧侧边栏 -->
-    <div class="sidebar">
-      <div class="new-chat-btn-wrapper">
-        <el-button type="primary" class="new-chat-btn" @click="startNewChat" :icon="Plus">
-          {{ $t('assistant.newChat') }}
-        </el-button>
-      </div>
-      
-      <div class="history-list">
-        <div class="history-label">{{ $t('assistant.historyChat') }}</div>
-        <div class="session-scroll-area">
-          <div 
-            v-for="session in historySessionsDescending" 
-            :key="session.id"
-            :class="['session-item', { active: currentSession?.id === session.id }]"
-            @click="switchToSession(session)"
-          >
-            <div class="session-title-wrapper">
-              <el-icon class="chat-icon"><ChatDotRound /></el-icon>
-              <span class="session-title" :title="session.title">{{ session.title || $t('assistant.newChat') }}</span>
-            </div>
-            <div class="session-actions" @click.stop>
-              <el-popconfirm :title="$t('assistant.deleteSessionConfirm')" @confirm="deleteSession(session.id)">
-                <template #reference>
-                  <el-icon class="delete-icon"><Delete /></el-icon>
-                </template>
-              </el-popconfirm>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-    </div>
-
+  <div class="assistant-layout" :class="{ 'has-alpha-task-tree': showAlphaTaskTree }">
     <!-- 右侧主内容区 -->
     <div class="main-content">
-      <div class="page-header">
-        <div>
-          <h2>{{ $t('assistant.title') }}</h2>
-          <p>{{ $t('assistant.subtitle') }}</p>
-        </div>
-      </div>
       <!-- 场景1：新会话（居中输入框） -->
       <div v-if="isNewChatMode" class="welcome-screen">
         <div class="welcome-content">
-          <div class="logo-area">
-            <div class="logo-circle">
-              <el-icon><Cpu /></el-icon>
-            </div>
-            <h1>{{ $t('assistant.title') }}</h1>
-            <p>{{ $t('assistant.subtitle') }}</p>
-            <div class="welcome-mode-switch">
-              <span class="label">回答模式</span>
-              <el-switch
-                v-model="enableThinkingMode"
-                inline-prompt
-                active-text="思考"
-                inactive-text="直答"
-                size="small"
-              />
-            </div>
-          </div>
-          
           <div class="center-input-wrapper">
             <el-input
               v-model="inputMessage"
@@ -73,22 +15,24 @@
               resize="none"
               @keydown.enter.exact.prevent="handleEnter"
             />
-            <div class="input-actions">
-              <el-button 
-                type="primary" 
-                circle 
-                :icon="Promotion" 
-                :disabled="!inputMessage.trim()"
-                @click="sendMessage"
-              />
+            <div class="input-toolbar">
+              <div class="input-mode-tools">
+                <el-dropdown trigger="click" @command="assistantMode = $event">
+                  <button type="button" class="mode-icon" :aria-label="assistantMode === 'agent' ? 'Agent' : 'Chat'">
+                    <span v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>
+                    <span v-else class="mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/></svg></span>
+                  </button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="chat"><span class="menu-mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-menu-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-menu-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/></svg></span>Chat</el-dropdown-item>
+                      <el-dropdown-item command="agent"><span class="menu-mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>Agent</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <label v-if="assistantMode === 'chat'" class="thinking-control"><span>Thinking</span><el-switch v-model="enableThinkingMode" size="small" /></label>
+              </div>
+              <el-button type="primary" circle :icon="Promotion" :disabled="!inputMessage.trim()" @click="sendMessage" />
             </div>
-          </div>
-          
-          <div class="suggestion-chips">
-            <div class="chip" @click="useSuggestion($t('assistant.suggestions.apiTestQuestion'))">{{ $t('assistant.suggestions.apiTest') }}</div>
-            <div class="chip" @click="useSuggestion($t('assistant.suggestions.performancePlanQuestion'))">{{ $t('assistant.suggestions.performancePlan') }}</div>
-            <div class="chip" @click="useSuggestion($t('assistant.suggestions.testTheoryQuestion'))">{{ $t('assistant.suggestions.testTheory') }}</div>
-            <div class="chip" @click="useSuggestion($t('assistant.suggestions.automationDebugQuestion'))">{{ $t('assistant.suggestions.automationDebug') }}</div>
           </div>
         </div>
       </div>
@@ -98,13 +42,6 @@
         <div class="chat-header">
           <span class="chat-title">{{ currentSession?.title || $t('assistant.newChat') }}</span>
           <div class="chat-header-actions">
-            <el-switch
-              v-model="enableThinkingMode"
-              inline-prompt
-              active-text="思考"
-              inactive-text="直答"
-              size="small"
-            />
             <el-switch
               v-model="showThinking"
               inline-prompt
@@ -144,7 +81,7 @@
                 <span v-if="message.usage.completion_tokens !== null && message.usage.completion_tokens !== undefined"> completion: {{ message.usage.completion_tokens }}</span>
               </div>
               <details
-                v-if="message.role === 'assistant' && (message.tool_contract_status || message.tool_call || message.tool_contract_error)"
+                v-if="message.role === 'assistant' && (message.tool_call || message.tool_result || message.tool_contract_error)"
                 class="tool-debug-block"
               >
                 <summary>工具契约诊断</summary>
@@ -178,6 +115,22 @@
               resize="none"
               @keydown.enter.exact.prevent="handleEnter"
             />
+            <div class="input-toolbar">
+            <div class="input-mode-tools">
+              <el-dropdown trigger="click" @command="assistantMode = $event">
+                <button type="button" class="mode-icon" :aria-label="assistantMode === 'agent' ? 'Agent' : 'Chat'">
+                  <span v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>
+                  <span v-else class="mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-stroke-footer" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-stroke-footer)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/></svg></span>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="chat"><span class="menu-mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-menu-footer-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-menu-footer-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/></svg></span>Chat</el-dropdown-item>
+                    <el-dropdown-item command="agent"><span class="menu-mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>Agent</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <label v-if="assistantMode === 'chat'" class="thinking-control"><span>Thinking</span><el-switch v-model="enableThinkingMode" size="small" /></label>
+            </div>
             <el-button 
               type="primary" 
               class="send-btn"
@@ -195,11 +148,30 @@
             >
               停止
             </el-button>
+            </div>
           </div>
           <div class="footer-tip">{{ $t('assistant.aiDisclaimer') }}</div>
         </div>
       </div>
     </div>
+
+    <aside v-if="showAlphaTaskTree" class="alpha-task-tree">
+      <div class="alpha-task-tree-header">
+        <span>Task Tree</span>
+        <div class="alpha-task-tree-actions">
+          <el-button v-if="canStartAlphaTask" size="small" type="primary" @click="startAlphaTask">开始任务</el-button>
+          <el-button v-else-if="canStopAlphaTask" size="small" type="danger" plain @click="stopAlphaTask">停止任务</el-button>
+          <el-tag size="small" :type="alphaRunStatusType(activeAlphaRun.status)">{{ alphaStatusLabel(activeAlphaRun) }}</el-tag>
+        </div>
+      </div>
+      <div v-if="!alphaTaskNodes.length" class="alpha-task-tree-empty">正在生成任务树...</div>
+      <div v-for="task in alphaTaskNodes" :key="task.id" class="alpha-task-node">
+        <strong>{{ task.task_key }}</strong>
+        <span>{{ task.skill_name }}</span>
+        <el-tag size="small" :type="alphaTaskStatusType(task.status)">{{ alphaTaskStatusLabel(task.status) }}</el-tag>
+        <p v-if="task.error_message">{{ task.error_message }}</p>
+      </div>
+    </aside>
   </div>
 </template>
 
@@ -208,8 +180,9 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
-import { Plus, Delete, ChatDotRound, User, Cpu, Promotion, Loading } from '@element-plus/icons-vue'
+import { User, Cpu, Promotion, Loading } from '@element-plus/icons-vue'
 import api from '@/utils/api'
+import { assistantSessionStore } from '@/stores/assistantSession'
 
 const userStore = useUserStore()
 const { t, locale } = useI18n()
@@ -236,27 +209,61 @@ const setStorageFlag = (key, value) => {
 }
 
 // 状态
-const historySessions = ref([])
-const currentSession = ref(null)
-const messages = ref([])
+const historySessions = assistantSessionStore.historySessions
+const currentSession = assistantSessionStore.currentSession
+const messages = assistantSessionStore.messages
 const inputMessage = ref('')
 const sending = ref(false)
 const messagesContainer = ref(null)
 const activeStreamController = ref(null)
 const enableThinkingMode = ref(getStorageFlag('assistant_enable_thinking_mode', true))
 const showThinking = ref(getStorageFlag('assistant_show_thinking', true))
+const assistantMode = assistantSessionStore.assistantMode
+const activeAlphaRun = assistantSessionStore.activeAlphaRun
+const alphaStatusMessage = ref(null)
+let alphaPollTimer = null
 
 // 计算属性
-const historySessionsDescending = computed(() => {
-  return [...historySessions.value].sort((a, b) => 
-    new Date(b.updated_at) - new Date(a.updated_at)
-  )
-})
-
 const isNewChatMode = computed(() => {
   // 如果没有当前会话，或者当前会话没有消息且没有ID（临时会话），则显示新会话模式
   return !currentSession.value || (!currentSession.value.id && messages.value.length === 0)
 })
+
+const showAlphaTaskTree = computed(() => assistantMode.value === 'agent' && Boolean(activeAlphaRun.value))
+const alphaTaskNodes = computed(() => activeAlphaRun.value?.active_revision?.task_nodes || [])
+const canStartAlphaTask = computed(() => activeAlphaRun.value?.status === 'planning' && activeAlphaRun.value?.active_revision?.status === 'draft')
+const canStopAlphaTask = computed(() => ['planning', 'awaiting_confirmation', 'executing', 'reflecting'].includes(activeAlphaRun.value?.status))
+
+const alphaTaskStatusLabel = (status) => ({
+  pending: '等待中',
+  awaiting_confirmation: '待确认',
+  dispatched: '已派发',
+  running: '执行中',
+  succeeded: '成功',
+  failed: '失败',
+  blocked: '阻塞',
+  skipped: '跳过',
+  cancelled: '已取消',
+}[status] || status)
+
+const alphaTaskStatusType = (status) => ({
+  succeeded: 'success',
+  failed: 'danger',
+  cancelled: 'info',
+  awaiting_confirmation: 'warning',
+  running: 'primary',
+  dispatched: 'primary',
+}[status] || 'info')
+
+const alphaRunStatusType = (status) => ({
+  completed: 'success',
+  failed: 'danger',
+  cancelled: 'info',
+  planning: 'warning',
+  reflecting: 'warning',
+  awaiting_confirmation: 'warning',
+  executing: 'primary',
+}[status] || 'info')
 
 // 方法
 const formatDate = (dateString) => {
@@ -328,19 +335,14 @@ const scrollToBottom = () => {
 
 // 开启新会话
 const startNewChat = () => {
-  currentSession.value = { title: t('assistant.newChat') } // 临时会话对象
-  messages.value = []
+  assistantSessionStore.startNewChat()
   inputMessage.value = ''
 }
 
 // 切换会话
 const switchToSession = async (session) => {
-  if (currentSession.value?.id === session.id) return
-  
   try {
-    currentSession.value = { ...session }
-    const response = await api.get(`/assistant/sessions/${session.id}/messages/`)
-    messages.value = response.data
+    await assistantSessionStore.selectSession(session)
     scrollToBottom()
   } catch (error) {
     console.error('Load messages failed:', error)
@@ -351,12 +353,7 @@ const switchToSession = async (session) => {
 // 删除会话
 const deleteSession = async (sessionId) => {
   try {
-    await api.delete(`/assistant/sessions/${sessionId}/`)
-    historySessions.value = historySessions.value.filter(s => s.id !== sessionId)
-    
-    if (currentSession.value?.id === sessionId) {
-      startNewChat()
-    }
+    await assistantSessionStore.removeSession(sessionId)
     ElMessage.success(t('assistant.messages.sessionDeleted'))
   } catch (error) {
     console.error('Delete session failed:', error)
@@ -375,6 +372,95 @@ const handleEnter = (e) => {
   if (!e.shiftKey && !sending.value) {
     sendMessage()
   }
+}
+
+const alphaStatusLabel = (run) => {
+  const labels = {
+    draft: '已创建',
+    planning: '正在规划',
+    awaiting_confirmation: '等待确认',
+    executing: '正在执行',
+    reflecting: '正在反思',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return labels[run.status] || run.status
+}
+
+const refreshAlphaRun = async () => {
+  if (!activeAlphaRun.value) return
+  try {
+    const response = await api.get(`/ai-testing/alpha/runs/${activeAlphaRun.value.id}/`)
+    activeAlphaRun.value = response.data
+    const revision = response.data.active_revision
+    const taskCount = revision?.task_nodes?.length || 0
+    if (alphaStatusMessage.value) {
+      alphaStatusMessage.value.content = `Alpha Agent：${alphaStatusLabel(response.data)}${taskCount ? `，已生成 ${taskCount} 个任务` : ''}`
+      alphaStatusMessage.value.isPending = ['draft', 'planning', 'awaiting_confirmation', 'executing', 'reflecting'].includes(response.data.status)
+    }
+    if (!['draft', 'planning', 'awaiting_confirmation', 'executing', 'reflecting'].includes(response.data.status) && alphaPollTimer) {
+      window.clearInterval(alphaPollTimer)
+      alphaPollTimer = null
+    }
+  } catch (error) {
+    if (alphaStatusMessage.value) {
+      alphaStatusMessage.value.content = 'Alpha Agent 状态查询失败'
+      alphaStatusMessage.value.isPending = false
+    }
+    if (alphaPollTimer) {
+      window.clearInterval(alphaPollTimer)
+      alphaPollTimer = null
+    }
+  }
+}
+
+const startAlphaTask = async () => {
+  const revision = activeAlphaRun.value?.active_revision
+  if (!revision) return
+  try {
+    await api.post(`/ai-testing/alpha/runs/${activeAlphaRun.value.id}/start/`, { revision_id: revision.id })
+    await refreshAlphaRun()
+    if (!alphaPollTimer) alphaPollTimer = window.setInterval(refreshAlphaRun, 3000)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '无法开始 Alpha Agent 任务')
+  }
+}
+
+const stopAlphaTask = async () => {
+  try {
+    await api.post(`/ai-testing/alpha/runs/${activeAlphaRun.value.id}/cancel/`)
+    await refreshAlphaRun()
+  } catch (error) {
+    ElMessage.error(error.response?.data?.detail || '无法停止 Alpha Agent 任务')
+  }
+}
+
+const sendAlphaAgentMessage = async (text) => {
+  if (!currentSession.value) {
+    currentSession.value = { title: 'Alpha Agent' }
+  }
+  const userMessage = {
+    role: 'user',
+    content: text,
+    created_at: new Date().toISOString(),
+  }
+  const agentMessage = {
+    role: 'assistant',
+    content: 'Alpha Agent：正在创建工作流',
+    isPending: true,
+  }
+  messages.value.push(userMessage, agentMessage)
+  alphaStatusMessage.value = agentMessage
+  scrollToBottom()
+
+  const created = await api.post('/ai-testing/alpha/runs/', { original_request: text })
+  activeAlphaRun.value = created.data
+  await api.post(`/ai-testing/alpha/runs/${created.data.id}/plan/`)
+  await assistantSessionStore.loadAlphaRuns()
+  await refreshAlphaRun()
+  if (alphaPollTimer) window.clearInterval(alphaPollTimer)
+  alphaPollTimer = window.setInterval(refreshAlphaRun, 3000)
 }
 
 const getStreamAuthToken = async () => {
@@ -503,6 +589,23 @@ const streamAssistantMessage = async ({ sessionId, message, onEvent, signal }) =
 const sendMessage = async () => {
   const text = inputMessage.value.trim()
   if (!text || sending.value) return
+
+  if (assistantMode.value === 'agent') {
+    inputMessage.value = ''
+    sending.value = true
+    try {
+      await sendAlphaAgentMessage(text)
+    } catch (error) {
+      ElMessage.error(error.response?.data?.detail || 'Alpha Agent 启动失败')
+      if (alphaStatusMessage.value) {
+        alphaStatusMessage.value.content = error.response?.data?.detail || 'Alpha Agent 启动失败'
+        alphaStatusMessage.value.isPending = false
+      }
+    } finally {
+      sending.value = false
+    }
+    return
+  }
   
   inputMessage.value = ''
   sending.value = true
@@ -651,8 +754,7 @@ const sendMessage = async () => {
 // 加载历史
 const loadHistory = async () => {
   try {
-    const response = await api.get('/assistant/sessions/')
-    historySessions.value = response.data.results || response.data || []
+    await assistantSessionStore.loadHistory()
   } catch (error) {
     console.error('Load history failed:', error)
   }
@@ -676,6 +778,7 @@ onBeforeUnmount(() => {
     activeStreamController.value.abort()
     activeStreamController.value = null
   }
+  if (alphaPollTimer) window.clearInterval(alphaPollTimer)
 })
 </script>
 
@@ -685,6 +788,11 @@ onBeforeUnmount(() => {
   height: calc(100vh - 60px);
   background: #fff;
   overflow: hidden;
+}
+
+.assistant-layout.has-alpha-task-tree {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
 }
 
 /* 左侧侧边栏 */
@@ -811,6 +919,61 @@ onBeforeUnmount(() => {
   background: #fff;
 }
 
+.alpha-task-tree {
+  overflow: hidden;
+  border-left: 1px solid #eaecf0;
+  background: #f8fafc;
+}
+
+.alpha-task-tree-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 60px;
+  padding: 0 16px;
+  border-bottom: 1px solid #eaecf0;
+  background: #fff;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.alpha-task-tree-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.alpha-task-tree-empty {
+  padding: 20px 16px;
+  color: #98a2b3;
+  font-size: 13px;
+}
+
+.alpha-task-node {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #eaecf0;
+  background: #f8fafc;
+}
+
+.alpha-task-node strong {
+  color: #344054;
+  font-size: 13px;
+}
+
+.alpha-task-node span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.alpha-task-node p {
+  margin: 0;
+  color: #d92d20;
+  font-size: 12px;
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;
@@ -898,30 +1061,45 @@ onBeforeUnmount(() => {
   }
   
   .center-input-wrapper {
+    isolation: isolate;
+    padding: 0;
+    border-radius: 18px;
+    overflow: hidden;
+    background: #fff;
+    box-shadow: 0 10px 28px rgba(91, 140, 255, 0.22), 0 8px 22px rgba(166, 108, 255, 0.16);
     width: 100%;
-    position: relative;
     margin-bottom: 30px;
+    display: flex;
+    flex-direction: column;
     
     .center-input {
       :deep(.el-textarea__inner) {
-        border-radius: 16px;
-        padding: 16px 50px 16px 20px;
+        border: 0;
+        border-radius: 0;
+        padding: 16px;
         font-size: 16px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
-        border: 1px solid #e4e7ed;
+        box-shadow: none;
+        background: transparent;
         transition: all 0.3s;
         
         &:focus {
-          box-shadow: 0 4px 20px rgba(64, 158, 255, 0.15);
-          border-color: #409eff;
+          box-shadow: none;
         }
       }
     }
     
-    .input-actions {
-      position: absolute;
-      right: 10px;
-      bottom: 10px;
+    .input-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 16px 14px;
+    }
+
+    .input-mode-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
   }
   
@@ -1139,12 +1317,13 @@ onBeforeUnmount(() => {
     background: #fff;
     
     .input-box {
-      position: relative;
       border: 1px solid #e4e7ed;
       border-radius: 12px;
       padding: 8px;
       background: #fff;
       transition: all 0.3s;
+      display: flex;
+      flex-direction: column;
       
       &:focus-within {
         border-color: #409eff;
@@ -1154,14 +1333,26 @@ onBeforeUnmount(() => {
       :deep(.el-textarea__inner) {
         border: none;
         box-shadow: none;
-        padding: 8px 130px 8px 8px;
+        padding: 8px;
         background: transparent;
+      }
+
+      .input-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        padding-top: 8px;
+      }
+
+      .input-mode-tools {
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       
       .send-btn {
-        position: absolute;
-        right: 8px;
-        bottom: 8px;
+        margin-left: auto;
         width: 32px;
         height: 32px;
         padding: 0;
@@ -1169,9 +1360,6 @@ onBeforeUnmount(() => {
       }
 
       .stop-btn {
-        position: absolute;
-        right: 48px;
-        bottom: 8px;
         height: 32px;
         padding: 0 10px;
       }
@@ -1184,6 +1372,110 @@ onBeforeUnmount(() => {
       margin-top: 8px;
     }
   }
+}
+
+.mode-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #475467;
+  cursor: pointer;
+}
+
+.mode-icon .el-icon {
+  font-size: 17px;
+}
+
+.mode-icon:hover {
+  color: #1570ef;
+}
+
+.mode-symbol,
+.menu-mode-symbol {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+.mode-symbol {
+  width: 24px;
+  height: 24px;
+}
+
+.menu-mode-symbol {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+.chat-symbol svg {
+  width: 20px;
+  height: 20px;
+  overflow: visible;
+}
+
+.robot-face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 14px;
+  height: 11px;
+  padding: 1.5px;
+  border: 0;
+  border-radius: 3px;
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+}
+
+.robot-face::after {
+  content: '';
+  position: absolute;
+  inset: 1.5px;
+  border-radius: 1.5px;
+  background: #fff;
+  z-index: 0;
+}
+
+.robot-face::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  width: 1.5px;
+  height: 3px;
+  background: linear-gradient(#3b82f6, #8b5cf6);
+  z-index: 2;
+}
+
+.robot-face i {
+  position: relative;
+  z-index: 1;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+}
+
+.thinking-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.thinking-control :deep(.el-switch) {
+  --el-switch-on-color: #409eff;
+  --el-switch-off-color: #c0c4cc;
 }
 
 @keyframes rotating {

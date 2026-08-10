@@ -146,9 +146,282 @@ class AIExecutionExperience(models.Model):
         verbose_name_plural = 'AI执行经验'
         ordering = ['-confidence', '-last_verified_at']
         indexes = [
-            models.Index(fields=['project', 'intent_hash', 'status']),
-            models.Index(fields=['project', 'page_fingerprint', 'status']),
+            models.Index(fields=['project', 'intent_hash', 'status'], name='ai_testing__project_37575f_idx'),
+            models.Index(fields=['project', 'page_fingerprint', 'status'], name='ai_testing__project_e20de4_idx'),
         ]
 
     def __str__(self):
         return f'{self.project.name}: {self.step_description[:60]}'
+
+
+class AlphaRun(models.Model):
+    """Durable owner-scoped Alpha workflow instance."""
+
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('collecting_input', '收集参数'),
+        ('planning', '规划中'),
+        ('awaiting_confirmation', '等待确认'),
+        ('executing', '执行中'),
+        ('reflecting', '反思中'),
+        ('completed', '已完成'),
+        ('failed', '失败'),
+        ('cancelled', '已取消'),
+    ]
+
+    project = models.ForeignKey(
+        AiProject,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='alpha_runs',
+        verbose_name='所属项目',
+    )
+    initiated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='alpha_runs',
+        verbose_name='发起人',
+    )
+    original_request = models.TextField(verbose_name='原始目标')
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='draft', db_index=True)
+    round_count = models.PositiveSmallIntegerField(default=0, verbose_name='已完成规划轮次')
+    state_version = models.PositiveIntegerField(default=1, verbose_name='状态版本')
+    planner_task_id = models.CharField(max_length=64, blank=True, default='', verbose_name='规划任务ID')
+    reflection_task_id = models.CharField(max_length=64, blank=True, default='', verbose_name='反思任务ID')
+    active_revision = models.ForeignKey(
+        'AlphaPlanRevision',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='当前计划版本',
+    )
+    final_output = models.JSONField(null=True, blank=True, verbose_name='最终输出')
+    error_message = models.TextField(blank=True, default='', verbose_name='错误信息')
+    cancelled_at = models.DateTimeField(null=True, blank=True, verbose_name='取消时间')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_runs'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['initiated_by', 'status']),
+            models.Index(fields=['project', 'status']),
+        ]
+
+
+class AlphaPlanRevision(models.Model):
+    """Append-only plan revision that freezes before execution."""
+
+    STATUS_CHOICES = [
+        ('draft', '草稿'),
+        ('frozen', '已冻结'),
+        ('superseded', '已替代'),
+    ]
+
+    run = models.ForeignKey(AlphaRun, on_delete=models.CASCADE, related_name='revisions')
+    revision_number = models.PositiveSmallIntegerField(verbose_name='版本号')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='draft', db_index=True)
+    planner_input = models.JSONField(default=dict, blank=True, verbose_name='规划输入快照')
+    planner_output = models.JSONField(default=dict, blank=True, verbose_name='规划输出快照')
+    content_hash = models.CharField(max_length=64, blank=True, default='', verbose_name='内容哈希')
+    frozen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_plan_revisions'
+        ordering = ['run_id', 'revision_number']
+        constraints = [
+            models.UniqueConstraint(fields=['run', 'revision_number'], name='alpha_unique_run_revision'),
+        ]
+
+
+class AlphaTaskNode(models.Model):
+    """A single versioned task node with presentation hierarchy and execution state."""
+
+    STATUS_CHOICES = [
+        ('pending', '等待中'),
+        ('awaiting_confirmation', '等待确认'),
+        ('dispatched', '已派发'),
+        ('running', '执行中'),
+        ('succeeded', '成功'),
+        ('failed', '失败'),
+        ('blocked', '阻塞'),
+        ('skipped', '跳过'),
+        ('cancelled', '已取消'),
+        ('superseded', '已替代'),
+    ]
+    TIER_CHOICES = [('read', '只读'), ('run', '运行'), ('write', '写入')]
+
+    revision = models.ForeignKey(AlphaPlanRevision, on_delete=models.CASCADE, related_name='task_nodes')
+    parent = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='children',
+    )
+    task_key = models.CharField(max_length=100, verbose_name='任务键')
+    display_order = models.PositiveIntegerField(default=0)
+    skill_name = models.CharField(max_length=120, verbose_name='注册技能名称')
+    skill_version = models.CharField(max_length=40, blank=True, default='')
+    tier = models.CharField(max_length=16, choices=TIER_CHOICES)
+    risk_metadata = models.JSONField(default=dict, blank=True)
+    normalized_arguments = models.JSONField(default=dict, blank=True)
+    arguments_hash = models.CharField(max_length=64, blank=True, default='')
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    evidence = models.JSONField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_task_nodes'
+        ordering = ['revision_id', 'display_order', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['revision', 'task_key'], name='alpha_unique_revision_task_key'),
+        ]
+        indexes = [
+            models.Index(fields=['revision', 'status']),
+        ]
+
+
+class AlphaTaskDependency(models.Model):
+    """Execution dependency, deliberately separate from task hierarchy."""
+
+    task = models.ForeignKey(AlphaTaskNode, on_delete=models.CASCADE, related_name='dependencies')
+    depends_on = models.ForeignKey(AlphaTaskNode, on_delete=models.CASCADE, related_name='dependent_tasks')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_task_dependencies'
+        constraints = [
+            models.UniqueConstraint(fields=['task', 'depends_on'], name='alpha_unique_task_dependency'),
+        ]
+
+
+class AlphaParameterRequest(models.Model):
+    """Machine-readable parameter requirement resolved against one plan revision."""
+
+    STATUS_CHOICES = [('pending', '待填写'), ('valid', '有效'), ('invalid', '无效')]
+
+    revision = models.ForeignKey(AlphaPlanRevision, on_delete=models.CASCADE, related_name='parameter_requests')
+    task = models.ForeignKey(
+        AlphaTaskNode,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='parameter_requests',
+    )
+    field_key = models.CharField(max_length=100)
+    field_schema = models.JSONField(default=dict)
+    answer = models.JSONField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending')
+    validation_error = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_parameter_requests'
+        constraints = [
+            models.UniqueConstraint(fields=['revision', 'task', 'field_key'], name='alpha_unique_parameter_field'),
+        ]
+
+
+class AlphaApprovalRequest(models.Model):
+    """Exact, expiring user approval for a risky task action."""
+
+    STATUS_CHOICES = [('pending', '待确认'), ('approved', '已批准'), ('rejected', '已拒绝'), ('expired', '已过期'), ('invalidated', '已失效')]
+
+    run = models.ForeignKey(AlphaRun, on_delete=models.CASCADE, related_name='approval_requests')
+    revision = models.ForeignKey(AlphaPlanRevision, on_delete=models.CASCADE, related_name='approval_requests')
+    task = models.ForeignKey(AlphaTaskNode, on_delete=models.CASCADE, related_name='approval_requests')
+    arguments_hash = models.CharField(max_length=64)
+    risk_metadata = models.JSONField(default=dict)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', db_index=True)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='alpha_approvals',
+    )
+
+    class Meta:
+        db_table = 'ai_testing_alpha_approval_requests'
+        indexes = [
+            models.Index(fields=['task', 'status', 'expires_at']),
+        ]
+
+
+class AlphaDispatchIntent(models.Model):
+    """Transactional outbox record for idempotent worker dispatch."""
+
+    STATUS_CHOICES = [('pending', '待派发'), ('claimed', '已领取'), ('dispatched', '已派发'), ('failed', '失败'), ('cancelled', '已取消')]
+
+    task = models.ForeignKey(AlphaTaskNode, on_delete=models.CASCADE, related_name='dispatch_intents')
+    idempotency_key = models.CharField(max_length=100, unique=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_dispatch_intents'
+        indexes = [
+            models.Index(fields=['status', 'lease_expires_at']),
+        ]
+
+
+class AlphaExternalRun(models.Model):
+    """Normalized reference and status for one external run-tier execution."""
+
+    STATUS_CHOICES = [('pending', '等待中'), ('running', '运行中'), ('succeeded', '成功'), ('failed', '失败'), ('cancelled', '已取消'), ('timed_out', '超时')]
+
+    task = models.ForeignKey(AlphaTaskNode, on_delete=models.CASCADE, related_name='external_runs')
+    external_reference = models.CharField(max_length=255, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='pending', db_index=True)
+    cancellation_supported = models.BooleanField(default=False)
+    details = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_external_runs'
+        constraints = [
+            models.UniqueConstraint(fields=['task', 'external_reference'], name='alpha_unique_external_reference'),
+        ]
+
+
+class AlphaRound(models.Model):
+    """Immutable planner/reflection artifact for one completed workflow cycle."""
+
+    run = models.ForeignKey(AlphaRun, on_delete=models.CASCADE, related_name='rounds')
+    revision = models.OneToOneField(AlphaPlanRevision, on_delete=models.CASCADE, related_name='round_artifact')
+    sequence = models.PositiveSmallIntegerField()
+    planner_model = models.CharField(max_length=100, blank=True, default='')
+    reflection_model = models.CharField(max_length=100, blank=True, default='')
+    planner_input = models.JSONField(default=dict, blank=True)
+    planner_output = models.JSONField(default=dict, blank=True)
+    reflection_input = models.JSONField(default=dict, blank=True)
+    reflection_verdict = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_alpha_rounds'
+        constraints = [
+            models.UniqueConstraint(fields=['run', 'sequence'], name='alpha_unique_run_round'),
+        ]

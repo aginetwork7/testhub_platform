@@ -1,21 +1,30 @@
 from rest_framework import serializers
-from .models import AssistantSession, AssistantMessage, DifyConfig, ChatMessage
+from .models import AgentModelConfig, AssistantSession, AssistantMessage, ChatMessage
 
 
-class DifyConfigSerializer(serializers.ModelSerializer):
+class AgentModelConfigSerializer(serializers.ModelSerializer):
+    api_key_masked = serializers.SerializerMethodField()
+
+    def get_api_key_masked(self, obj):
+        if not obj.api_key:
+            return ''
+        return f'{obj.api_key[:8]}****'
+
     class Meta:
-        model = DifyConfig
-        fields = ['id', 'api_url', 'api_key', 'is_active', 'created_at', 'updated_at']
-        extra_kwargs = {
-            'api_key': {'write_only': True}  # Don't expose API key in responses
-        }
+        model = AgentModelConfig
+        fields = [
+            'id', 'name', 'role', 'model_type', 'api_key', 'base_url', 'model_name',
+            'api_key_masked', 'max_tokens', 'temperature', 'top_p', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+        extra_kwargs = {'api_key': {'write_only': True, 'required': False}}
 
 
 class ChatMessageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatMessage
-        fields = ['id', 'role', 'content', 'conversation_id', 'message_id', 'created_at']
-        read_only_fields = ['conversation_id', 'message_id', 'created_at']
+        fields = ['id', 'role', 'content', 'created_at']
+        read_only_fields = ['created_at']
 
 
 class AssistantMessageSerializer(serializers.ModelSerializer):
@@ -30,7 +39,7 @@ class AssistantSessionSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = AssistantSession
-        fields = ['id', 'session_id', 'conversation_id', 'title', 'created_at', 'updated_at', 'messages', 'chat_messages']
+        fields = ['id', 'session_id', 'title', 'created_at', 'updated_at', 'messages', 'chat_messages']
 
 
 class AssistantSessionCreateSerializer(serializers.ModelSerializer):
