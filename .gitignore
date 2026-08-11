@@ -21,6 +21,7 @@ secrets/
 .env
 .env.local
 .env.*.local
+deploy/env/*.env
 # 忽略log文件
 logs/*
 !logs/.gitkeep

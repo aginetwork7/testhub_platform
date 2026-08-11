@@ -1,0 +1,43 @@
+services:
+  gateway:
+    image: ${HERMES_IMAGE:-hermes-agent}
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_hermes_gateway
+    restart: unless-stopped
+    volumes:
+      - ${HERMES_HOME:?Set HERMES_HOME}:/opt/data
+      - ${HERMES_API_SERVER_KEY_FILE:?Set HERMES_API_SERVER_KEY_FILE}:/run/secrets/hermes_api_key:ro
+    environment:
+      HERMES_UID: ${HERMES_UID:?Set HERMES_UID}
+      HERMES_GID: ${HERMES_GID:?Set HERMES_GID}
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      API_SERVER_KEY_FILE: /run/secrets/hermes_api_key
+      HERMES_DASHBOARD: "0"
+    command: ["gateway", "run"]
+    networks:
+      - testhub
+
+  dashboard:
+    image: ${HERMES_IMAGE:-hermes-agent}
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_hermes_dashboard
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "127.0.0.1:${HERMES_DASHBOARD_HOST_PORT:?Set HERMES_DASHBOARD_HOST_PORT}:8643"
+    volumes:
+      - ${HERMES_HOME:?Set HERMES_HOME}:/home/hermes/.hermes
+    environment:
+      HERMES_UID: ${HERMES_UID:?Set HERMES_UID}
+      HERMES_GID: ${HERMES_GID:?Set HERMES_GID}
+      GATEWAY_HEALTH_URL: http://gateway:8642
+      HERMES_DASHBOARD_PORT: "8643"
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "8643", "--no-open", "--insecure"]
+    networks:
+      - testhub
+
+networks:
+  testhub:
+    external: true
+    name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_default
