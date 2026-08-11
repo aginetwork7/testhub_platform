@@ -137,7 +137,7 @@ services:
     image: alpine:3.21
     container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_api_init_1
     user: "0:0"
-    command: sh -c 'mkdir -p /artifacts && chown -R 100:101 /artifacts'
+    command: sh -c 'mkdir -p /artifacts && chown 100:101 /artifacts'
     volumes:
       - ./media/api-automation:/artifacts
 
@@ -211,6 +211,7 @@ services:
       - "127.0.0.1:${FRONTEND_HOST_PORT:?Set FRONTEND_HOST_PORT}:3000"
     environment:
       - VITE_API_BASE_URL=http://backend:8000
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-}
     volumes:
       # 开发态直接挂载 frontend 源码，避免页面改动仍停留在旧镜像
       - ./frontend:/app
