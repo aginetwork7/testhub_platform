@@ -1,0 +1,25 @@
+services:
+  edge-proxy:
+    image: nginx:alpine
+    container_name: testhub_edge_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    environment:
+      DEBUG_SERVER_NAME: ${DEBUG_SERVER_NAME:?Set DEBUG_SERVER_NAME}
+      PRODUCTION_SERVER_NAME: ${PRODUCTION_SERVER_NAME:?Set PRODUCTION_SERVER_NAME}
+      DEBUG_NGINX_UPSTREAM: ${DEBUG_NGINX_UPSTREAM:-lijun_testhub_nginx:80}
+      PRODUCTION_NGINX_UPSTREAM: ${PRODUCTION_NGINX_UPSTREAM:-agi7_testhub_nginx:80}
+    volumes:
+      - ./deploy/nginx/edge.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      - lijun_testhub
+      - agi7_testhub
+
+networks:
+  lijun_testhub:
+    external: true
+    name: lijun_testhub_default
+  agi7_testhub:
+    external: true
+    name: agi7_testhub_default

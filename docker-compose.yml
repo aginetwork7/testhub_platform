@@ -3,7 +3,7 @@ services:
   # 1. 数据库服务
   db:
     image: mysql:8.0
-    container_name: testhub_db
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_db
     restart: always
     environment:
       MYSQL_DATABASE: testhub
@@ -20,7 +20,7 @@ services:
   # 2. Redis 服务（Django-Q2 任务队列 + Channels + 缓存）
   redis:
     image: redis:7-alpine
-    container_name: testhub_redis
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_redis
     restart: always
     volumes:
       - redis_data:/data
@@ -30,7 +30,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: testhub_backend
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_backend
     restart: unless-stopped
     gpus: all
     depends_on:
@@ -39,7 +39,7 @@ services:
       redis:
         condition: service_started
     ports:
-      - "8001:8000"
+      - "127.0.0.1:${BACKEND_HOST_PORT:?Set BACKEND_HOST_PORT}:8000"
     environment:
       - DB_NAME=testhub
       - DB_USER=root
@@ -60,8 +60,7 @@ services:
       - OCR_USE_GPU=true
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # debug=false 时必须配置，部署时按实际 IP/域名修改
-      - ALLOWED_HOSTS=localhost,127.0.0.1,172.16.0.202
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:?Set ALLOWED_HOSTS}
       # ADB over TCP: 容器通过宿主机的 ADB server 连接 Android 设备
       - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
     extra_hosts:
@@ -92,7 +91,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: testhub_worker
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_worker
     restart: always
     gpus: all
     depends_on:
@@ -117,7 +116,7 @@ services:
       - OCR_USE_GPU=true
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - ALLOWED_HOSTS=localhost,127.0.0.1,172.16.0.202
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:?Set ALLOWED_HOSTS}
       # ADB over TCP: 容器通过宿主机的 ADB server 连接 Android 设备
       - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
     extra_hosts:
@@ -136,6 +135,7 @@ services:
   # 5. API 自动化报告目录初始化（仅创建目录并授权给 Runner 用户）
   api-automation-artifact-init:
     image: alpine:3.21
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_api_init_1
     user: "0:0"
     command: sh -c 'mkdir -p /artifacts && chown -R 100:101 /artifacts'
     volumes:
@@ -146,6 +146,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api-automation-runner
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_api_runner_1
     restart: always
     depends_on:
       api-automation-artifact-init:
@@ -178,6 +179,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.device-cli-runner
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_device_runner_1
     restart: always
     environment:
       - DEVICE_CLI_RUNNER_TOKEN=${DEVICE_CLI_RUNNER_TOKEN:-}
@@ -203,10 +205,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: testhub_frontend
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_frontend
     restart: unless-stopped
     ports:
-      - "5173:3000"
+      - "127.0.0.1:${FRONTEND_HOST_PORT:?Set FRONTEND_HOST_PORT}:3000"
     environment:
       - VITE_API_BASE_URL=http://backend:8000
     volumes:
@@ -221,9 +223,9 @@ services:
   # 6. Nginx 反向代理
   nginx:
     image: nginx:alpine
-    container_name: testhub_nginx
-    ports:
-      - "80:80"
+    container_name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_nginx
+    expose:
+      - "80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -233,4 +235,10 @@ services:
 
 volumes:
   db_data:
+    name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_db_data
   redis_data:
+    name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_redis_data
+
+networks:
+  default:
+    name: ${TESTHUB_INSTANCE:?Set TESTHUB_INSTANCE}_testhub_default
