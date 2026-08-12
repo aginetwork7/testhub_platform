@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import statistics
 import time
 import uuid
@@ -92,12 +93,27 @@ faker = _Faker()
 
 
 class _Logger:
-    def debug(self, *_: Any, **__: Any) -> None:
-        return None
+    @staticmethod
+    def _write(level: str, message: Any, *args: Any) -> None:
+        text = str(message)
+        if args:
+            try:
+                text = text % args
+            except TypeError:
+                text = ' '.join([text, *(str(arg) for arg in args)])
+        print(f'[{level}] {text}', flush=True)
 
-    info = debug
-    warning = debug
-    error = debug
+    def debug(self, message: Any, *args: Any, **_: Any) -> None:
+        self._write('DEBUG', message, *args)
+
+    def info(self, message: Any, *args: Any, **_: Any) -> None:
+        self._write('INFO', message, *args)
+
+    def warning(self, message: Any, *args: Any, **_: Any) -> None:
+        self._write('WARNING', message, *args)
+
+    def error(self, message: Any, *args: Any, **_: Any) -> None:
+        self._write('ERROR', message, *args)
 
 
 class _Config:
@@ -113,6 +129,31 @@ class _Config:
 
 
 logger = _Logger()
+_SENSITIVE_LOG_FIELDS = {'authorization', 'password', 'secret', 'token', 'key', 'private', 'credential'}
+
+
+def _safe_log_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: '***' if any(part in key.lower() for part in _SENSITIVE_LOG_FIELDS) else _safe_log_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_safe_log_value(item) for item in value]
+    if isinstance(value, str):
+        redacted = re.sub(
+            r'([?&](?:x-amz-[^=]+|authorization|password|secret|token|key|credential)=)[^&\s]+',
+            r'\1***',
+            value,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r'\bBearer\s+[^\s]+', 'Bearer ***', redacted, flags=re.IGNORECASE)
+    return value
+
+
+def _log_payload(label: str, value: Any) -> None:
+    serialized = json.dumps(_safe_log_value(value), ensure_ascii=False, default=str)
+    logger.debug('%s: %s', label, serialized[:6000] + ('…' if len(serialized) > 6000 else ''))
 
 
 class Assertions:
@@ -369,15 +410,19 @@ class ApiClient:
         password = _resolve(profile.get('password'), self.configuration)
         if not profile or not username or not password:
             raise RequestError(f'认证角色未配置: {role}')
+        logger.info('认证角色: %s', role)
         password = _network_password(str(username), str(password), self.configuration, profile)
         url = _url(profile.get('login_path', '/auth/login'), self.configuration)
+        logger.info('认证请求: %s %s', role, url)
         response = self.session.post(
             url,
             json={profile.get('username_field', 'email'): username, profile.get('password_field', 'password'): password},
             timeout=self.configuration.get('timeout_seconds', 30),
         )
+        logger.info('认证响应: %s', response.status_code)
         response.raise_for_status()
         data = response.json()
+        _log_payload('认证响应内容', data)
         token = _nested(data, profile.get('token_path', 'token'))
         if not token:
             raise RequestError(f'认证响应缺少 token: {role}')
@@ -511,14 +556,24 @@ class ApiClient:
             for media in request_data.get('medias', []):
                 if isinstance(media, dict) and not media.get('name'):
                     media['name'] = Path(str(media.get('key', 'test-image'))).name[:50] or 'test-image'
+        url = _url(endpoint, self.configuration)
+        logger.info('HTTP 请求: %s %s', method.upper(), endpoint)
+        _log_payload('HTTP 请求参数', kwargs.get('params') or {})
+        if request_data is not None:
+            _log_payload('HTTP 请求体', request_data)
         response = self.session.request(
             method=method.upper(),
-            url=_url(endpoint, self.configuration),
+            url=url,
             params=kwargs.get('params'),
             json=request_data,
             headers={**self.default_headers, **(kwargs.get('headers') or {})},
             timeout=self.configuration.get('timeout_seconds', 30),
         )
+        logger.info('HTTP 响应: %s %s -> %s', method.upper(), endpoint, response.status_code)
+        try:
+            _log_payload('HTTP 响应内容', response.json())
+        except ValueError:
+            logger.debug('HTTP 响应内容: <非 JSON，%s 字节>', len(response.content))
         if endpoint_path == 'case_cases_merge_into' and response.ok:
             time.sleep(2)
         _validate_http_response_schema(response, method, str(endpoint_template), self.configuration)
@@ -1012,7 +1067,30 @@ def _validate_http_response_schema(
     if errors:
         error = errors[0]
         path = '.'.join(str(part) for part in error.path) or '$'
-        raise AssertionError(f'HTTP Schema 校验失败 [{method.upper()} {endpoint_template} {response.status_code}]: {path}: {error.message}')
+        warning = {
+            'operation': f'{method.upper()} {endpoint_template}',
+            'status_code': response.status_code,
+            'json_path': path,
+            'message': error.message,
+        }
+        if validation.get('http_schema_failure_mode', 'strict') == 'warning':
+            _record_schema_warning(warning)
+            return
+        raise AssertionError(f'HTTP Schema 校验失败 [{warning["operation"]} {response.status_code}]: {path}: {error.message}')
+
+
+def _record_schema_warning(warning: dict[str, Any]) -> None:
+    warning_path = os.environ.get('TESTHUB_SCHEMA_WARNINGS_PATH')
+    if not warning_path:
+        return
+    path = Path(warning_path)
+    try:
+        existing = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else []
+        warnings = existing if isinstance(existing, list) else []
+        warnings.append(warning)
+        path.write_text(json.dumps(warnings, ensure_ascii=False), encoding='utf-8')
+    except (OSError, json.JSONDecodeError):
+        return
 
 
 def _get_http_response_schema(method: str, endpoint_template: str, status_code: int) -> dict[str, Any] | None:

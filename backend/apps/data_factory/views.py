@@ -18,7 +18,6 @@ import re
 import mimetypes
 import shutil
 from loguru import logger
-from dotenv import dotenv_values
 
 from .models import DataFactoryRecord
 from .serializers import DataFactoryRecordSerializer, ToolExecuteSerializer
@@ -320,9 +319,9 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
                 'camera_index': camera_index,
             }
             if report_event:
-                device_key = self._environment_device_key(environment.environment, device)
+                device_key = environment.get_event_device_key(device)
                 if not device_key:
-                    return {'success': False, 'error': '所选环境未配置设备私钥，无法真实上报事件。'}
+                    return {'success': False, 'error': '所选环境未在页面配置设备私钥，无法真实上报事件。'}
                 events = result['result'] if isinstance(result['result'], list) else [result['result']]
                 report = BusinessTools.report_alert_events(
                     events=events,
@@ -460,15 +459,6 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
         shutil.rmtree(directory)
         cache.delete('data_factory_categories')
         return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @staticmethod
-    def _environment_device_key(environment: str, device: str) -> str:
-        config_directory = Path(__file__).resolve().parents[1] / 'api_automation' / 'test_assets' / 'config' / 'environments'
-        environment_file = config_directory / f'.env.{environment}'
-        if not environment_file.is_file():
-            return ''
-        key_name = 'MAIN_KEY' if device == 'main' else 'BACKUP_KEY'
-        return dotenv_values(environment_file).get(key_name) or ''
 
     def execute_string_tool(self, tool_name: str, input_data: dict | str):
         """执行字符工具"""

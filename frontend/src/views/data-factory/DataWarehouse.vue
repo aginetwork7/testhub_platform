@@ -49,6 +49,7 @@ const customCategory = ref('')
 const uploadRef = ref(null)
 const uploadFiles = ref([])
 const uploading = ref(false)
+const maximumMediaFileSize = 50 * 1024 * 1024
 const previewVisible = ref(false)
 const previewPath = ref('')
 const previewCategory = ref('')
@@ -73,6 +74,10 @@ const selectFiles = (file, fileList) => { uploadFiles.value = fileList }
 
 const uploadMedia = async () => {
   if (!uploadFiles.value.length) return
+  if (uploadFiles.value.some(file => file.size > maximumMediaFileSize)) {
+    ElMessage.warning('单个素材文件不能超过 50MB')
+    return
+  }
   const category = uploadCategory.value === '__custom__' ? customCategory.value.trim() : uploadCategory.value
   if (!category) {
     ElMessage.warning('请选择或输入存放路径')
