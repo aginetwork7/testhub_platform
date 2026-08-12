@@ -286,7 +286,18 @@
           </el-form>
         </el-tab-pane>
       </el-tabs>
-      <template #footer><div class="config-dialog-footer"><el-button :loading="loadingTemplate" @click="loadConfigurationTemplate">加载模板</el-button><div><el-button @click="configurationDialogVisible = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveConfiguration">保存环境配置</el-button></div></div></template>
+      <template #footer><div class="config-dialog-footer"><div><el-button :loading="loadingTemplate" @click="loadConfigurationTemplate">加载模板</el-button><el-button v-if="!editingConfiguration" @click="copyConfigurationDialogVisible = true">复制环境</el-button></div><div><el-button @click="configurationDialogVisible = false">取消</el-button><el-button type="primary" :loading="saving" @click="saveConfiguration">保存环境配置</el-button></div></div></template>
+    </el-dialog>
+
+    <el-dialog v-model="copyConfigurationDialogVisible" title="复制环境" width="440px" append-to-body>
+      <el-form label-position="top">
+        <el-form-item label="来源环境">
+          <el-select v-model="copySourceConfigurationId" placeholder="选择已有环境" style="width: 100%">
+            <el-option v-for="configuration in configurations" :key="configuration.id" :label="`${configuration.name} (${configuration.environment})`" :value="configuration.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer><el-button @click="copyConfigurationDialogVisible = false">取消</el-button><el-button type="primary" :disabled="!copySourceConfigurationId" @click="copyConfiguration">复制</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="runDetailVisible" title="运行详情" width="820px">
@@ -398,6 +409,8 @@ const runDetailVisible = ref(false)
 const configurationDialogVisible = ref(false)
 const configurationDialogTab = ref('connection')
 const editingConfiguration = ref(null)
+const copyConfigurationDialogVisible = ref(false)
+const copySourceConfigurationId = ref(null)
 const configurationVariables = ref({})
 const authenticationProfiles = ref({})
 const paymentConfiguration = ref({})
@@ -836,6 +849,41 @@ function openConfigurationDialog(configuration = null) {
   deviceCliEnabled.value = Boolean(deviceCliSettings.enabled)
   deviceCliBlacklist.value = Array.isArray(deviceCliSettings.command_blacklist) ? [...deviceCliSettings.command_blacklist] : [...defaultDeviceCliBlacklist]
   configurationDialogVisible.value = true
+}
+
+function copyConfiguration() {
+  const sourceConfiguration = configurations.value.find(configuration => configuration.id === copySourceConfigurationId.value)
+  if (!sourceConfiguration) return
+  const { id, project, variables, auth_profiles, payment_config, model_profiles, runtime_settings, ...formValues } = sourceConfiguration
+  editingConfiguration.value = null
+  configurationForm.value = {
+    ...formValues,
+    name: `${sourceConfiguration.name} 副本`,
+    environment: `${sourceConfiguration.environment}-copy`,
+    salt: sourceConfiguration.variables?.SALT || '',
+    is_default: false,
+    http_schema_enabled: Boolean(sourceConfiguration.runtime_settings?.test?.validation?.http_schema_enabled),
+    http_schema_failure_mode: sourceConfiguration.runtime_settings?.test?.validation?.http_schema_failure_mode || 'strict',
+    main_device_key: '',
+    backup_device_key: '',
+    has_main_device_key: false,
+    has_backup_device_key: false,
+  }
+  configurationVariables.value = cloneConfigurationValue(sourceConfiguration.variables)
+  authenticationProfiles.value = normalizeAuthenticationProfiles(sourceConfiguration.auth_profiles)
+  paymentConfiguration.value = normalizePaymentConfiguration(sourceConfiguration.payment_config)
+  modelProfiles.value = normalizeModelProfiles(sourceConfiguration.model_profiles)
+  runtimeSettings.value = normalizeRuntimeSettings(sourceConfiguration.runtime_settings)
+  selectedTestMarkers.value = parseTestMarkers(runtimeSettings.value.test.markers || configurationVariables.value.MARKERS)
+  if (!runtimeSettings.value.test.ignore_list.length) runtimeSettings.value.test.ignore_list = normalizeIgnoreList(configurationVariables.value.IGNORE_LIST)
+  applyLegacyDefaultRole(authenticationProfiles.value, configurationVariables.value.default_role)
+  const deviceCliSettings = sourceConfiguration.runtime_settings?.device_cli || {}
+  deviceCliEnabled.value = Boolean(deviceCliSettings.enabled)
+  deviceCliBlacklist.value = Array.isArray(deviceCliSettings.command_blacklist) ? [...deviceCliSettings.command_blacklist] : [...defaultDeviceCliBlacklist]
+  copyConfigurationDialogVisible.value = false
+  copySourceConfigurationId.value = null
+  configurationDialogTab.value = 'connection'
+  ElMessage.success('已复制环境配置，请修改后保存')
 }
 
 async function saveConfiguration() {
