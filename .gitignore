@@ -37,6 +37,8 @@ static_files/img/*
 !static_files/img/.gitkeep
 .cursor/
 .github/*
+!.github/workflows/
+!.github/workflows/*.yml
 
 # 忽略 allure-static 下的所有文件（运行时生成）
 expand/media/allure-static/*
