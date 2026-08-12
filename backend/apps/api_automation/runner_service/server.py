@@ -73,11 +73,12 @@ def _run_pytest_spec(spec: dict) -> dict:
         test_path = workdir / 'test_case.py'
         junit_path = workdir / 'junit.xml'
         allure_path = workdir / 'allure'
+        schema_warnings_path = workdir / 'schema-warnings.json'
         spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding='utf-8')
         test_path.write_text(_build_test_module(spec), encoding='utf-8')
         command = [
             'pytest', str(test_path), '--junitxml', str(junit_path),
-            '--alluredir', str(allure_path), '--disable-warnings', '--tb=short',
+            '--alluredir', str(allure_path), '--disable-warnings', '--tb=short', '-s',
         ]
         try:
             completed = subprocess.run(
@@ -90,37 +91,74 @@ def _run_pytest_spec(spec: dict) -> dict:
                     'PATH': os.environ.get('PATH', ''),
                     'PYTHONPATH': str(Path(__file__).parent),
                     'TESTHUB_SPEC_PATH': str(spec_path),
+                    'TESTHUB_SCHEMA_WARNINGS_PATH': str(schema_warnings_path),
                 },
             )
         except subprocess.TimeoutExpired as error:
             return {
                 'status': 'ERROR',
                 'duration_ms': (time.monotonic() - started) * 1000,
-                'stdout': (error.stdout or '')[-8000:],
-                'stderr': (error.stderr or '')[-8000:],
+                'stdout': _trim_log(error.stdout or ''),
+                'stderr': _trim_log(error.stderr or ''),
                 'error': 'pytest 执行超时。',
                 'artifacts': {},
             }
         artifact_id = uuid.uuid4().hex
         artifact_dir = ARTIFACT_ROOT / f'run-{run_id}' / artifact_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        schema_warnings = _load_schema_warnings(schema_warnings_path)
+        _attach_schema_warnings_to_allure_results(allure_path, schema_warnings)
         if junit_path.exists():
             shutil.copy2(junit_path, artifact_dir / 'junit.xml')
         if allure_path.exists():
             shutil.copytree(allure_path, artifact_dir / 'allure')
         test_counts = _junit_test_counts(junit_path)
         return {
-            'status': 'PASSED' if completed.returncode == 0 else 'FAILED',
+            'status': 'SCHEMA_WARNING' if completed.returncode == 0 and schema_warnings else 'PASSED' if completed.returncode == 0 else 'FAILED',
             'duration_ms': (time.monotonic() - started) * 1000,
-            'stdout': completed.stdout[-8000:],
-            'stderr': completed.stderr[-8000:],
+            'stdout': _trim_log(completed.stdout),
+            'stderr': _trim_log(completed.stderr),
             'test_counts': test_counts,
+            'schema_warnings': schema_warnings,
             'artifacts': {
                 'path': str(artifact_dir.relative_to(ARTIFACT_ROOT)),
                 'junit': f'{artifact_dir.relative_to(ARTIFACT_ROOT)}/junit.xml',
                 'allure_dir': f'{artifact_dir.relative_to(ARTIFACT_ROOT)}/allure',
             },
         }
+
+
+def _load_schema_warnings(path: Path) -> list[dict]:
+    try:
+        warnings = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [warning for warning in warnings if isinstance(warning, dict)] if isinstance(warnings, list) else []
+
+
+def _trim_log(output: str, limit: int = 24_000) -> str:
+    if len(output) <= limit:
+        return output
+    segment_length = limit // 2
+    omitted_count = len(output) - (segment_length * 2)
+    return f'{output[:segment_length]}\n\n... 已省略 {omitted_count} 个字符 ...\n\n{output[-segment_length:]}'
+
+
+def _attach_schema_warnings_to_allure_results(allure_path: Path, warnings: list[dict]) -> None:
+    if not warnings or not allure_path.is_dir():
+        return
+    source = f'{uuid.uuid4()}-attachment.json'
+    (allure_path / source).write_text(json.dumps(warnings, ensure_ascii=False, indent=2), encoding='utf-8')
+    attachment = {'name': 'schema-warnings.json', 'source': source, 'type': 'application/json'}
+    for result_path in allure_path.glob('*-result.json'):
+        try:
+            result = json.loads(result_path.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(result, dict):
+            continue
+        result.setdefault('attachments', []).append(attachment)
+        result_path.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
 
 
 def _junit_test_counts(junit_path: Path) -> dict[str, int]:
@@ -178,7 +216,7 @@ def _build_test_module(spec: dict) -> str:
         if not function_name.startswith('test_'):
             function_name = f'test_{function_name}'
         return (
-            'import json\n'
+            'import json\nimport os\nfrom pathlib import Path\n\nimport pytest\n'
             'from runtime import run_case\n\n'
             f'def {function_name}():\n'
             '    spec = json.loads(open("spec.json", encoding="utf-8").read())\n'

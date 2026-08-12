@@ -17,6 +17,22 @@ def _authorization_headers() -> dict[str, str]:
     return {'Authorization': f'Bearer {token}'} if token else {}
 
 
+def _default_role(configuration: ApiAutomationConfiguration) -> str:
+    profiles = configuration.auth_profiles if isinstance(configuration.auth_profiles, dict) else {}
+    configured_role = next(
+        (
+            role
+            for role, profile in profiles.items()
+            if isinstance(profile, dict) and profile.get('is_default_role')
+        ),
+        '',
+    )
+    if configured_role:
+        return configured_role
+    legacy_role = configuration.variables.get('default_role') if isinstance(configuration.variables, dict) else ''
+    return str(legacy_role or 'dealer')
+
+
 def execute_case(run: ApiAutomationRun, case: ApiAutomationCase, configuration: ApiAutomationConfiguration) -> dict[str, Any]:
     response = requests.post(
         f"{os.environ['API_AUTOMATION_RUNNER_URL'].rstrip('/')}/v1/runs",
@@ -40,7 +56,7 @@ def execute_case(run: ApiAutomationRun, case: ApiAutomationCase, configuration: 
                 'websocket_schemas': case.suite.project.websocket_schemas,
                 'data_endpoints': configuration.variables.get('data_endpoints', {}),
                 'model_images': configuration.variables.get('model_images', {}),
-                'default_role': configuration.variables.get('default_role', 'dealer'),
+                'default_role': _default_role(configuration),
             },
             'case': {
                 'id': case.id,

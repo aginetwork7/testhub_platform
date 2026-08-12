@@ -385,6 +385,7 @@ def execute_api_automation_suite(*args, **kwargs):
         'run_id': run.id,
         'total_cases': run.total_cases,
         'passed_cases': run.passed_cases,
+        'schema_warning_cases': run.schema_warning_cases,
         'failed_cases': run.failed_cases,
         'skipped_cases': run.skipped_cases,
     }
@@ -418,7 +419,8 @@ def _record_api_automation_notification(config, run, notification_enabled):
     status = 'DISPATCHED' if notification_enabled and channel != 'NONE' else 'SKIPPED'
     message = (
         f"运行 #{run.id} 已{'完成' if run.status == 'COMPLETED' else '失败'}："
-        f"通过 {run.passed_cases}，失败 {run.failed_cases}，跳过 {run.skipped_cases}。"
+        f"通过 {run.passed_cases}，Schema 告警 {run.schema_warning_cases}，"
+        f"失败 {run.failed_cases}，跳过 {run.skipped_cases}。"
     )
     ApiAutomationNotificationLog.objects.update_or_create(
         run=run,

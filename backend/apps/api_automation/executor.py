@@ -149,13 +149,17 @@ def _result_test_counts(result: dict[str, Any]) -> dict[str, int]:
     details = result.get('details') or {}
     counts = details.get('test_counts') if isinstance(details, dict) else None
     if isinstance(counts, dict) and all(isinstance(counts.get(name), int) for name in ('total', 'passed', 'failed', 'skipped')):
-        return counts
+        return {
+            **counts,
+            'schema_warnings': int(result['status'] == 'SCHEMA_WARNING'),
+        }
     status = result['status']
     return {
         'total': 1,
-        'passed': int(status == 'PASSED'),
+        'passed': int(status in {'PASSED', 'SCHEMA_WARNING'}),
         'failed': int(status in {'FAILED', 'ERROR'}),
         'skipped': int(status == 'SKIPPED'),
+        'schema_warnings': int(status == 'SCHEMA_WARNING'),
     }
 
 
@@ -168,7 +172,7 @@ def _update_run_progress(
         result['case_id']: result
         for result in run.case_results.values('case_id', 'status', 'details')
     }
-    totals = {'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0}
+    totals = {'total': 0, 'passed': 0, 'failed': 0, 'skipped': 0, 'schema_warnings': 0}
     for case in cases:
         result = result_by_case.get(case.id)
         if result is None:
@@ -182,7 +186,8 @@ def _update_run_progress(
     run.passed_cases = totals['passed']
     run.failed_cases = totals['failed']
     run.skipped_cases = totals['skipped']
-    run.save(update_fields=['total_cases', 'passed_cases', 'failed_cases', 'skipped_cases'])
+    run.schema_warning_cases = totals['schema_warnings']
+    run.save(update_fields=['total_cases', 'passed_cases', 'schema_warning_cases', 'failed_cases', 'skipped_cases'])
 
 
 def _selected_cases(run: ApiAutomationRun) -> QuerySet[ApiAutomationCase]:
@@ -291,6 +296,9 @@ def _execute_case_in_runner(
     schema_validation = _schema_validation_details(details['stdout'], details['stderr'])
     if schema_validation is not None:
         details['schema_validation'] = schema_validation
+    schema_warnings = result.get('schema_warnings', [])
+    if isinstance(schema_warnings, list) and schema_warnings:
+        details['schema_warnings'] = schema_warnings
     return {
         'status': result_status,
         'duration_ms': result.get('duration_ms'),

@@ -132,6 +132,7 @@
           <el-table-column prop="status" label="状态" width="110"><template #default="{ row }"><el-tag :type="runStatusType(row.status)">{{ row.status }}</el-tag></template></el-table-column>
           <el-table-column prop="total_cases" label="总数" width="80" />
           <el-table-column prop="passed_cases" label="通过" width="80" />
+          <el-table-column prop="schema_warning_cases" label="Schema 告警" width="110" />
           <el-table-column prop="failed_cases" label="失败" width="80" />
           <el-table-column prop="skipped_cases" label="跳过" width="80" />
           <el-table-column prop="created_at" label="创建时间" min-width="170"><template #default="{ row }">{{ formatDate(row.created_at) }}</template></el-table-column>
@@ -149,6 +150,7 @@
           <el-table-column label="报告" min-width="180"><template #default="{ row }"><el-link :href="runReportUrl(row)" target="_blank" type="primary">打开 Allure 报告</el-link></template></el-table-column>
           <el-table-column prop="status" label="执行结果" width="110"><template #default="{ row }"><el-tag :type="runStatusType(row.status)">{{ row.status }}</el-tag></template></el-table-column>
           <el-table-column prop="passed_cases" label="通过" width="80" />
+          <el-table-column prop="schema_warning_cases" label="Schema 告警" width="110" />
           <el-table-column prop="failed_cases" label="失败" width="80" />
           <el-table-column prop="skipped_cases" label="跳过" width="80" />
           <el-table-column prop="ended_at" label="生成时间" min-width="180"><template #default="{ row }">{{ formatDate(row.ended_at) }}</template></el-table-column>
@@ -222,36 +224,54 @@
     </template>
 
     <el-dialog v-model="configurationDialogVisible" :title="editingConfiguration ? '编辑环境配置' : '新建环境配置'" width="860px" align-center class="environment-config-dialog">
-      <div class="config-dialog-intro"><span>配置会作为 API 自动化运行环境使用，认证信息和运行设置会按当前项目隔离。</span></div>
       <el-tabs v-model="configurationDialogTab" class="config-tabs">
         <el-tab-pane label="基础连接" name="connection">
           <el-form class="config-form" label-position="top">
             <div class="config-grid">
               <el-form-item label="配置名称"><el-input v-model="configurationForm.name" placeholder="例如：test 环境" /></el-form-item>
+              <el-form-item label="环境标识"><el-input v-model="configurationForm.environment" placeholder="例如：test" /></el-form-item>
               <el-form-item label="请求超时（秒）"><el-input-number v-model="configurationForm.timeout_seconds" :min="1" :max="300" controls-position="right" /></el-form-item>
               <el-form-item class="full-row" label="HTTP 基础地址"><el-input v-model="configurationForm.base_url" placeholder="https://api.example.com" /></el-form-item>
               <el-form-item class="full-row" label="WebSocket 地址"><el-input v-model="configurationForm.websocket_url" placeholder="wss://api.example.com/ws" /></el-form-item>
             </div>
             <div class="config-switches">
               <div><strong>默认环境</strong><span>新建运行时优先选用此环境</span><el-switch v-model="configurationForm.is_default" /></div>
-              <div><strong>HTTP Schema 校验</strong><span>按 Swagger 契约校验 HTTP 响应</span><el-switch v-model="configurationForm.http_schema_enabled" /></div>
+              <div class="schema-validation-setting"><strong>HTTP Schema 校验</strong><span>按 Swagger 契约校验 HTTP 响应</span><el-switch v-model="configurationForm.http_schema_enabled" /><div v-if="configurationForm.http_schema_enabled" class="schema-failure-mode"><label>Schema 不一致处理</label><el-select v-model="configurationForm.http_schema_failure_mode" size="small" aria-label="Schema 不一致处理模式"><el-option label="严格失败" value="strict" /><el-option label="告警通过" value="warning" /></el-select></div></div>
             </div>
           </el-form>
         </el-tab-pane>
         <el-tab-pane label="认证与变量" name="authentication">
           <el-form class="config-form" label-position="top">
-            <el-form-item label="认证角色 JSON"><el-input v-model="authenticationProfiles" class="config-code-input" type="textarea" :rows="11" placeholder='{"dealer":{"username":"{{DEALER_EMAIL}}","password":"{{DEALER_PASSWORD}}"}}' /></el-form-item>
-            <el-form-item label="环境变量 JSON"><el-input v-model="configurationVariables" class="config-code-input" type="textarea" :rows="9" placeholder='{"default_role":"dealer"}' /></el-form-item>
+            <div class="form-section-header"><div><h3>认证角色</h3><span>每个角色在当前环境独立保存。</span></div><el-button :icon="Plus" plain @click="addAuthenticationProfile">添加角色</el-button></div>
+            <div class="credential-grid"><section v-for="(profile, role) in authenticationProfiles" :key="role" :class="['credential-card', { 'is-default-role': profile.is_default_role }]"><div class="credential-card-head"><div><strong>{{ role }}</strong><el-tag v-if="profile.is_default_role" type="success" size="small">默认角色</el-tag></div><div class="credential-actions"><el-button size="small" :disabled="profile.is_default_role" @click="setDefaultAuthenticationProfile(role)">设为默认角色</el-button><el-button :icon="Delete" circle plain type="danger" @click="removeAuthenticationProfile(role)" /></div></div><el-form-item label="用户名"><el-input v-model="profile.username" autocomplete="off" /></el-form-item><el-form-item label="密码"><el-input v-model="profile.password" type="password" show-password autocomplete="new-password" /></el-form-item><div class="credential-meta"><el-form-item label="角色标识"><el-input v-model="profile.role" /></el-form-item><el-form-item label="密码模式"><el-select v-model="profile.password_mode"><el-option label="网络 Argon2" value="argon2_network" /><el-option label="明文" value="plain" /></el-select></el-form-item></div></section></div>
+            <div class="form-section-header variable-heading"><div><h3>环境变量</h3><span>用于替换用例中的 <code v-pre>{{ VARIABLE_NAME }}</code> 引用。</span></div><el-button :icon="Plus" plain @click="addConfigurationVariable">添加变量</el-button></div>
+            <div class="variable-editor"><div v-for="variable in primitiveConfigurationVariables" :key="variable.key" class="variable-row"><el-input v-model="variable.key" disabled /><el-input v-model="configurationVariables[variable.key]" autocomplete="off" /><el-button :icon="Delete" circle plain type="danger" @click="removeConfigurationVariable(variable.key)" /></div><div v-for="variable in structuredConfigurationVariables" :key="variable" class="structured-variable"><span>{{ variable }}</span><el-tag type="info">保留结构化值</el-tag></div></div>
           </el-form>
         </el-tab-pane>
         <el-tab-pane label="服务集成" name="services">
           <el-form class="config-form" label-position="top">
-            <el-form-item label="支付配置 JSON"><el-input v-model="paymentConfiguration" class="config-code-input" type="textarea" :rows="10" placeholder='{"base_url":"{{STRIPE_MOCK_URL}}","headers":{"X-Admin-Token":"{{STRIPE_ADMIN_TOKEN}}"}}' /></el-form-item>
-            <el-form-item label="模型服务 JSON"><el-input v-model="modelProfiles" class="config-code-input" type="textarea" :rows="10" placeholder='{"qwen":{"url":"{{QWEN_URL}}","headers":{"Authorization":"Bearer {{QWEN_KEY}}"}}}' /></el-form-item>
+            <div class="form-section-header"><div><h3>支付服务</h3><span>仅用于支付类自动化场景。</span></div></div>
+            <div class="service-grid"><el-form-item label="Mock 服务地址"><el-input v-model="paymentConfiguration.mock_base_url" placeholder="https://mock.example.com" /></el-form-item><el-form-item label="Webhook 模式"><el-select v-model="paymentConfiguration.webhook_mode"><el-option label="Stripe CLI" value="stripe_cli" /><el-option label="无" value="none" /></el-select></el-form-item><el-form-item label="Stripe API Key"><el-input v-model="paymentConfiguration.stripe_api_key" type="password" show-password autocomplete="new-password" /></el-form-item><el-form-item label="管理员令牌"><el-input v-model="paymentConfiguration.headers['X-Admin-Token']" type="password" show-password autocomplete="new-password" /></el-form-item></div>
+            <div class="form-section-header model-heading"><div><h3>模型服务</h3><span>模型配置按服务名称独立保存。</span></div></div>
+            <div class="model-grid"><section v-for="(profile, name) in modelProfiles" :key="name" class="model-card"><strong>{{ name }}</strong><el-form-item label="服务地址"><el-input v-model="profile.url" placeholder="https://api.example.com/v1" /></el-form-item><el-form-item label="模型名称"><el-input v-model="profile.model" /></el-form-item></section></div>
           </el-form>
         </el-tab-pane>
         <el-tab-pane label="运行设置" name="runtime">
-          <el-form class="config-form" label-position="top"><el-form-item label="运行设置 JSON"><el-input v-model="runtimeSettings" class="config-code-input runtime-code-input" type="textarea" :rows="20" /></el-form-item></el-form>
+          <el-form class="config-form" label-position="top">
+            <div class="runtime-panels">
+              <section class="runtime-panel execution-panel"><div class="runtime-panel-head"><span>执行节奏</span></div><div class="runtime-strategy-grid"><el-form-item label="重试次数"><el-input-number v-model="runtimeSettings.api.retry" :min="0" :max="10" controls-position="right" /></el-form-item><el-form-item label="重试间隔（秒）"><el-input-number v-model="runtimeSettings.api.retry_interval" :min="0" :max="60" controls-position="right" /></el-form-item><el-form-item label="最大并发数"><el-input-number v-model="runtimeSettings.test.max_workers" :min="1" :max="100" controls-position="right" /></el-form-item><el-form-item label="并行执行"><el-switch v-model="runtimeSettings.test.parallel" /></el-form-item></div></section>
+              <section class="runtime-panel filter-panel"><div class="runtime-panel-head"><span>执行范围</span></div><div class="runtime-filter-grid"><el-form-item label="用例标记"><el-select v-model="selectedTestMarkers" multiple filterable allow-create default-first-option placeholder="选择或输入标记"><el-option v-for="marker in testMarkerOptions" :key="marker" :label="marker" :value="marker" /></el-select></el-form-item><el-form-item label="测试套件"><el-input v-model="runtimeSettings.test.suite" placeholder="可选路径" /></el-form-item><el-form-item label="忽略项"><el-select v-model="runtimeSettings.test.ignore_list" multiple filterable allow-create default-first-option placeholder="选择或输入需忽略的项"><el-option v-for="item in runtimeSettings.test.ignore_list" :key="item" :label="item" :value="item" /><template #footer><el-button :icon="Plus" text type="primary" @click.stop="addIgnoreItem">追加忽略项</el-button></template></el-select></el-form-item></div></section>
+              <section class="runtime-panel lifecycle-panel"><div class="runtime-panel-head"><span>超时与清理</span></div><div class="timeout-grid"><el-form-item label="用例超时（秒）"><el-input-number v-model="runtimeSettings.test.timeout.case" :min="1" :max="3600" controls-position="right" /></el-form-item><el-form-item label="函数超时（秒）"><el-input-number v-model="runtimeSettings.test.timeout.function" :min="1" :max="3600" controls-position="right" /></el-form-item><el-form-item label="前置超时（秒）"><el-input-number v-model="runtimeSettings.test.timeout.setup" :min="1" :max="3600" controls-position="right" /></el-form-item><el-form-item label="后置超时（秒）"><el-input-number v-model="runtimeSettings.test.timeout.teardown" :min="1" :max="3600" controls-position="right" /></el-form-item></div><div class="cleanup-options"><el-checkbox v-model="runtimeSettings.test.cleanup.enabled">启用自动清理</el-checkbox><el-checkbox v-model="runtimeSettings.test.cleanup.after_test">每个用例后清理</el-checkbox><el-checkbox v-model="runtimeSettings.test.cleanup.after_suite">每个套件后清理</el-checkbox><el-checkbox v-model="runtimeSettings.test.cleanup.after_session">会话结束后清理</el-checkbox></div></section>
+            </div>
+          </el-form>
+        </el-tab-pane>
+        <el-tab-pane label="设备信息" name="event-reporting">
+          <el-form class="config-form" label-position="top">
+            <div class="salt-row"><span>SALT</span><el-input v-model="configurationForm.salt" type="password" show-password autocomplete="new-password" placeholder="用于网络密码转换的固定 SALT" /></div>
+            <el-alert type="info" :closable="false" show-icon title="事件构造会使用当前环境保存的设备私钥进行真实上报。已配置的密钥不会回显；留空保存可保持原值。" />
+            <el-form-item label="主设备私钥（Base64 PEM）"><el-input v-model="configurationForm.main_device_key" class="config-code-input" type="textarea" :rows="5" autocomplete="off" placeholder="粘贴主设备私钥" /><el-tag v-if="configurationForm.has_main_device_key" type="success" size="small">已配置</el-tag></el-form-item>
+            <el-form-item label="备用设备私钥（Base64 PEM）"><el-input v-model="configurationForm.backup_device_key" class="config-code-input" type="textarea" :rows="5" autocomplete="off" placeholder="粘贴备用设备私钥" /><el-tag v-if="configurationForm.has_backup_device_key" type="success" size="small">已配置</el-tag></el-form-item>
+          </el-form>
         </el-tab-pane>
         <el-tab-pane label="设备 CLI" name="device-cli">
           <el-form class="config-form" label-position="top">
@@ -271,12 +291,12 @@
 
     <el-dialog v-model="runDetailVisible" title="运行详情" width="820px">
       <template v-if="selectedRun">
-        <el-descriptions :column="4" border><el-descriptions-item label="状态">{{ selectedRun.status }}</el-descriptions-item><el-descriptions-item label="通过">{{ selectedRun.passed_cases }}</el-descriptions-item><el-descriptions-item label="失败">{{ selectedRun.failed_cases }}</el-descriptions-item><el-descriptions-item label="跳过">{{ selectedRun.skipped_cases }}</el-descriptions-item></el-descriptions>
+        <el-descriptions :column="5" border><el-descriptions-item label="状态">{{ selectedRun.status }}</el-descriptions-item><el-descriptions-item label="通过">{{ selectedRun.passed_cases }}</el-descriptions-item><el-descriptions-item label="Schema 告警">{{ selectedRun.schema_warning_cases }}</el-descriptions-item><el-descriptions-item label="失败">{{ selectedRun.failed_cases }}</el-descriptions-item><el-descriptions-item label="跳过">{{ selectedRun.skipped_cases }}</el-descriptions-item></el-descriptions>
         <div class="run-progress"><div class="run-progress-head"><span>执行进度</span><span>{{ completedTestCount }} / {{ selectedRun.total_cases || 0 }}</span></div><el-progress :percentage="runProgressPercentage" :status="selectedRun.status === 'FAILED' ? 'exception' : selectedRun.status === 'COMPLETED' ? 'success' : undefined" /><p v-if="selectedRun.current_case_name && ['PENDING', 'RUNNING'].includes(selectedRun.status)" class="current-case">当前正在运行：{{ selectedRun.current_case_name }}</p></div>
       </template>
       <el-tabs v-if="selectedRun" class="report-tabs">
         <el-tab-pane label="用例结果">
-          <el-table :data="selectedRun.case_results" class="result-table"><el-table-column prop="case.name" label="用例" min-width="260" /><el-table-column prop="status" label="状态" width="100" /><el-table-column label="Schema" width="100"><template #default="{ row }"><el-tag v-if="row.details?.schema_validation" type="danger">失败</el-tag><span v-else>-</span></template></el-table-column><el-table-column prop="duration_ms" label="耗时(ms)" width="120" /><el-table-column label="Schema 错误" min-width="260" show-overflow-tooltip><template #default="{ row }"><span v-if="row.details?.schema_validation">{{ `${row.details.schema_validation.method} ${row.details.schema_validation.path} ${row.details.schema_validation.status} · ${row.details.schema_validation.field}: ${row.details.schema_validation.message}` }}</span><span v-else>-</span></template></el-table-column><el-table-column prop="error_message" label="错误信息" min-width="220" show-overflow-tooltip /></el-table>
+          <el-table :data="selectedRun.case_results" class="result-table"><el-table-column prop="case.name" label="用例" min-width="260" /><el-table-column prop="status" label="状态" width="150" /><el-table-column label="Schema" width="120"><template #default="{ row }"><el-tag v-if="row.status === 'SCHEMA_WARNING'" type="warning">告警</el-tag><el-tag v-else-if="row.details?.schema_validation" type="danger">失败</el-tag><span v-else>-</span></template></el-table-column><el-table-column prop="duration_ms" label="耗时(ms)" width="120" /><el-table-column label="Schema 明细" min-width="260" show-overflow-tooltip><template #default="{ row }"><span v-if="row.details?.schema_warnings?.length">{{ row.details.schema_warnings.map(item => `${item.operation} ${item.status_code} · ${item.json_path}: ${item.message}`).join('；') }}</span><span v-else-if="row.details?.schema_validation">{{ `${row.details.schema_validation.method} ${row.details.schema_validation.path} ${row.details.schema_validation.status} · ${row.details.schema_validation.field}: ${row.details.schema_validation.message}` }}</span><span v-else>-</span></template></el-table-column><el-table-column prop="error_message" label="错误信息" min-width="220" show-overflow-tooltip /></el-table>
         </el-tab-pane>
         <el-tab-pane label="Runner 日志">
           <el-collapse>
@@ -305,7 +325,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Delete, Edit, FolderOpened, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
@@ -378,16 +398,17 @@ const runDetailVisible = ref(false)
 const configurationDialogVisible = ref(false)
 const configurationDialogTab = ref('connection')
 const editingConfiguration = ref(null)
-const configurationVariables = ref('{}')
-const authenticationProfiles = ref('{}')
-const paymentConfiguration = ref('{}')
-const modelProfiles = ref('{}')
-const runtimeSettings = ref('{}')
+const configurationVariables = ref({})
+const authenticationProfiles = ref({})
+const paymentConfiguration = ref({})
+const modelProfiles = ref({})
+const runtimeSettings = ref({})
+const selectedTestMarkers = ref([])
 const deviceCliEnabled = ref(false)
 const deviceCliBlacklist = ref([])
 const loadingTemplate = ref(false)
 const initializingConfiguration = ref(false)
-const configurationForm = ref({ name: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false })
+const configurationForm = ref({ name: '', environment: 'custom', salt: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false })
 const defaultDeviceCliBlacklist = [
   '(^|\\s)(sudo\\s+)?rm\\s+(-[A-Za-z]*r[A-Za-z]*f?|--recursive)(\\s|$)',
   '(^|\\s)(sudo\\s+)?(mkfs(\\.|\\s|$)|wipefs(\\s|$)|fdisk(\\s|$)|parted(\\s|$))',
@@ -399,6 +420,13 @@ const defaultDeviceCliBlacklist = [
   '(^|\\s)(curl|wget)\\s+.*\\|\\s*(ba)?sh(\\s|$)',
   '(^|/)authorized_keys(\\s|$)|(^|/)sshd_config(\\s|$)',
 ]
+const authenticationVariableBindings = {
+  admin: ['ADMIN_NAME', 'ADMIN_PASSWORD'], distributors: ['DISTRIBUTORS_NAME', 'DISTRIBUTORS_PASSWORD'], dealer: ['DEALER_NAME', 'DEALER_PASSWORD'], customer: ['CUSTOMER_NAME', 'CUSTOMER_PASSWORD'], dealer_admin: ['DEALER_ADMIN_NAME', 'DEALER_ADMIN_PASSWORD'], dealer_rep: ['DEALER_REP_NAME', 'DEALER_REP_PASSWORD'], technician: ['TECHNICIAN_NAME', 'TECHNICIAN_PASSWORD'], scheduler: ['SCHEDULER_NAME', 'SCHEDULER_PASSWORD'], dispatcher: ['DISPATCHER_NAME', 'DISPATCHER_PASSWORD'], inspector: ['INSPECTOR_NAME', 'INSPECTOR_PASSWORD'], operator: ['OPERATOR_NAME', 'OPERATOR_PASSWORD'], org_admin: ['ORG_ADMIN_NAME', 'ORG_ADMIN_PASSWORD'], site_manager: ['SITE_MANAGER_NAME', 'SITE_MANAGER_PASSWORD'], dealerdingkang: ['DEALERDINGKANG_NAME', 'DEALERDINGKANG_PASSWORD'], customerdingkang: ['CUSTOMERDINGKANG_NAME', 'CUSTOMERDINGKANG_PASSWORD'],
+}
+const hiddenConfigurationVariableKeys = computed(() => new Set(['MAIN_KEY', 'BACKUP_KEY', 'SALT', 'ENV', 'MARKERS', 'IGNORE_LIST', 'default_role', ...Object.values(authenticationVariableBindings).flat()]))
+const primitiveConfigurationVariables = computed(() => Object.entries(configurationVariables.value).filter(([key, value]) => !hiddenConfigurationVariableKeys.value.has(key) && (value === null || ['string', 'number', 'boolean'].includes(typeof value))).map(([key]) => ({ key })))
+const structuredConfigurationVariables = computed(() => Object.entries(configurationVariables.value).filter(([key, value]) => !hiddenConfigurationVariableKeys.value.has(key) && value !== null && typeof value === 'object').map(([key]) => key))
+const testMarkerOptions = ['smoke', 'P0', 'P1', 'P2']
 const scheduleDialogVisible = ref(false)
 const scheduleForm = ref({ name: '', schedule_type: 'I', minutes: 60, cron: '', configuration_id: null, source_path_prefix: 'test_api', notify_on_success: false, notify_on_failure: true })
 const treeProps = { children: 'children', label: 'name' }
@@ -640,15 +668,170 @@ async function startVisibleCases() {
   await startSelectedCases()
 }
 
+const cloneConfigurationValue = value => value && typeof value === 'object' ? structuredClone(toRaw(value)) : {}
+
+function normalizeAuthenticationProfiles(value) {
+  const profiles = cloneConfigurationValue(value)
+  Object.entries(profiles).forEach(([role, profile]) => {
+    profiles[role] = {
+      ...(profile && typeof profile === 'object' ? profile : {}),
+      username: profile?.username || '',
+      password: profile?.password || '',
+      role: profile?.role || role.toUpperCase(),
+      password_mode: profile?.password_mode || 'argon2_network',
+      is_default_role: Boolean(profile?.is_default_role),
+    }
+  })
+  return profiles
+}
+
+function normalizePaymentConfiguration(value) {
+  const payment = cloneConfigurationValue(value)
+  payment.headers = payment.headers && typeof payment.headers === 'object' ? payment.headers : {}
+  payment.mock_base_url = payment.mock_base_url || ''
+  payment.stripe_api_key = payment.stripe_api_key || ''
+  payment.webhook_mode = payment.webhook_mode || 'stripe_cli'
+  return payment
+}
+
+function normalizeModelProfiles(value) {
+  const profiles = cloneConfigurationValue(value)
+  Object.entries(profiles).forEach(([name, profile]) => {
+    profiles[name] = {
+      ...(profile && typeof profile === 'object' ? profile : {}),
+      url: profile?.url || '',
+      model: profile?.model || '',
+    }
+  })
+  return profiles
+}
+
+function normalizeRuntimeSettings(value) {
+  const runtime = cloneConfigurationValue(value)
+  runtime.api = runtime.api && typeof runtime.api === 'object' ? runtime.api : {}
+  runtime.test = runtime.test && typeof runtime.test === 'object' ? runtime.test : {}
+  runtime.api.retry = Number.isFinite(runtime.api.retry) ? runtime.api.retry : 1
+  runtime.api.retry_interval = Number.isFinite(runtime.api.retry_interval) ? runtime.api.retry_interval : 1
+  runtime.test.markers = runtime.test.markers || ''
+  runtime.test.suite = runtime.test.suite || ''
+  runtime.test.max_workers = Number.isFinite(runtime.test.max_workers) ? runtime.test.max_workers : 1
+  runtime.test.parallel = Boolean(runtime.test.parallel)
+  runtime.test.ignore_list = normalizeIgnoreList(runtime.test.ignore_list)
+  runtime.test.timeout = runtime.test.timeout && typeof runtime.test.timeout === 'object' ? runtime.test.timeout : {}
+  runtime.test.timeout.case = Number.isFinite(runtime.test.timeout.case) ? runtime.test.timeout.case : 300
+  runtime.test.timeout.function = Number.isFinite(runtime.test.timeout.function) ? runtime.test.timeout.function : 60
+  runtime.test.timeout.setup = Number.isFinite(runtime.test.timeout.setup) ? runtime.test.timeout.setup : 180
+  runtime.test.timeout.teardown = Number.isFinite(runtime.test.timeout.teardown) ? runtime.test.timeout.teardown : 180
+  runtime.test.cleanup = runtime.test.cleanup && typeof runtime.test.cleanup === 'object' ? runtime.test.cleanup : {}
+  runtime.test.cleanup.enabled = runtime.test.cleanup.enabled !== false
+  runtime.test.cleanup.after_test = runtime.test.cleanup.after_test !== false
+  runtime.test.cleanup.after_suite = runtime.test.cleanup.after_suite !== false
+  runtime.test.cleanup.after_session = runtime.test.cleanup.after_session !== false
+  return runtime
+}
+
+function parseTestMarkers(value) {
+  return String(value || '').split(/\s+or\s+|,/i).map(marker => marker.trim()).filter(Boolean)
+}
+
+function normalizeIgnoreList(value) {
+  if (Array.isArray(value)) return value.flatMap(item => normalizeIgnoreList(item))
+  const raw = String(value || '').trim().replace(/^[-*]\s*/, '')
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    if (Array.isArray(parsed)) return parsed.flatMap(item => normalizeIgnoreList(item))
+  } catch (error) {
+    // Plain globs and comma-separated legacy values are handled below.
+  }
+  return raw.split(/[\n,]/).map(item => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+}
+
+function setDefaultAuthenticationProfile(role) {
+  Object.entries(authenticationProfiles.value).forEach(([name, profile]) => {
+    profile.is_default_role = name === role
+  })
+}
+
+function applyLegacyDefaultRole(profiles, legacyRole) {
+  if (Object.values(profiles).some(profile => profile.is_default_role) || !profiles[legacyRole]) return
+  profiles[legacyRole].is_default_role = true
+}
+
+function synchronizeLegacyVariables(variables, profiles, runtime, environment, salt) {
+  delete variables.MAIN_KEY
+  delete variables.BACKUP_KEY
+  delete variables.default_role
+  variables.ENV = environment
+  variables.SALT = salt || ''
+  variables.MARKERS = runtime.test.markers || ''
+  variables.IGNORE_LIST = JSON.stringify(runtime.test.ignore_list)
+  Object.entries(authenticationVariableBindings).forEach(([role, [usernameKey, passwordKey]]) => {
+    const profile = profiles[role]
+    if (!profile) return
+    variables[usernameKey] = profile.username || ''
+    variables[passwordKey] = profile.password || ''
+  })
+}
+
+async function addAuthenticationProfile() {
+  try {
+    const { value } = await ElMessageBox.prompt('输入角色名称，例如 qa_admin。', '添加认证角色', { inputPattern: /^[A-Za-z][A-Za-z0-9_]{1,49}$/, inputErrorMessage: '角色名称只能包含字母、数字和下划线。' })
+    const role = value.trim().toLowerCase()
+    if (authenticationProfiles.value[role]) {
+      ElMessage.warning('该认证角色已存在')
+      return
+    }
+    authenticationProfiles.value[role] = { username: '', password: '', role: role.toUpperCase(), password_mode: 'argon2_network' }
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('添加认证角色失败')
+  }
+}
+
+function removeAuthenticationProfile(role) {
+  delete authenticationProfiles.value[role]
+}
+
+async function addConfigurationVariable() {
+  try {
+    const { value } = await ElMessageBox.prompt('输入变量名称，例如 API_TOKEN。', '添加环境变量', { inputPattern: /^[A-Za-z_][A-Za-z0-9_]{0,99}$/, inputErrorMessage: '变量名称只能包含字母、数字和下划线。' })
+    const key = value.trim()
+    if (Object.prototype.hasOwnProperty.call(configurationVariables.value, key)) {
+      ElMessage.warning('该环境变量已存在')
+      return
+    }
+    configurationVariables.value[key] = ''
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('添加环境变量失败')
+  }
+}
+
+function removeConfigurationVariable(key) {
+  delete configurationVariables.value[key]
+}
+
+async function addIgnoreItem() {
+  try {
+    const { value } = await ElMessageBox.prompt('输入测试文件、目录或匹配模式，例如 tests/*_example.py。', '追加忽略项', { inputPattern: /\S+/, inputErrorMessage: '忽略项不能为空。' })
+    const items = normalizeIgnoreList(value)
+    runtimeSettings.value.test.ignore_list = [...new Set([...runtimeSettings.value.test.ignore_list, ...items])]
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error('追加忽略项失败')
+  }
+}
+
 function openConfigurationDialog(configuration = null) {
   editingConfiguration.value = configuration
   configurationDialogTab.value = 'connection'
-  configurationForm.value = configuration ? { ...configuration, http_schema_enabled: Boolean(configuration.runtime_settings?.test?.validation?.http_schema_enabled) } : { name: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false }
-  configurationVariables.value = JSON.stringify(configuration?.variables || {}, null, 2)
-  authenticationProfiles.value = JSON.stringify(configuration?.auth_profiles || {}, null, 2)
-  paymentConfiguration.value = JSON.stringify(configuration?.payment_config || {}, null, 2)
-  modelProfiles.value = JSON.stringify(configuration?.model_profiles || {}, null, 2)
-  runtimeSettings.value = JSON.stringify(configuration?.runtime_settings || {}, null, 2)
+  configurationForm.value = configuration ? { ...configuration, salt: configuration.variables?.SALT || '', http_schema_enabled: Boolean(configuration.runtime_settings?.test?.validation?.http_schema_enabled), http_schema_failure_mode: configuration.runtime_settings?.test?.validation?.http_schema_failure_mode || 'strict', main_device_key: '', backup_device_key: '' } : { name: '', environment: 'custom', salt: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false }
+  configurationVariables.value = cloneConfigurationValue(configuration?.variables)
+  authenticationProfiles.value = normalizeAuthenticationProfiles(configuration?.auth_profiles)
+  paymentConfiguration.value = normalizePaymentConfiguration(configuration?.payment_config)
+  modelProfiles.value = normalizeModelProfiles(configuration?.model_profiles)
+  runtimeSettings.value = normalizeRuntimeSettings(configuration?.runtime_settings)
+  selectedTestMarkers.value = parseTestMarkers(runtimeSettings.value.test.markers || configurationVariables.value.MARKERS)
+  if (!runtimeSettings.value.test.ignore_list.length) runtimeSettings.value.test.ignore_list = normalizeIgnoreList(configurationVariables.value.IGNORE_LIST)
+  applyLegacyDefaultRole(authenticationProfiles.value, configurationVariables.value.default_role)
   const deviceCliSettings = configuration?.runtime_settings?.device_cli || {}
   deviceCliEnabled.value = Boolean(deviceCliSettings.enabled)
   deviceCliBlacklist.value = Array.isArray(deviceCliSettings.command_blacklist) ? [...deviceCliSettings.command_blacklist] : [...defaultDeviceCliBlacklist]
@@ -656,29 +839,25 @@ function openConfigurationDialog(configuration = null) {
 }
 
 async function saveConfiguration() {
-  let variables
-  let authProfiles
-  let paymentConfig
-  let configuredModelProfiles
-  let configuredRuntimeSettings
-  try {
-    variables = JSON.parse(configurationVariables.value)
-    authProfiles = JSON.parse(authenticationProfiles.value)
-    paymentConfig = JSON.parse(paymentConfiguration.value)
-    configuredModelProfiles = JSON.parse(modelProfiles.value)
-    configuredRuntimeSettings = JSON.parse(runtimeSettings.value)
-  } catch (error) { ElMessage.error('高级配置必须是合法 JSON'); return }
+  const variables = cloneConfigurationValue(configurationVariables.value)
+  const authProfiles = normalizeAuthenticationProfiles(authenticationProfiles.value)
+  const paymentConfig = normalizePaymentConfiguration(paymentConfiguration.value)
+  const configuredModelProfiles = normalizeModelProfiles(modelProfiles.value)
+  const configuredRuntimeSettings = normalizeRuntimeSettings(runtimeSettings.value)
   saving.value = true
   try {
     configuredRuntimeSettings.test = configuredRuntimeSettings.test || {}
     configuredRuntimeSettings.test.validation = configuredRuntimeSettings.test.validation || {}
     configuredRuntimeSettings.test.validation.http_schema_enabled = configurationForm.value.http_schema_enabled
+    configuredRuntimeSettings.test.validation.http_schema_failure_mode = configurationForm.value.http_schema_failure_mode
+    configuredRuntimeSettings.test.markers = selectedTestMarkers.value.join(' or ')
     configuredRuntimeSettings.device_cli = {
       ...(configuredRuntimeSettings.device_cli || {}),
       enabled: deviceCliEnabled.value,
       command_blacklist: deviceCliBlacklist.value.map(item => item.trim()).filter(Boolean),
     }
-    const { http_schema_enabled, ...configurationValues } = configurationForm.value
+    synchronizeLegacyVariables(variables, authProfiles, configuredRuntimeSettings, configurationForm.value.environment, configurationForm.value.salt)
+    const { http_schema_enabled, http_schema_failure_mode, salt, main_device_key, backup_device_key, has_main_device_key, has_backup_device_key, ...configurationValues } = configurationForm.value
     const payload = {
       ...configurationValues,
       project: selectedProjectId.value,
@@ -688,6 +867,8 @@ async function saveConfiguration() {
       model_profiles: configuredModelProfiles,
       runtime_settings: configuredRuntimeSettings,
     }
+    if (main_device_key.trim()) payload.main_device_key = main_device_key.trim()
+    if (backup_device_key.trim()) payload.backup_device_key = backup_device_key.trim()
     if (editingConfiguration.value) await updateAutomationConfiguration(editingConfiguration.value.id, payload)
     else await createAutomationConfiguration(payload)
     configurationDialogVisible.value = false
@@ -707,16 +888,20 @@ async function loadConfigurationTemplate() {
     configurationForm.value.base_url = template.api?.base_url || ''
     configurationForm.value.websocket_url = template.websocket?.url || ''
     configurationForm.value.timeout_seconds = template.api?.timeout || 30
+    configurationForm.value.environment = template.env || 'custom'
+    configurationForm.value.salt = ''
     configurationForm.value.http_schema_enabled = Boolean(template.test?.validation?.http_schema_enabled)
-    configurationVariables.value = JSON.stringify({
+    configurationForm.value.http_schema_failure_mode = template.test?.validation?.http_schema_failure_mode || 'strict'
+    configurationVariables.value = {
       data_endpoints: {},
       model_images: {},
-      default_role: 'dealer',
-    }, null, 2)
-    authenticationProfiles.value = JSON.stringify(template.auth?.users || {}, null, 2)
-    paymentConfiguration.value = JSON.stringify(template.payment || {}, null, 2)
-    modelProfiles.value = JSON.stringify(template.models || {}, null, 2)
-    runtimeSettings.value = JSON.stringify(template, null, 2)
+    }
+    authenticationProfiles.value = normalizeAuthenticationProfiles(template.auth?.users)
+    applyLegacyDefaultRole(authenticationProfiles.value, String(template.api?.roles?.default_role || 'dealer').toLowerCase())
+    paymentConfiguration.value = normalizePaymentConfiguration(template.payment)
+    modelProfiles.value = normalizeModelProfiles(template.models)
+    runtimeSettings.value = normalizeRuntimeSettings(template)
+    selectedTestMarkers.value = parseTestMarkers(runtimeSettings.value.test.markers)
     deviceCliEnabled.value = false
     deviceCliBlacklist.value = [...defaultDeviceCliBlacklist]
     ElMessage.success('已加载测试配置模板，请补充变量引用后保存')
@@ -913,8 +1098,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .workspace { padding: 24px; min-height: 100%; background: #f4f7fb; }
-.config-dialog-intro { margin: -4px 0 16px; padding: 10px 12px; border-left: 3px solid #1677ff; background: #f0f7ff; color: #526170; font-size: 13px; line-height: 1.6; }.config-tabs :deep(.el-tabs__header) { margin-bottom: 18px; }.config-form { padding: 0 2px; }.config-grid { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 0 16px; }.config-grid .full-row { grid-column: 1 / -1; }.config-form :deep(.el-form-item__label) { padding-bottom: 6px; color: #344054; font-size: 13px; font-weight: 600; }.config-form :deep(.el-input-number) { width: 100%; }.config-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }.config-switches > div { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; padding: 14px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f8fafc; }.config-switches strong { color: #344054; font-size: 13px; }.config-switches span { color: #667085; font-size: 12px; }.config-switches :deep(.el-switch) { grid-column: 2; grid-row: 1 / span 2; }.config-code-input :deep(.el-textarea__inner) { min-height: 160px; border-color: #d0d5dd; background: #101828; color: #d0d5dd; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.6; }.runtime-code-input :deep(.el-textarea__inner) { min-height: 420px; }.config-dialog-footer { display: flex; align-items: center; justify-content: space-between; width: 100%; }.config-dialog-footer > div { display: flex; gap: 8px; }
-.device-cli-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 14px; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }.device-cli-switch strong { display: block; color: #344054; font-size: 13px; }.device-cli-switch span { display: block; max-width: 580px; margin-top: 4px; color: #667085; font-size: 12px; line-height: 1.5; }.blacklist-editor { display: grid; gap: 8px; width: 100%; }.blacklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.config-dialog-intro { margin: -4px 0 16px; padding: 10px 12px; border-left: 3px solid #1677ff; background: #f0f7ff; color: #526170; font-size: 13px; line-height: 1.6; }.config-tabs :deep(.el-tabs__header) { margin-bottom: 18px; }.config-form { padding: 0 2px; }.config-grid { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 0 16px; }.config-grid .full-row { grid-column: 1 / -1; }.config-form :deep(.el-form-item__label) { padding-bottom: 6px; color: #344054; font-size: 13px; font-weight: 600; }.config-form :deep(.el-input-number) { width: 100%; }.config-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }.config-switches > div { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; padding: 14px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f8fafc; }.config-switches strong { color: #344054; font-size: 13px; }.config-switches span { color: #667085; font-size: 12px; }.config-switches :deep(.el-switch) { grid-column: 2; grid-row: 1 / span 2; }.schema-failure-mode { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid #e4e7ec; }.schema-failure-mode label { color: #475467; font-size: 12px; font-weight: 600; }.schema-failure-mode :deep(.el-select) { width: 140px; }.config-code-input :deep(.el-textarea__inner) { min-height: 160px; border-color: #d0d5dd; background: #101828; color: #d0d5dd; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.6; }.runtime-code-input :deep(.el-textarea__inner) { min-height: 420px; }.config-dialog-footer { display: flex; align-items: center; justify-content: space-between; width: 100%; }.config-dialog-footer > div { display: flex; gap: 8px; }
+.environment-config-dialog :deep(.el-dialog__body) { max-height: min(72vh, 720px); overflow: auto; }.config-tabs :deep(.el-tabs__header) { padding-bottom: 8px; border-bottom: 1px solid #e4e7ec; }.config-tabs :deep(.el-tabs__item) { height: 40px; padding: 0 14px; color: #667085; font-weight: 600; }.config-tabs :deep(.el-tabs__item.is-active) { color: #1677ff; }.config-grid { grid-template-columns: minmax(0, 1fr) 180px 150px; }.form-section-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 2px 0 16px; padding-bottom: 12px; border-bottom: 1px solid #eaecf0; }.form-section-header h3 { margin: 0; color: #1d2939; font-size: 15px; }.form-section-header span { display: block; margin-top: 4px; color: #667085; font-size: 12px; }.form-section-header code { color: #0f766e; font-family: "SFMono-Regular", Consolas, monospace; }.variable-heading, .model-heading { margin-top: 24px; }.credential-grid, .model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }.credential-card, .model-card { padding: 14px; border: 1px solid #dbe6f0; border-radius: 6px; background: #fbfdff; }.credential-card.is-default-role { border-color: #8ad5b0; background: #effaf3; }.credential-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; color: #175cd3; }.credential-card-head > div:first-child { display: flex; align-items: center; gap: 8px; }.credential-actions { display: flex; align-items: center; gap: 6px; }.credential-card-head strong, .model-card > strong { font-size: 13px; }.credential-card :deep(.el-form-item), .model-card :deep(.el-form-item) { margin-bottom: 10px; }.credential-card :deep(.el-form-item:last-child), .model-card :deep(.el-form-item:last-child) { margin-bottom: 0; }.credential-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }.service-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 300px)); gap: 0 16px; justify-content: start; }.runtime-strategy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 150px)); gap: 0 14px; justify-content: start; }.runtime-filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 210px)); gap: 0 14px; justify-content: start; }.timeout-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 150px)); gap: 0 14px; justify-content: start; }.runtime-strategy-grid :deep(.el-input-number), .runtime-filter-grid :deep(.el-select), .runtime-filter-grid :deep(.el-input), .timeout-grid :deep(.el-input-number) { width: 100%; }.global-salt-field { max-width: 460px; }.variable-editor { display: grid; gap: 8px; }.variable-row { display: grid; grid-template-columns: minmax(130px, .45fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }.structured-variable { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 1px dashed #d0d5dd; border-radius: 4px; color: #667085; font-size: 12px; }.service-grid :deep(.el-select), .timeout-grid :deep(.el-input-number) { width: 100%; }.cleanup-options { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 12px; border: 1px solid #dbe6f0; border-radius: 6px; background: #f6fbff; }.config-dialog-footer { position: static; margin: 0; padding: 0; border: 0; background: transparent; }
+.runtime-panels { display: grid; gap: 20px; padding-top: 8px; }.runtime-panel { position: relative; padding: 22px 16px 14px; border: 1px solid #dbe6f0; border-radius: 6px; }.runtime-panel-title { position: absolute; top: -12px; left: 50%; padding: 0 12px; color: #1d2939; font-size: 14px; font-weight: 700; line-height: 24px; transform: translateX(-50%); }.execution-panel { border-left: 3px solid #3b82f6; background: #fbfdff; }.execution-panel .runtime-panel-title { background: #fbfdff; }.filter-panel { border-left: 3px solid #0f9f8b; background: #f7fdfa; }.filter-panel .runtime-panel-title { background: #f7fdfa; }.lifecycle-panel { border-left: 3px solid #e6a23c; background: #fffdf8; }.lifecycle-panel .runtime-panel-title { background: #fffdf8; }.runtime-panel :deep(.el-form-item) { margin-bottom: 0; }.runtime-strategy-grid, .runtime-filter-grid, .timeout-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 12px; }.runtime-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }.runtime-panel :deep(.el-input-number), .runtime-panel :deep(.el-select), .runtime-panel :deep(.el-input) { width: 100%; }.cleanup-options { margin-top: 12px; background: #fff; }.salt-row { display: grid; grid-template-columns: 72px minmax(0, 420px); align-items: center; gap: 12px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid #dbe6f0; border-radius: 6px; background: #f8fafc; }.salt-row > span { color: #344054; font-size: 13px; font-weight: 700; }.device-cli-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 14px; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }.device-cli-switch strong { display: block; color: #344054; font-size: 13px; }.device-cli-switch span { display: block; max-width: 580px; margin-top: 4px; color: #667085; font-size: 12px; line-height: 1.5; }.blacklist-editor { display: grid; gap: 8px; width: 100%; }.blacklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.runtime-panels { gap: 14px; padding-top: 0; }.runtime-panel { position: static; padding: 16px; }.runtime-panel-title { display: none; }.runtime-panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid #dbe6f0; }.runtime-panel-head span { color: #1d2939; font-size: 18px; font-weight: 800; }.execution-panel .runtime-panel-head span { color: #1d4ed8; }.filter-panel .runtime-panel-head span { color: #0f766e; }.lifecycle-panel .runtime-panel-head span { color: #b45309; }.runtime-panel :deep(.el-form-item__label) { color: #526170; font-size: 12px; font-weight: 600; }
 .run-progress { margin-top: 16px; }
 .run-progress-head { display: flex; justify-content: space-between; margin-bottom: 8px; color: #475467; font-size: 13px; }
 .current-case { margin: 8px 0 0; color: #475467; font-size: 13px; }

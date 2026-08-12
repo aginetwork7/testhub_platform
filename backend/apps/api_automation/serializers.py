@@ -1,7 +1,11 @@
 from rest_framework import serializers
 from urllib.parse import urlparse
+import base64
 import json
 from pathlib import Path
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 
 from .models import (
     ApiAutomationCase,
@@ -118,7 +122,10 @@ class ApiAutomationNotificationLogSerializer(serializers.ModelSerializer):
             return instance.message
         run = instance.run
         outcome = '完成' if run.status == 'COMPLETED' else '失败'
-        return f'运行 #{run.id} 已{outcome}：通过 {run.passed_cases}，失败 {run.failed_cases}，跳过 {run.skipped_cases}。'
+        return (
+            f'运行 #{run.id} 已{outcome}：通过 {run.passed_cases}，Schema 告警 {run.schema_warning_cases}，'
+            f'失败 {run.failed_cases}，跳过 {run.skipped_cases}。'
+        )
 
     class Meta:
         model = ApiAutomationNotificationLog
@@ -127,6 +134,10 @@ class ApiAutomationNotificationLogSerializer(serializers.ModelSerializer):
 
 class ApiAutomationConfigurationSerializer(serializers.ModelSerializer):
     websocket_url = serializers.CharField(allow_blank=True, required=False)
+    main_device_key = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=True)
+    backup_device_key = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=True)
+    has_main_device_key = serializers.SerializerMethodField(read_only=True)
+    has_backup_device_key = serializers.SerializerMethodField(read_only=True)
 
     def validate_websocket_url(self, value):
         if not value:
@@ -136,9 +147,50 @@ class ApiAutomationConfigurationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('请输入合法的 HTTP、HTTPS、WebSocket 或 Secure WebSocket 地址。')
         return value
 
+    def validate_main_device_key(self, value):
+        return self._validate_device_key(value)
+
+    def validate_backup_device_key(self, value):
+        return self._validate_device_key(value)
+
+    @staticmethod
+    def _validate_device_key(value):
+        if not value:
+            return value
+        try:
+            key_bytes = base64.b64decode(value, validate=True)
+            serialization.load_pem_private_key(key_bytes, password=None, backend=default_backend())
+        except (TypeError, ValueError) as error:
+            raise serializers.ValidationError('设备私钥必须是有效的 Base64 编码 PEM 私钥。') from error
+        return value
+
+    def get_has_main_device_key(self, instance):
+        return bool(instance.get_event_device_key('main'))
+
+    def get_has_backup_device_key(self, instance):
+        return bool(instance.get_event_device_key('backup'))
+
+    def create(self, validated_data):
+        main_device_key = validated_data.pop('main_device_key', None)
+        backup_device_key = validated_data.pop('backup_device_key', None)
+        instance = super().create(validated_data)
+        if main_device_key or backup_device_key:
+            instance.set_event_device_keys(main_device_key, backup_device_key)
+            instance.save(update_fields=['event_device_keys_encrypted'])
+        return instance
+
+    def update(self, instance, validated_data):
+        main_device_key = validated_data.pop('main_device_key', None)
+        backup_device_key = validated_data.pop('backup_device_key', None)
+        instance = super().update(instance, validated_data)
+        if main_device_key or backup_device_key:
+            instance.set_event_device_keys(main_device_key, backup_device_key)
+            instance.save(update_fields=['event_device_keys_encrypted'])
+        return instance
+
     class Meta:
         model = ApiAutomationConfiguration
-        fields = '__all__'
+        exclude = ['event_device_keys_encrypted']
         read_only_fields = ['created_by']
 
 
@@ -157,6 +209,6 @@ class ApiAutomationRunSerializer(serializers.ModelSerializer):
         model = ApiAutomationRun
         fields = '__all__'
         read_only_fields = [
-            'status', 'total_cases', 'passed_cases', 'failed_cases', 'skipped_cases',
+            'status', 'total_cases', 'passed_cases', 'schema_warning_cases', 'failed_cases', 'skipped_cases',
             'started_at', 'ended_at', 'log_content', 'report_path', 'executed_by',
         ]

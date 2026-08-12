@@ -1,3 +1,8 @@
+import json
+from base64 import urlsafe_b64encode
+from hashlib import sha256
+
+from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import models
 
@@ -260,6 +265,7 @@ class ApiAutomationConfiguration(models.Model):
     payment_config = models.JSONField(default=dict, verbose_name='支付服务配置')
     model_profiles = models.JSONField(default=dict, verbose_name='模型服务配置')
     runtime_settings = models.JSONField(default=dict, verbose_name='测试运行设置')
+    event_device_keys_encrypted = models.TextField(blank=True, default='', verbose_name='事件设备私钥密文')
     timeout_seconds = models.PositiveIntegerField(default=30, verbose_name='请求超时秒数')
     max_workers = models.PositiveIntegerField(default=1, verbose_name='并发数')
     is_default = models.BooleanField(default=False, verbose_name='是否默认配置')
@@ -276,6 +282,39 @@ class ApiAutomationConfiguration(models.Model):
         ]
         verbose_name = 'API自动化配置'
         verbose_name_plural = 'API自动化配置'
+
+    @staticmethod
+    def _event_device_key_cipher() -> Fernet:
+        encryption_key = urlsafe_b64encode(sha256(settings.SECRET_KEY.encode('utf-8')).digest())
+        return Fernet(encryption_key)
+
+    def get_event_device_key(self, device: str) -> str:
+        if device not in {'main', 'backup'} or not self.event_device_keys_encrypted:
+            return ''
+        try:
+            payload = self._event_device_key_cipher().decrypt(
+                self.event_device_keys_encrypted.encode('utf-8')
+            )
+            device_keys = json.loads(payload.decode('utf-8'))
+        except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError):
+            return ''
+        return str(device_keys.get(device, '')) if isinstance(device_keys, dict) else ''
+
+    def set_event_device_keys(
+        self,
+        main_device_key: str | None = None,
+        backup_device_key: str | None = None,
+    ) -> None:
+        device_keys = {
+            'main': self.get_event_device_key('main'),
+            'backup': self.get_event_device_key('backup'),
+        }
+        if main_device_key is not None:
+            device_keys['main'] = main_device_key.strip()
+        if backup_device_key is not None:
+            device_keys['backup'] = backup_device_key.strip()
+        serialized = json.dumps(device_keys, ensure_ascii=False).encode('utf-8')
+        self.event_device_keys_encrypted = self._event_device_key_cipher().encrypt(serialized).decode('utf-8')
 
 
 class ApiAutomationRun(models.Model):
@@ -300,6 +339,7 @@ class ApiAutomationRun(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', verbose_name='执行状态')
     total_cases = models.PositiveIntegerField(default=0, verbose_name='用例总数')
     passed_cases = models.PositiveIntegerField(default=0, verbose_name='通过数')
+    schema_warning_cases = models.PositiveIntegerField(default=0, verbose_name='Schema告警数')
     failed_cases = models.PositiveIntegerField(default=0, verbose_name='失败数')
     skipped_cases = models.PositiveIntegerField(default=0, verbose_name='跳过数')
     current_case_name = models.CharField(max_length=255, blank=True, verbose_name='当前执行用例')
@@ -355,6 +395,7 @@ class ApiAutomationNotificationLog(models.Model):
 class ApiAutomationCaseResult(models.Model):
     RESULT_STATUS_CHOICES = [
         ('PASSED', '通过'),
+        ('SCHEMA_WARNING', '通过（Schema告警）'),
         ('FAILED', '失败'),
         ('SKIPPED', '跳过'),
         ('ERROR', '错误'),

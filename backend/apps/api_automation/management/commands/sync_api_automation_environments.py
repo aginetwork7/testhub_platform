@@ -47,13 +47,15 @@ class Command(BaseCommand):
         for environment, settings in environments.items():
             env_values = self._load_env_values(env_directory, environment)
             runtime_settings = settings.copy()
+            default_role = settings.get('api', {}).get('roles', {}).get('default_role', 'dealer').lower()
             variables = {key: value for key, value in env_values.items() if value is not None}
             variables.update({
                 'data_endpoints': variables.get('DATA_ENDPOINTS', {}),
                 'model_images': variables.get('MODEL_IMAGES', {}),
-                'default_role': settings.get('api', {}).get('roles', {}).get('default_role', 'dealer').lower(),
             })
-            auth_profiles = self._auth_profiles(settings, env_values)
+            variables.pop('default_role', None)
+            excluded_roles = {'dealerdingkang', 'customerdingkang'} if environment == 'test-2' else set()
+            auth_profiles = self._auth_profiles(settings, env_values, default_role, excluded_roles)
             payment_config = self._payment_config(settings)
             model_profiles = settings.get('models', {})
             config_instance, created = ApiAutomationConfiguration.objects.update_or_create(
@@ -74,6 +76,7 @@ class Command(BaseCommand):
                     'created_by': owner,
                 },
             )
+            self._migrate_device_keys(config_instance, env_values)
             self.stdout.write(f"{'创建' if created else '更新'}环境: {config_instance.environment}")
         default_environment = next((name for name, value in environments.items() if value.get('env') == name), None)
         if default_environment:
@@ -92,7 +95,13 @@ class Command(BaseCommand):
                 merged[key] = value
         return merged
 
-    def _auth_profiles(self, settings: dict[str, Any], env_values: dict[str, str | None]) -> dict[str, Any]:
+    def _auth_profiles(
+        self,
+        settings: dict[str, Any],
+        env_values: dict[str, str | None],
+        default_role: str,
+        excluded_roles: set[str],
+    ) -> dict[str, Any]:
         auth_config = settings.get('auth', {})
         api_auth = settings.get('api', {}).get('auth', {})
         environment_mapping = {
@@ -116,6 +125,8 @@ class Command(BaseCommand):
         for name, user in auth_config.get('users', {}).items():
             if not isinstance(user, dict):
                 continue
+            if name.lower() in excluded_roles:
+                continue
             username_key, password_key = environment_mapping.get(name.lower(), ('', ''))
             profiles[name.lower()] = {
                 'username': env_values.get(username_key) or user.get('username', ''),
@@ -128,6 +139,7 @@ class Command(BaseCommand):
                 'token_prefix': api_auth.get('header_prefix', 'Bearer '),
                 'apply_token_prefix': False,
                 'organization_path': 'user.organization.id',
+                'is_default_role': name.lower() == default_role,
             }
         return profiles
 
@@ -139,6 +151,21 @@ class Command(BaseCommand):
             'stripe_api_key': stripe.get('api_key', ''),
             'webhook_mode': 'stripe_cli',
         }
+
+    def _migrate_device_keys(
+        self,
+        configuration: ApiAutomationConfiguration,
+        env_values: dict[str, str | None],
+    ) -> None:
+        main_device_key = env_values.get('MAIN_KEY') or ''
+        backup_device_key = env_values.get('BACKUP_KEY') or ''
+        if not main_device_key and not backup_device_key:
+            return
+        configuration.set_event_device_keys(
+            main_device_key=main_device_key if main_device_key and not configuration.get_event_device_key('main') else None,
+            backup_device_key=backup_device_key if backup_device_key and not configuration.get_event_device_key('backup') else None,
+        )
+        configuration.save(update_fields=['event_device_keys_encrypted'])
 
     def _resolve_owner(self, owner_identifier: str | None, project: ApiAutomationProject):
         if not owner_identifier:
