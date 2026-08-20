@@ -5,7 +5,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
 from apps.ai_testing.models import AIExecutionRecord, AiProject
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.api_automation.models import ApiAutomationConfiguration
 from apps.ai_testing.ai_testing import BrowserAgent, HermesAgent, PyUICompatAgent, get_agent_class
 from apps.unified_projects.models import MetaProject
 from apps.users.models import User
@@ -177,14 +177,11 @@ class AIAgentRoutingTests(SimpleTestCase):
 class AIExecutionRecordViewSetQuerysetTests(TestCase):
     def test_resolve_environment_uses_longest_natural_language_alias(self) -> None:
         user = User.objects.create_user(username='planner_owner', password='pass123')
-        api_project = ApiAutomationProject.objects.create(name='Planner API', owner=user)
         test_configuration = ApiAutomationConfiguration.objects.create(
-            project=api_project,
             name='test 环境',
             environment='test',
         )
         test_two_configuration = ApiAutomationConfiguration.objects.create(
-            project=api_project,
             name='test-2 环境',
             environment='test-2',
         )
@@ -199,9 +196,7 @@ class AIExecutionRecordViewSetQuerysetTests(TestCase):
 
     def test_resolve_environment_uses_default_when_task_has_no_environment(self) -> None:
         user = User.objects.create_user(username='default_env_owner', password='pass123')
-        api_project = ApiAutomationProject.objects.create(name='Default API', owner=user)
         default_configuration = ApiAutomationConfiguration.objects.create(
-            project=api_project,
             name='test-2 环境',
             environment='test-2',
             is_default=True,

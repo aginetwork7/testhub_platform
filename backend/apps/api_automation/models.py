@@ -250,12 +250,6 @@ class ApiAutomationStep(models.Model):
 
 
 class ApiAutomationConfiguration(models.Model):
-    project = models.ForeignKey(
-        ApiAutomationProject,
-        on_delete=models.CASCADE,
-        related_name='configurations',
-        verbose_name='所属项目',
-    )
     name = models.CharField(max_length=200, verbose_name='配置名称')
     environment = models.CharField(max_length=50, default='custom', verbose_name='运行环境')
     base_url = models.URLField(blank=True, verbose_name='HTTP基础地址')
@@ -277,10 +271,6 @@ class ApiAutomationConfiguration(models.Model):
     class Meta:
         db_table = 'api_automation_configurations'
         ordering = ['-is_default', 'name']
-        constraints = [
-            models.UniqueConstraint(fields=['project', 'name'], name='unique_api_automation_configuration_name'),
-            models.UniqueConstraint(fields=['project', 'environment'], name='unique_api_automation_configuration_environment'),
-        ]
         verbose_name = 'API自动化配置'
         verbose_name_plural = 'API自动化配置'
 

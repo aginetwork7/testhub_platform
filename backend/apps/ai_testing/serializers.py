@@ -113,9 +113,8 @@ class AICaseSerializer(serializers.Serializer):
 
             user = self.context['request'].user
             configuration = ApiAutomationConfiguration.objects.filter(
-                models.Q(project__owner=user) | models.Q(project__members=user),
                 id=configuration_id,
-            ).distinct().first()
+            ).first()
             if configuration is None:
                 raise serializers.ValidationError({'api_automation_configuration_id': '环境不存在或无访问权限'})
 

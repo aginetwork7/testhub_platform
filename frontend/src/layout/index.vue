@@ -315,6 +315,10 @@
               <el-icon><Folder /></el-icon>
               <span>{{ $t('menu.projectManagementCenter') }}</span>
             </el-menu-item>
+            <el-menu-item index="/configuration/env-setting">
+              <el-icon><Connection /></el-icon>
+              <span>{{ $t('menu.apiAutomationEnvironment') }}</span>
+            </el-menu-item>
             <el-sub-menu index="ai-case-generation">
               <template #title>
                 <el-icon><MagicStick /></el-icon>
@@ -333,22 +337,6 @@
                 <span>{{ $t('menu.generationConfig') }}</span>
               </el-menu-item>
             </el-sub-menu>
-            <el-menu-item index="/configuration/knowledge-base">
-              <el-icon><FolderOpened /></el-icon>
-              <span>{{ $t('menu.knowledgeBaseConfig') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/configuration/ui-setting">
-              <el-icon><Monitor /></el-icon>
-              <span>{{ $t('menu.uiEnvConfig') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/configuration/env-setting">
-              <el-icon><Connection /></el-icon>
-              <span>{{ $t('menu.apiAutomationEnvironment') }}</span>
-            </el-menu-item>
-            <el-menu-item index="/configuration/app-setting">
-              <el-icon><Cellphone /></el-icon>
-              <span>{{ $t('menu.appEnvConfig') }}</span>
-            </el-menu-item>
             <el-sub-menu index="ai-intelligent-config">
               <template #title>
                 <el-icon><Cpu /></el-icon>
@@ -364,11 +352,23 @@
             <el-sub-menu index="ai-agent-config">
               <template #title>
                 <el-icon><Cpu /></el-icon>
-                <span>AI Agent配置</span>
+                <span>AI智能体配置</span>
               </template>
               <el-menu-item index="/configuration/ai-agent/config-model">模型配置</el-menu-item>
               <el-menu-item index="/configuration/ai-agent/config-prompt">提示词配置</el-menu-item>
             </el-sub-menu>
+            <el-menu-item index="/configuration/app-setting">
+              <el-icon><Cellphone /></el-icon>
+              <span>{{ $t('menu.appEnvConfig') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/configuration/ui-setting">
+              <el-icon><Monitor /></el-icon>
+              <span>{{ $t('menu.uiEnvConfig') }}</span>
+            </el-menu-item>
+            <el-menu-item index="/configuration/knowledge-base">
+              <el-icon><FolderOpened /></el-icon>
+              <span>{{ $t('menu.knowledgeBaseConfig') }}</span>
+            </el-menu-item>
             <el-menu-item index="/configuration/notify">
               <el-icon><Timer /></el-icon>
               <span>{{ $t('menu.scheduledTaskConfig') }}</span>
@@ -643,7 +643,7 @@ const breadcrumbTitle = computed(() => {
     '/configuration/app-setting': t('menu.appEnvConfig'),
     '/configuration/ai-test/config-model': t('menu.aiModeModelConfig'),
     '/configuration/ai-test/config-prompt': t('menu.aiModePromptConfig'),
-    '/configuration/ai-agent/config-model': 'AI Agent配置',
+    '/configuration/ai-agent/config-model': 'AI智能体配置',
     '/configuration/notify': t('menu.scheduledTaskConfig'),
 
     '/profile': t('nav.profile')

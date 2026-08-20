@@ -369,7 +369,7 @@ def execute_api_automation_suite(*args, **kwargs):
     configuration = None
     configuration_id = task_config.get('configuration_id')
     if configuration_id:
-        configuration = ApiAutomationConfiguration.objects.get(id=configuration_id, project=project)
+        configuration = ApiAutomationConfiguration.objects.get(id=configuration_id)
 
     run = ApiAutomationRun.objects.create(
         project=project,
