@@ -170,6 +170,11 @@ class ApiAutomationConfigurationSerializer(serializers.ModelSerializer):
     def get_has_backup_device_key(self, instance):
         return bool(instance.get_event_device_key('backup'))
 
+    def validate(self, attrs):
+        if 'project' in self.initial_data:
+            raise serializers.ValidationError({'project': '环境配置全局生效，不能关联项目。'})
+        return attrs
+
     def create(self, validated_data):
         main_device_key = validated_data.pop('main_device_key', None)
         backup_device_key = validated_data.pop('backup_device_key', None)
@@ -191,7 +196,7 @@ class ApiAutomationConfigurationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ApiAutomationConfiguration
         exclude = ['event_device_keys_encrypted']
-        read_only_fields = ['created_by']
+        read_only_fields = ['created_by', 'project']
 
 
 class ApiAutomationCaseResultSerializer(serializers.ModelSerializer):

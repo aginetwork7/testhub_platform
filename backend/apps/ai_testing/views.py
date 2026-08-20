@@ -182,16 +182,14 @@ def build_accessible_api_automation_configuration_queryset(user):
 
     if user is None or not getattr(user, 'is_authenticated', False):
         return ApiAutomationConfiguration.objects.none()
-    return ApiAutomationConfiguration.objects.filter(
-        models.Q(project__owner=user) | models.Q(project__members=user)
-    ).distinct()
+    return ApiAutomationConfiguration.objects.all()
 
 
 def resolve_api_automation_configuration_from_task(task_description, user):
     text = str(task_description or '').strip().lower()
     configurations = build_accessible_api_automation_configuration_queryset(user)
     if not text:
-        return configurations.filter(is_default=True).order_by('project_id', 'id').first()
+        return configurations.filter(is_default=True).order_by('id').first()
 
     matches = []
     for configuration in configurations:
@@ -211,7 +209,7 @@ def resolve_api_automation_configuration_from_task(task_description, user):
                 break
 
     if not matches:
-        return configurations.filter(is_default=True).order_by('project_id', 'id').first()
+        return configurations.filter(is_default=True).order_by('id').first()
     matches.sort(key=lambda item: item[:2], reverse=True)
     best_length = matches[0][0]
     best_matches = [item for item in matches if item[0] == best_length]

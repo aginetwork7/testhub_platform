@@ -2,7 +2,7 @@
   <div class="agent-model-config">
     <div class="page-header">
       <div>
-        <h1>AI Agent配置</h1>
+        <h1>AI智能体配置</h1>
         <p>Chat 与 Agent 工作流使用独立模型配置；Alpha 规划和反思各自选择专用模型。</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">新增模型</el-button>

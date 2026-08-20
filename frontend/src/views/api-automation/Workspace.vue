@@ -6,7 +6,7 @@
         <p>{{ subtitle }}</p>
       </div>
       <div class="header-actions">
-        <el-select v-model="selectedProjectId" placeholder="选择项目" clearable @change="onProjectChange">
+        <el-select v-if="mode !== 'configurations'" v-model="selectedProjectId" placeholder="选择项目" clearable @change="onProjectChange">
           <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
         </el-select>
         <el-select v-if="mode === 'cases'" v-model="executionConfigurationId" placeholder="选择运行配置" clearable>
@@ -30,7 +30,7 @@
       </div>
     </div>
 
-    <el-empty v-if="!selectedProjectId && !['dashboard', 'logs'].includes(mode)" description="请先选择 API 自动化项目" />
+    <el-empty v-if="!selectedProjectId && !['dashboard', 'logs', 'configurations'].includes(mode)" description="请先选择 API 自动化项目" />
 
     <template v-else-if="mode === 'dashboard'">
       <div class="stats-grid">
@@ -465,7 +465,7 @@ const definitions = {
   coverage: ['覆盖统计', '分析自动化用例对 Swagger 接口的覆盖情况与趋势'],
   runs: ['执行记录', '查看 TestHub API 自动化执行结果'],
   reports: ['报告管理', '查看用例级执行结果与失败信息'],
-  configurations: ['环境配置', '统一管理 API 自动化项目的运行环境与变量'],
+  configurations: ['环境配置', '统一管理全局运行环境与变量'],
   schedules: ['定时任务', '管理 API 自动化测试计划'],
   notifications: ['通知列表', '查看 API 自动化测试通知'],
   logs: ['日志监控', '实时查看 API 自动化测试运行日志'],
@@ -578,9 +578,8 @@ async function loadReports() {
 }
 
 async function loadConfigurations() {
-  if (!selectedProjectId.value) return
   loading.value = true
-  try { configurations.value = unwrap(await getAutomationConfigurations({ project: selectedProjectId.value })) } catch (error) { ElMessage.error('加载配置失败') } finally { loading.value = false }
+  try { configurations.value = unwrap(await getAutomationConfigurations()) } catch (error) { ElMessage.error('加载配置失败') } finally { loading.value = false }
 }
 
 async function loadEndpoints() {
@@ -888,7 +887,7 @@ function openConfigurationDialog(configuration = null) {
 function copyConfiguration() {
   const sourceConfiguration = configurations.value.find(configuration => configuration.id === copySourceConfigurationId.value)
   if (!sourceConfiguration) return
-  const { id, project, variables, auth_profiles, payment_config, model_profiles, runtime_settings, ...formValues } = sourceConfiguration
+  const { id, variables, auth_profiles, payment_config, model_profiles, runtime_settings, ...formValues } = sourceConfiguration
   editingConfiguration.value = null
   configurationForm.value = {
     ...formValues,
@@ -942,7 +941,6 @@ async function saveConfiguration() {
     const { http_schema_enabled, http_schema_failure_mode, salt, main_device_key, backup_device_key, has_main_device_key, has_backup_device_key, ...configurationValues } = configurationForm.value
     const payload = {
       ...configurationValues,
-      project: selectedProjectId.value,
       variables,
       auth_profiles: authProfiles,
       payment_config: paymentConfig,
@@ -1000,10 +998,9 @@ function removeDeviceCliBlacklist(index) {
 }
 
 async function initializeConfiguration() {
-  if (!selectedProjectId.value) return
   initializingConfiguration.value = true
   try {
-    const configuration = (await initializeAutomationConfiguration({ project: selectedProjectId.value })).data
+    const configuration = (await initializeAutomationConfiguration()).data
     await loadConfigurations()
     executionConfigurationId.value = configuration.id
     ElMessage.success('默认测试环境已创建，请补充变量引用后保存')

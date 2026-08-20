@@ -1,16 +1,12 @@
-from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.api_automation.models import ApiAutomationConfiguration
 from apps.api_automation.runner_client import _default_role
 
 
 class DefaultRoleResolutionTests(TestCase):
     def setUp(self) -> None:
-        user = get_user_model().objects.create_user(username='default-role-user')
-        project = ApiAutomationProject.objects.create(name='Default Role Project', owner=user)
         self.configuration = ApiAutomationConfiguration.objects.create(
-            project=project,
             name='Default Role Environment',
             environment='default-role',
         )

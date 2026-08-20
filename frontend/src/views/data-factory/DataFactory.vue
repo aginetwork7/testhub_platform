@@ -1037,7 +1037,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, ElEmpty } from 'element-plus'
 import {
   DataLine, Menu, Grid, Clock, Operation, ArrowRight,
-  Document, List, Lock, User, MagicStick, VideoPlay, ChatDotSquare, Picture, Connection,
+  Document, List, Lock, User, Files, MagicStick, VideoPlay, ChatDotSquare, Picture, Connection,
   Phone, Message, Location, Ticket, OfficeBuilding, CreditCard, CircleCheck, DocumentCopy, Search, Delete, Edit, Unlock, DataLine as DataLineIcon, Sort, Share, View, Upload
 } from '@element-plus/icons-vue'
 import api from '@/utils/api'
@@ -1243,7 +1243,7 @@ const getIcon = (iconName) => {
 
 const getScenarioIcon = (scenario) => {
   const iconMapping = {
-    'test_data': User,
+    'test_data': Files,
     'business': OfficeBuilding,
     'json': List,
     'string': Document,

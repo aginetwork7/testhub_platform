@@ -265,10 +265,10 @@ class ApiAutomationCoverageViewSet(ProjectAccessMixin, viewsets.ViewSet):
         })
 
 
-class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSet):
+class ApiAutomationConfigurationViewSet(viewsets.ModelViewSet):
     serializer_class = ApiAutomationConfigurationSerializer
     permission_classes = [IsAdminUser]
-    filterset_fields = ['project', 'is_default']
+    filterset_fields = ['is_default']
 
     def get_queryset(self):
         return ApiAutomationConfiguration.objects.all()
@@ -279,7 +279,7 @@ class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSe
     @action(detail=True, methods=['post'])
     def set_default(self, request, pk=None):
         configuration = self.get_object()
-        ApiAutomationConfiguration.objects.filter(project=configuration.project).exclude(id=configuration.id).update(is_default=False)
+        ApiAutomationConfiguration.objects.exclude(id=configuration.id).update(is_default=False)
         configuration.is_default = True
         configuration.save(update_fields=['is_default'])
         return Response(ApiAutomationConfigurationSerializer(configuration).data)
@@ -309,16 +309,12 @@ class ApiAutomationConfigurationViewSet(ProjectAccessMixin, viewsets.ModelViewSe
 
     @action(detail=False, methods=['post'])
     def initialize(self, request):
-        project = ApiAutomationProject.objects.filter(id=request.data.get('project')).first()
-        if project is None:
-            return Response({'error': '项目不存在或无权限访问。'}, status=status.HTTP_404_NOT_FOUND)
         try:
             template = self._load_template()
         except (OSError, yaml.YAMLError) as error:
             return Response({'error': f'读取测试配置模板失败: {error}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        ApiAutomationConfiguration.objects.filter(project=project).update(is_default=False)
+        ApiAutomationConfiguration.objects.update(is_default=False)
         configuration, created = ApiAutomationConfiguration.objects.update_or_create(
-            project=project,
             name='默认测试环境',
             defaults={
                 'base_url': template.get('api', {}).get('base_url', ''),
@@ -411,10 +407,9 @@ class ApiAutomationRunViewSet(ProjectAccessMixin, viewsets.ModelViewSet):
         if configuration_id:
             configuration = ApiAutomationConfiguration.objects.filter(
                 id=configuration_id,
-                project=project,
             ).first()
             if configuration is None:
-                return Response({'error': '执行配置不存在或不属于当前项目。'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'error': '执行配置不存在。'}, status=status.HTTP_400_BAD_REQUEST)
 
         run = ApiAutomationRun.objects.create(
             project=project,

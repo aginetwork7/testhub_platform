@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from dotenv import dotenv_values
 
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.api_automation.models import ApiAutomationConfiguration
 
 
 class Command(BaseCommand):
@@ -16,16 +16,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: Any) -> None:
         asset_root = Path(__file__).resolve().parents[2] / 'test_assets' / 'config'
-        parser.add_argument('--project', required=True, type=int, help='API 自动化项目 ID。')
         parser.add_argument('--config', default=str(asset_root / 'config.yaml'), help='多环境 YAML 配置文件。')
         parser.add_argument('--env-dir', default=str(asset_root / 'environments'), help='.env.* 文件目录。')
-        parser.add_argument('--owner', help='配置创建人用户名或邮箱，默认使用项目负责人。')
+        parser.add_argument('--owner', help='配置创建人用户名或邮箱。')
         parser.add_argument('--dry-run', action='store_true', help='仅输出待同步环境，不写入数据库。')
 
     def handle(self, *args: Any, **options: Any) -> None:
-        project = ApiAutomationProject.objects.filter(id=options['project']).first()
-        if project is None:
-            raise CommandError(f'项目不存在: {options["project"]}')
         config_path = Path(options['config']).expanduser().resolve()
         env_directory = Path(options['env_dir']).expanduser().resolve()
         try:
@@ -40,7 +36,7 @@ class Command(BaseCommand):
         }
         if not environments:
             raise CommandError('配置中没有可同步的环境。')
-        owner = self._resolve_owner(options['owner'], project)
+        owner = self._resolve_owner(options['owner'])
         self.stdout.write(f'发现环境: {", ".join(environments)}')
         if options['dry_run']:
             return
@@ -58,29 +54,33 @@ class Command(BaseCommand):
             auth_profiles = self._auth_profiles(settings, env_values, default_role, excluded_roles)
             payment_config = self._payment_config(settings)
             model_profiles = settings.get('models', {})
-            config_instance, created = ApiAutomationConfiguration.objects.update_or_create(
-                project=project,
-                environment=environment,
-                defaults={
-                    'name': f'{environment} 环境',
-                    'base_url': settings.get('api', {}).get('base_url', ''),
-                    'websocket_url': settings.get('websocket', {}).get('url', ''),
-                    'variables': variables,
-                    'auth_profiles': auth_profiles,
-                    'payment_config': payment_config,
-                    'model_profiles': model_profiles,
-                    'runtime_settings': runtime_settings,
-                    'timeout_seconds': settings.get('api', {}).get('timeout', 30),
-                    'max_workers': settings.get('test', {}).get('max_workers', 1) or 1,
-                    'is_default': environment == settings.get('env'),
-                    'created_by': owner,
-                },
-            )
+            defaults = {
+                'name': f'{environment} 环境',
+                'base_url': settings.get('api', {}).get('base_url', ''),
+                'websocket_url': settings.get('websocket', {}).get('url', ''),
+                'variables': variables,
+                'auth_profiles': auth_profiles,
+                'payment_config': payment_config,
+                'model_profiles': model_profiles,
+                'runtime_settings': runtime_settings,
+                'timeout_seconds': settings.get('api', {}).get('timeout', 30),
+                'max_workers': settings.get('test', {}).get('max_workers', 1) or 1,
+                'is_default': environment == settings.get('env'),
+                'created_by': owner,
+            }
+            config_instance = ApiAutomationConfiguration.objects.filter(environment=environment).order_by('id').first()
+            created = config_instance is None
+            if config_instance is None:
+                config_instance = ApiAutomationConfiguration.objects.create(environment=environment, **defaults)
+            else:
+                for field, value in defaults.items():
+                    setattr(config_instance, field, value)
+                config_instance.save()
             self._migrate_device_keys(config_instance, env_values)
             self.stdout.write(f"{'创建' if created else '更新'}环境: {config_instance.environment}")
         default_environment = next((name for name, value in environments.items() if value.get('env') == name), None)
         if default_environment:
-            ApiAutomationConfiguration.objects.filter(project=project).exclude(environment=default_environment).update(is_default=False)
+            ApiAutomationConfiguration.objects.exclude(environment=default_environment).update(is_default=False)
 
     def _load_env_values(self, env_directory: Path, environment: str) -> dict[str, str | None]:
         env_path = env_directory / f'.env.{environment}'
@@ -167,9 +167,9 @@ class Command(BaseCommand):
         )
         configuration.save(update_fields=['event_device_keys_encrypted'])
 
-    def _resolve_owner(self, owner_identifier: str | None, project: ApiAutomationProject):
+    def _resolve_owner(self, owner_identifier: str | None):
         if not owner_identifier:
-            return project.owner
+            return None
         user_model = get_user_model()
         owner = user_model.objects.filter(username=owner_identifier).first() or user_model.objects.filter(email=owner_identifier).first()
         if owner is None:

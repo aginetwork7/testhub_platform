@@ -6,7 +6,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 from dotenv import dotenv_values
 
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.api_automation.models import ApiAutomationConfiguration
 
 
 class Command(BaseCommand):
@@ -14,18 +14,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser: Any) -> None:
         asset_root = Path(__file__).resolve().parents[2] / 'test_assets' / 'config' / 'environments'
-        parser.add_argument('--project', required=True, type=int, help='API 自动化项目 ID。')
         parser.add_argument('--env-dir', default=str(asset_root), help='历史 .env.* 文件目录。')
         parser.add_argument('--overwrite', action='store_true', help='覆盖页面已配置的设备私钥。')
         parser.add_argument('--dry-run', action='store_true', help='仅显示待迁移环境，不写入数据库。')
 
     def handle(self, *args: Any, **options: Any) -> None:
-        if not ApiAutomationProject.objects.filter(id=options['project']).exists():
-            raise CommandError(f'项目不存在: {options["project"]}')
         env_directory = Path(options['env_dir']).expanduser().resolve()
         migrated_count = 0
         skipped_count = 0
-        for configuration in ApiAutomationConfiguration.objects.filter(project_id=options['project']).order_by('id'):
+        for configuration in ApiAutomationConfiguration.objects.order_by('id'):
             values = dotenv_values(env_directory / f'.env.{configuration.environment}')
             source_keys = {
                 'main': values.get('MAIN_KEY') or '',

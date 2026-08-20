@@ -83,14 +83,14 @@ export default {
     aiExecutionRecords: 'AI测试报告',
 
     // 配置中心
-    aiCaseGenerationConfig: 'AI用例生成配置',
+    aiCaseGenerationConfig: 'AI生成配置',
     aiModelConfig: '用例模型配置',
     promptConfigCenter: '提示词配置',
     generationConfig: '生成行为配置',
     knowledgeBaseConfig: '知识库配置',
     uiEnvConfig: 'UI环境配置',
     appEnvConfig: 'APP环境配置',
-    aiModeConfig: 'AI智能模式配置',
+    aiModeConfig: 'AI测试配置',
     aiModeModelConfig: 'AI模型配置',
     aiModePromptConfig: 'AI提示词配置',
     scheduledTaskConfig: '消息通知配置',

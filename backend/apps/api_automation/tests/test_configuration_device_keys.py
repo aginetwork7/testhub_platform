@@ -10,16 +10,13 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
 
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.api_automation.models import ApiAutomationConfiguration
 from apps.api_automation.serializers import ApiAutomationConfigurationSerializer
 
 
 class ApiAutomationConfigurationDeviceKeyTests(TestCase):
     def setUp(self) -> None:
-        user = get_user_model().objects.create_user(username='device-key-user')
-        project = ApiAutomationProject.objects.create(name='Device Key Project', owner=user)
         self.configuration = ApiAutomationConfiguration.objects.create(
-            project=project,
             name='Device Key Environment',
             environment='device-key',
         )
@@ -59,7 +56,6 @@ class ApiAutomationConfigurationDeviceKeyTests(TestCase):
             output = StringIO()
             call_command(
                 'migrate_api_automation_device_keys',
-                '--project', str(self.configuration.project_id),
                 '--env-dir', temporary_directory,
                 stdout=output,
             )
