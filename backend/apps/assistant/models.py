@@ -9,6 +9,8 @@ class AgentModelConfig(models.Model):
     ROLE_CHOICES = [
         ('chat', 'Chat 模型'),
         ('agent', 'Agent 模型'),
+        ('alpha_planner', 'Alpha Planner 模型'),
+        ('alpha_reflection', 'Alpha Reflection 模型'),
     ]
     MODEL_TYPE_CHOICES = [
         ('openai', 'OpenAI'),
@@ -52,6 +54,27 @@ class AgentModelConfig(models.Model):
 
     def __str__(self):
         return f'{self.get_role_display()} - {self.name}'
+
+
+class AgentPromptConfig(models.Model):
+    """Prompt settings dedicated to AI Agent Chat and Alpha workflows."""
+
+    ROLE_CHOICES = [
+        ('chat', 'Chat 提示词'),
+        ('agent', 'Agent 提示词'),
+    ]
+
+    name = models.CharField(max_length=100, verbose_name='配置名称')
+    role = models.CharField(max_length=16, choices=ROLE_CHOICES, verbose_name='配置角色')
+    content = models.TextField(verbose_name='提示词内容')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='agent_prompt_configs', verbose_name='创建者')
+    created_at = models.DateTimeField(default=timezone.now, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'assistant_agent_prompt_configs'
+        ordering = ['role', '-updated_at']
 
 
 class AssistantSession(models.Model):

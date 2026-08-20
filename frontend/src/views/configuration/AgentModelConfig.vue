@@ -3,38 +3,59 @@
     <div class="page-header">
       <div>
         <h1>AI Agent配置</h1>
-        <p>分别配置 Chat 模型与 Agent 模型，不复用 AI 智能模式配置。</p>
+        <p>Chat 与 Agent 工作流使用独立模型配置；Alpha 规划和反思各自选择专用模型。</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">新增模型</el-button>
     </div>
 
-    <el-tabs v-model="role" @tab-change="loadConfigs">
-      <el-tab-pane label="Chat模型" name="chat" />
-      <el-tab-pane label="Agent模型" name="agent" />
-    </el-tabs>
-
-    <el-table v-loading="loading" :data="configs" class="config-table">
-      <el-table-column prop="name" label="配置名称" min-width="180" />
-      <el-table-column prop="model_type" label="提供商" width="130" />
-      <el-table-column prop="model_name" label="模型名称" min-width="180" />
-      <el-table-column prop="base_url" label="Base URL" min-width="240" show-overflow-tooltip />
-      <el-table-column label="状态" width="100">
-        <template #default="{ row }"><el-tag :type="row.is_active ? 'success' : 'info'">{{ row.is_active ? '启用' : '停用' }}</el-tag></template>
-      </el-table-column>
-      <el-table-column label="操作" width="150" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-popconfirm title="确定删除此模型配置？" @confirm="removeConfig(row)">
-            <template #reference><el-button link type="danger">删除</el-button></template>
-          </el-popconfirm>
-        </template>
-      </el-table-column>
-    </el-table>
+    <div v-loading="loading" class="model-workflows">
+      <section v-for="group in roleGroups" :key="group.key" class="role-group" :class="group.key">
+        <header class="role-group-header">
+          <h2>{{ group.title }}</h2>
+          <p>{{ group.description }}</p>
+        </header>
+        <div class="role-slots">
+          <article v-for="slot in group.slots" :key="slot.role" class="role-slot">
+            <div class="slot-label">{{ slot.label }}</div>
+            <template v-if="configsByRole(slot.role).length">
+              <div v-for="config in configsByRole(slot.role)" :key="config.id" class="config-card">
+                <div class="config-header">
+                  <div>
+                    <h3>{{ config.name }}</h3>
+                    <div class="config-badges">
+                      <span class="provider-badge">{{ providerLabel(config.model_type) }}</span>
+                      <span class="model-name-badge">{{ config.model_name }}</span>
+                      <el-tag size="small" :type="config.is_active ? 'success' : 'info'">{{ config.is_active ? '启用' : '停用' }}</el-tag>
+                    </div>
+                  </div>
+                  <div class="config-actions">
+                    <el-switch v-model="config.is_active" size="small" @change="toggleActive(config)" />
+                    <el-tooltip content="编辑模型配置"><el-button :icon="EditPen" circle size="small" @click="openEdit(config)" /></el-tooltip>
+                    <el-popconfirm title="确定删除此模型配置？" @confirm="removeConfig(config)">
+                      <template #reference><el-button :icon="Delete" circle size="small" type="danger" plain /></template>
+                    </el-popconfirm>
+                  </div>
+                </div>
+                <div class="base-url">{{ config.base_url }}</div>
+              </div>
+            </template>
+            <button v-else class="empty-slot" @click="openCreate(slot.role)">
+              <el-icon><Plus /></el-icon>
+              配置{{ slot.label }}
+            </button>
+          </article>
+        </div>
+      </section>
+    </div>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑模型配置' : '新增模型配置'" width="620px" :close-on-click-modal="false">
       <el-form ref="formRef" :model="form" :rules="rules" label-width="105px">
         <el-form-item label="配置名称" prop="name"><el-input v-model="form.name" /></el-form-item>
-        <el-form-item label="配置角色"><el-input :model-value="role === 'chat' ? 'Chat模型' : 'Agent模型'" disabled /></el-form-item>
+        <el-form-item label="配置角色" prop="role">
+          <el-select v-model="form.role" style="width: 100%">
+            <el-option v-for="option in roleOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="模型提供商" prop="model_type">
           <el-select v-model="form.model_type" style="width: 100%" @change="applyProviderBaseUrl">
             <el-option label="OpenAI" value="openai" />
@@ -78,18 +99,41 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Delete, EditPen, Plus } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 
-const role = ref('chat')
 const configs = ref([])
 const loading = ref(false)
 const saving = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref(null)
 const formRef = ref(null)
-const emptyForm = () => ({ name: '', model_type: 'other', base_url: '', model_name: '', api_key: '', api_key_masked: '', max_tokens: 4096, temperature: 0.7, top_p: 0.9, is_active: true })
+const emptyForm = (role = 'chat') => ({ name: '', role, model_type: 'other', base_url: '', model_name: '', api_key: '', api_key_masked: '', max_tokens: 4096, temperature: 0.7, top_p: 0.9, is_active: true })
 const form = ref(emptyForm())
+const roleOptions = [
+  { value: 'chat', label: 'Chat 模型' },
+  { value: 'agent', label: 'Agent 模型' },
+  { value: 'alpha_planner', label: 'Alpha Planner 模型' },
+  { value: 'alpha_reflection', label: 'Alpha Reflection 模型' },
+]
+const roleGroups = [
+  {
+    key: 'chat',
+    title: 'Chat',
+    description: '用于 AI Assistant 对话。',
+    slots: [{ role: 'chat', label: 'Chat 模型' }],
+  },
+  {
+    key: 'agent',
+    title: 'AI Agent 工作流',
+    description: 'Agent 提示词由 Agent、Alpha Planner 和 Alpha Reflection 共享；模型独立配置。',
+    slots: [
+      { role: 'agent', label: 'Agent 模型' },
+      { role: 'alpha_planner', label: 'Alpha Planner 模型' },
+      { role: 'alpha_reflection', label: 'Alpha Reflection 模型' },
+    ],
+  },
+]
 const providerBaseUrls = {
   openai: 'https://api.openai.com/v1',
   azure_openai: 'https://YOUR_RESOURCE_NAME.openai.azure.com/openai/deployments/YOUR_DEPLOYMENT_NAME',
@@ -110,6 +154,7 @@ const providerBaseUrls = {
 }
 const rules = computed(() => ({
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
+  role: [{ required: true, message: '请选择配置角色', trigger: 'change' }],
   base_url: [{ required: true, message: '请输入 Base URL', trigger: 'blur' }, { type: 'url', message: '请输入有效 URL', trigger: 'blur' }],
   model_name: [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
 }))
@@ -117,7 +162,7 @@ const rules = computed(() => ({
 const loadConfigs = async () => {
   loading.value = true
   try {
-    const response = await api.get('/assistant/config/agent-models/', { params: { role: role.value } })
+    const response = await api.get('/ai-agent/models/')
     configs.value = response.data.results || response.data || []
   } catch (error) {
     ElMessage.error('无法加载 AI Agent 模型配置')
@@ -126,9 +171,9 @@ const loadConfigs = async () => {
   }
 }
 
-const openCreate = () => {
+const openCreate = (role = 'chat') => {
   editingId.value = null
-  form.value = emptyForm()
+  form.value = emptyForm(role)
   dialogVisible.value = true
 }
 
@@ -138,7 +183,7 @@ const applyProviderBaseUrl = (provider) => {
 
 const openEdit = (config) => {
   editingId.value = config.id
-  form.value = { ...emptyForm(), ...config, api_key: '' }
+  form.value = { ...emptyForm(config.role), ...config, api_key: '' }
   dialogVisible.value = true
 }
 
@@ -148,10 +193,10 @@ const saveConfig = async () => {
   if (!valid) return
   saving.value = true
   try {
-    const payload = { ...form.value, role: role.value }
+    const payload = { ...form.value }
     if (!payload.api_key) delete payload.api_key
-    if (editingId.value) await api.patch(`/assistant/config/agent-models/${editingId.value}/`, payload)
-    else await api.post('/assistant/config/agent-models/', payload)
+    if (editingId.value) await api.patch(`/ai-agent/models/${editingId.value}/`, payload)
+    else await api.post('/ai-agent/models/', payload)
     ElMessage.success('模型配置已保存')
     dialogVisible.value = false
     await loadConfigs()
@@ -162,9 +207,25 @@ const saveConfig = async () => {
   }
 }
 
+const configsByRole = (role) => configs.value.filter((config) => config.role === role)
+const providerLabel = (provider) => ({
+  openai: 'OpenAI', azure_openai: 'Azure OpenAI', anthropic: 'Anthropic', deepseek: 'DeepSeek', qwen: '通义千问', gemini: 'Gemini', moonshot: 'Moonshot', baichuan: '百川', minimax: 'MiniMax', siliconflow: '硅基流动', zhipu: '智谱', openrouter: 'OpenRouter', together: 'Together AI', groq: 'Groq', ollama: 'Ollama', vllm: 'vLLM', other: 'OpenAI 兼容',
+}[provider] || provider)
+
+const toggleActive = async (config) => {
+  try {
+    await api.patch(`/ai-agent/models/${config.id}/`, { is_active: config.is_active })
+    ElMessage.success(`模型已${config.is_active ? '启用' : '停用'}`)
+    await loadConfigs()
+  } catch (error) {
+    config.is_active = !config.is_active
+    ElMessage.error('更新模型状态失败')
+  }
+}
+
 const removeConfig = async (config) => {
   try {
-    await api.delete(`/assistant/config/agent-models/${config.id}/`)
+    await api.delete(`/ai-agent/models/${config.id}/`)
     ElMessage.success('模型配置已删除')
     await loadConfigs()
   } catch (error) {
@@ -176,10 +237,30 @@ onMounted(loadConfigs)
 </script>
 
 <style scoped>
-.agent-model-config { max-width: 1100px; margin: 0 auto; }
-.page-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; }
+.agent-model-config { max-width: 1240px; margin: 0 auto; padding: 8px 0 36px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 26px; }
 .page-header h1 { margin: 0; color: #1c2b3a; font-size: 24px; }
 .page-header p { margin: 8px 0 0; color: #667085; font-size: 14px; }
-.config-table { border: 1px solid #e4eaf1; }
+.model-workflows { display: grid; grid-template-columns: minmax(260px, 0.8fr) minmax(0, 2fr); gap: 18px; }
+.role-group { border: 1px solid #dfe5ec; border-top: 3px solid #2563eb; background: #f8fafc; padding: 16px; }
+.role-group.agent { border-top-color: #0f766e; }
+.role-group-header h2 { margin: 0; color: #1e293b; font-size: 17px; }
+.role-group-header p { margin: 5px 0 16px; color: #64748b; font-size: 13px; line-height: 1.5; }
+.role-slots { display: grid; gap: 12px; }
+.role-group.agent .role-slots { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.slot-label { margin-bottom: 7px; color: #475569; font-size: 12px; font-weight: 700; }
+.config-card { min-height: 116px; border: 1px solid #dfe5ec; background: #fff; padding: 14px; }
+.config-header { display: flex; justify-content: space-between; gap: 10px; }
+.config-header h3 { margin: 0 0 8px; color: #1e293b; font-size: 15px; overflow-wrap: anywhere; }
+.config-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.provider-badge, .model-name-badge { padding: 3px 7px; border-radius: 12px; font-size: 11px; line-height: 1.25; }
+.provider-badge { background: #e0f2fe; color: #075985; }
+.model-name-badge { background: #f1f5f9; color: #475569; overflow-wrap: anywhere; }
+.config-actions { display: flex; align-items: center; gap: 5px; }
+.base-url { margin-top: 13px; padding-top: 10px; border-top: 1px solid #edf0f4; color: #64748b; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.empty-slot { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 116px; border: 1px dashed #94a3b8; background: transparent; color: #475569; cursor: pointer; font-size: 13px; }
+.empty-slot:hover { border-color: #2563eb; color: #1d4ed8; }
 .key-status { margin-top: 5px; color: #667085; font-size: 12px; }
+@media (max-width: 900px) { .model-workflows { grid-template-columns: 1fr; } .role-group.agent .role-slots { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .page-header { align-items: stretch; flex-direction: column; } .page-header > .el-button { align-self: flex-start; } }
 </style>

@@ -1138,40 +1138,40 @@ export default {
 
       // 0. 首先检查生成行为配置（generation_config）
       if (!this.configStatus.generation_config || !this.configStatus.generation_config.configured) {
-        this.$router.push('/configuration/generation-config')
+        this.$router.push('/configuration/ai-gen/config-param')
         return
       }
 
       // 1. 优先检查必需的提示词配置（writer_prompt）
       if (!this.configStatus.writer_prompt.configured || !this.configStatus.writer_prompt.enabled) {
-        this.$router.push('/configuration/prompt-config')
+        this.$router.push('/configuration/ai-gen/config-prompt')
         return
       }
 
       // 2. 检查必需的模型配置（writer_model）
       if (!this.configStatus.writer_model.configured || !this.configStatus.writer_model.enabled) {
-        this.$router.push('/configuration/ai-model')
+        this.$router.push('/configuration/ai-gen/config-model')
         return
       }
 
       // 3. 检查可选的评审提示词（reviewer_prompt）
       if (!this.configStatus.reviewer_prompt.configured || !this.configStatus.reviewer_prompt.enabled) {
-        this.$router.push('/configuration/prompt-config')
+        this.$router.push('/configuration/ai-gen/config-prompt')
         return
       }
 
       // 4. 检查可选的评审模型（reviewer_model）
       if (!this.configStatus.reviewer_model.configured || !this.configStatus.reviewer_model.enabled) {
-        this.$router.push('/configuration/ai-model')
+        this.$router.push('/configuration/ai-gen/config-model')
         return
       }
 
       // 默认跳转到生成行为配置
-      this.$router.push('/configuration/generation-config')
+      this.$router.push('/configuration/ai-gen/config-param')
     },
 
     goToPromptConfig() {
-      this.$router.push('/configuration/prompt-config')
+      this.$router.push('/configuration/ai-gen/config-prompt')
     },
 
     getConfigItemClass(configKey) {

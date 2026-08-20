@@ -17,7 +17,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
 from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionExperienceSerializer, AIExecutionRecordSerializer
-from .ai_agent import run_full_process_sync
+from .ai_testing import run_full_process_sync
 from .alpha.access import accessible_ai_project_queryset
 
 logger = logging.getLogger(__name__)
@@ -311,7 +311,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
         import os
         from asgiref.sync import sync_to_async
         from django.db import connection, DatabaseError
-        from .ai_agent import run_full_process_sync
+        from .ai_testing import run_full_process_sync
 
         def run_task():
             # 注册停止信号
@@ -1231,7 +1231,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         import os
         from asgiref.sync import sync_to_async
         from django.db import connection, DatabaseError
-        from .ai_agent import run_full_process_sync
+        from .ai_testing import run_full_process_sync
 
         def run_task():
             # 注册停止信号

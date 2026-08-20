@@ -3,14 +3,19 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase, TestCase
+from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.requirement_analysis.models import (
+    AIModelConfig,
+    PromptConfig,
     normalize_prd_directory_name,
     requirement_docs_upload_path,
     sync_testcase_generation_task_artifacts,
     write_prd_text_artifact,
 )
+from apps.requirement_analysis.views import AIModelConfigViewSet, PromptConfigViewSet
 
 
 class RequirementDocumentPathTests(SimpleTestCase):
@@ -68,3 +73,55 @@ class RequirementDocumentPathTests(SimpleTestCase):
                 self.assertEqual((base_dir / 'review_feedback.md').read_text(encoding='utf-8'), '评审意见')
                 self.assertEqual((base_dir / 'final_test_cases.md').read_text(encoding='utf-8'), '最终用例')
                 self.assertEqual((base_dir / 'generation_log.txt').read_text(encoding='utf-8'), '日志内容')
+
+
+class RequirementConfigurationBoundaryTests(TestCase):
+    def setUp(self) -> None:
+        self.user = get_user_model().objects.create_user(username='configuration-boundary-user')
+        self.factory = APIRequestFactory()
+
+    def test_model_list_excludes_legacy_ai_testing_roles(self) -> None:
+        AIModelConfig.objects.create(
+            name='Writer Model',
+            model_type='other',
+            role='writer',
+            base_url='https://writer.example.test',
+            model_name='writer-model',
+            created_by=self.user,
+        )
+        AIModelConfig.objects.create(
+            name='Legacy Executor Model',
+            model_type='other',
+            role='executor_text',
+            base_url='https://executor.example.test',
+            model_name='executor-model',
+            created_by=self.user,
+        )
+        request = self.factory.get('/api/requirement-analysis/ai-gen/models/')
+        force_authenticate(request, user=self.user)
+
+        response = AIModelConfigViewSet.as_view({'get': 'list'})(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['name'] for item in response.data['results']], ['Writer Model'])
+
+    def test_prompt_list_excludes_legacy_ai_testing_types(self) -> None:
+        PromptConfig.objects.create(
+            name='Writer Prompt',
+            prompt_type='writer',
+            content='writer prompt',
+            created_by=self.user,
+        )
+        PromptConfig.objects.create(
+            name='Legacy Executor Prompt',
+            prompt_type='executor_text',
+            content='executor prompt',
+            created_by=self.user,
+        )
+        request = self.factory.get('/api/requirement-analysis/ai-gen/prompts/')
+        force_authenticate(request, user=self.user)
+
+        response = PromptConfigViewSet.as_view({'get': 'list'})(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item['name'] for item in response.data['results']], ['Writer Prompt'])

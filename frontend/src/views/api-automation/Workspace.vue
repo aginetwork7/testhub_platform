@@ -167,7 +167,7 @@
           <el-table-column type="selection" width="48" />
           <el-table-column label="配置名称" min-width="180"><template #default="{ row }"><span class="environment-name">{{ row.name }}</span></template></el-table-column>
           <el-table-column prop="environment" label="运行环境" width="120"><template #default="{ row }"><el-tag type="info">{{ row.environment }}</el-tag></template></el-table-column>
-          <el-table-column prop="base_url" label="HTTP 基础地址" min-width="250" />
+          <el-table-column prop="web_url" label="Web URL" min-width="250" />
           <el-table-column prop="timeout_seconds" label="超时" width="90"><template #default="{ row }">{{ row.timeout_seconds }}s</template></el-table-column>
           <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><div class="environment-actions"><el-tooltip content="编辑环境" placement="top"><el-button class="environment-action edit" :icon="Edit" circle @click="openConfigurationDialog(row)" /></el-tooltip><el-tooltip content="删除环境" placement="top"><el-button class="environment-action delete" :icon="Delete" circle @click="removeConfiguration(row)" /></el-tooltip></div></template></el-table-column>
         </el-table>
@@ -232,6 +232,7 @@
               <el-form-item label="环境标识"><el-input v-model="configurationForm.environment" placeholder="例如：test" /></el-form-item>
               <el-form-item label="请求超时（秒）"><el-input-number v-model="configurationForm.timeout_seconds" :min="1" :max="300" controls-position="right" /></el-form-item>
               <el-form-item class="full-row" label="HTTP 基础地址"><el-input v-model="configurationForm.base_url" placeholder="https://api.example.com" /></el-form-item>
+              <el-form-item class="full-row" label="Web URL"><el-input v-model="configurationForm.web_url" placeholder="https://web.example.com" /></el-form-item>
               <el-form-item class="full-row" label="WebSocket 地址"><el-input v-model="configurationForm.websocket_url" placeholder="wss://api.example.com/ws" /></el-form-item>
             </div>
             <div class="config-switches">
@@ -267,6 +268,17 @@
         </el-tab-pane>
         <el-tab-pane label="设备信息" name="event-reporting">
           <el-form class="config-form" label-position="top">
+            <section v-for="device in configuredDevices" :key="device.key" class="device-info-card">
+              <div class="device-info-heading"><strong>{{ device.label }}</strong><span>{{ device.settings.device_id || '未配置设备 ID' }}</span></div>
+              <el-form-item label="设备 ID"><el-input v-model="device.settings.device_id" placeholder="输入设备 ID" /></el-form-item>
+              <div class="camera-table-heading"><strong>Camera</strong><el-button :icon="Plus" plain size="small" @click="addDeviceCamera(device.settings)">添加 Camera</el-button></div>
+              <el-table :data="device.settings.cameras || []" size="small" class="camera-table" empty-text="未配置 Camera">
+                <el-table-column type="index" label="#" width="56" />
+                <el-table-column label="Camera 名称" min-width="220"><template #default="{ row }"><el-input v-model="row.camera_name" placeholder="输入 Camera 名称" /></template></el-table-column>
+                <el-table-column label="Camera MAC" min-width="200"><template #default="{ row }"><el-input v-model="row.camera_mac" placeholder="输入 Camera MAC" /></template></el-table-column>
+                <el-table-column label="操作" width="72"><template #default="{ $index }"><el-button :icon="Delete" circle plain type="danger" @click="removeDeviceCamera(device.settings, $index)" /></template></el-table-column>
+              </el-table>
+            </section>
             <div class="salt-row"><span>SALT</span><el-input v-model="configurationForm.salt" type="password" show-password autocomplete="new-password" placeholder="用于网络密码转换的固定 SALT" /></div>
             <el-alert type="info" :closable="false" show-icon title="事件构造会使用当前环境保存的设备私钥进行真实上报。已配置的密钥不会回显；留空保存可保持原值。" />
             <el-form-item label="主设备私钥（Base64 PEM）"><el-input v-model="configurationForm.main_device_key" class="config-code-input" type="textarea" :rows="5" autocomplete="off" placeholder="粘贴主设备私钥" /><el-tag v-if="configurationForm.has_main_device_key" type="success" size="small">已配置</el-tag></el-form-item>
@@ -421,7 +433,7 @@ const deviceCliEnabled = ref(false)
 const deviceCliBlacklist = ref([])
 const loadingTemplate = ref(false)
 const initializingConfiguration = ref(false)
-const configurationForm = ref({ name: '', environment: 'custom', salt: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false })
+const configurationForm = ref({ name: '', environment: 'custom', salt: '', base_url: '', web_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false })
 const defaultDeviceCliBlacklist = [
   '(^|\\s)(sudo\\s+)?rm\\s+(-[A-Za-z]*r[A-Za-z]*f?|--recursive)(\\s|$)',
   '(^|\\s)(sudo\\s+)?(mkfs(\\.|\\s|$)|wipefs(\\s|$)|fdisk(\\s|$)|parted(\\s|$))',
@@ -504,6 +516,13 @@ const completedTestCount = computed(() => {
 const runProgressPercentage = computed(() => {
   const total = selectedRun.value?.total_cases || 0
   return total ? Math.min(100, Math.round(completedTestCount.value / total * 100)) : 0
+})
+const configuredDevices = computed(() => {
+  const edgeSettings = runtimeSettings.value?.api?.edge
+  return [
+    { key: 'main', label: '主设备', settings: edgeSettings.main_device },
+    { key: 'backup', label: '备用设备', settings: edgeSettings.backup_device },
+  ]
 })
 
 const unwrap = response => response.data.results || response.data
@@ -725,6 +744,13 @@ function normalizeRuntimeSettings(value) {
   runtime.test = runtime.test && typeof runtime.test === 'object' ? runtime.test : {}
   runtime.api.retry = Number.isFinite(runtime.api.retry) ? runtime.api.retry : 1
   runtime.api.retry_interval = Number.isFinite(runtime.api.retry_interval) ? runtime.api.retry_interval : 1
+  runtime.api.edge = runtime.api.edge && typeof runtime.api.edge === 'object' ? runtime.api.edge : {}
+  for (const deviceName of ['main_device', 'backup_device']) {
+    const device = runtime.api.edge[deviceName]
+    runtime.api.edge[deviceName] = device && typeof device === 'object' ? device : {}
+    runtime.api.edge[deviceName].device_id = runtime.api.edge[deviceName].device_id || ''
+    runtime.api.edge[deviceName].cameras = Array.isArray(runtime.api.edge[deviceName].cameras) ? runtime.api.edge[deviceName].cameras : []
+  }
   runtime.test.markers = runtime.test.markers || ''
   runtime.test.suite = runtime.test.suite || ''
   runtime.test.max_workers = Number.isFinite(runtime.test.max_workers) ? runtime.test.max_workers : 1
@@ -758,6 +784,14 @@ function normalizeIgnoreList(value) {
     // Plain globs and comma-separated legacy values are handled below.
   }
   return raw.split(/[\n,]/).map(item => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+}
+
+function addDeviceCamera(device) {
+  device.cameras.push({ camera_name: '', camera_mac: '' })
+}
+
+function removeDeviceCamera(device, index) {
+  device.cameras.splice(index, 1)
 }
 
 function setDefaultAuthenticationProfile(role) {
@@ -836,7 +870,7 @@ async function addIgnoreItem() {
 function openConfigurationDialog(configuration = null) {
   editingConfiguration.value = configuration
   configurationDialogTab.value = 'connection'
-  configurationForm.value = configuration ? { ...configuration, salt: configuration.variables?.SALT || '', http_schema_enabled: Boolean(configuration.runtime_settings?.test?.validation?.http_schema_enabled), http_schema_failure_mode: configuration.runtime_settings?.test?.validation?.http_schema_failure_mode || 'strict', main_device_key: '', backup_device_key: '' } : { name: '', environment: 'custom', salt: '', base_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false }
+  configurationForm.value = configuration ? { ...configuration, salt: configuration.variables?.SALT || '', http_schema_enabled: Boolean(configuration.runtime_settings?.test?.validation?.http_schema_enabled), http_schema_failure_mode: configuration.runtime_settings?.test?.validation?.http_schema_failure_mode || 'strict', main_device_key: '', backup_device_key: '' } : { name: '', environment: 'custom', salt: '', base_url: '', web_url: '', websocket_url: '', timeout_seconds: 30, is_default: false, http_schema_enabled: false, http_schema_failure_mode: 'strict', main_device_key: '', backup_device_key: '', has_main_device_key: false, has_backup_device_key: false }
   configurationVariables.value = cloneConfigurationValue(configuration?.variables)
   authenticationProfiles.value = normalizeAuthenticationProfiles(configuration?.auth_profiles)
   paymentConfiguration.value = normalizePaymentConfiguration(configuration?.payment_config)
@@ -934,6 +968,7 @@ async function loadConfigurationTemplate() {
   try {
     const template = (await getAutomationConfigurationTemplate()).data
     configurationForm.value.base_url = template.api?.base_url || ''
+    configurationForm.value.web_url = ''
     configurationForm.value.websocket_url = template.websocket?.url || ''
     configurationForm.value.timeout_seconds = template.api?.timeout || 30
     configurationForm.value.environment = template.env || 'custom'
@@ -1146,6 +1181,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .workspace { padding: 24px; min-height: 100%; background: #f4f7fb; }
+.device-info-card { margin: 0 0 16px; padding: 14px; border: 1px solid #dbe6f0; border-radius: 6px; background: #fbfdff; }
+.device-info-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; color: #1d2939; }
+.device-info-heading span { color: #667085; font-size: 12px; }
+.camera-table { width: 100%; margin-top: 10px; }
 .config-dialog-intro { margin: -4px 0 16px; padding: 10px 12px; border-left: 3px solid #1677ff; background: #f0f7ff; color: #526170; font-size: 13px; line-height: 1.6; }.config-tabs :deep(.el-tabs__header) { margin-bottom: 18px; }.config-form { padding: 0 2px; }.config-grid { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 0 16px; }.config-grid .full-row { grid-column: 1 / -1; }.config-form :deep(.el-form-item__label) { padding-bottom: 6px; color: #344054; font-size: 13px; font-weight: 600; }.config-form :deep(.el-input-number) { width: 100%; }.config-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }.config-switches > div { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px; padding: 14px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f8fafc; }.config-switches strong { color: #344054; font-size: 13px; }.config-switches span { color: #667085; font-size: 12px; }.config-switches :deep(.el-switch) { grid-column: 2; grid-row: 1 / span 2; }.schema-failure-mode { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; padding-top: 10px; border-top: 1px solid #e4e7ec; }.schema-failure-mode label { color: #475467; font-size: 12px; font-weight: 600; }.schema-failure-mode :deep(.el-select) { width: 140px; }.config-code-input :deep(.el-textarea__inner) { min-height: 160px; border-color: #d0d5dd; background: #101828; color: #d0d5dd; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.6; }.runtime-code-input :deep(.el-textarea__inner) { min-height: 420px; }.config-dialog-footer { display: flex; align-items: center; justify-content: space-between; width: 100%; }.config-dialog-footer > div { display: flex; gap: 8px; }
 .environment-config-dialog :deep(.el-dialog__body) { max-height: min(72vh, 720px); overflow: auto; }.config-tabs :deep(.el-tabs__header) { padding-bottom: 8px; border-bottom: 1px solid #e4e7ec; }.config-tabs :deep(.el-tabs__item) { height: 40px; padding: 0 14px; color: #667085; font-weight: 600; }.config-tabs :deep(.el-tabs__item.is-active) { color: #1677ff; }.config-grid { grid-template-columns: minmax(0, 1fr) 180px 150px; }.form-section-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 2px 0 16px; padding-bottom: 12px; border-bottom: 1px solid #eaecf0; }.form-section-header h3 { margin: 0; color: #1d2939; font-size: 15px; }.form-section-header span { display: block; margin-top: 4px; color: #667085; font-size: 12px; }.form-section-header code { color: #0f766e; font-family: "SFMono-Regular", Consolas, monospace; }.variable-heading, .model-heading { margin-top: 24px; }.credential-grid, .model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }.credential-card, .model-card { padding: 14px; border: 1px solid #dbe6f0; border-radius: 6px; background: #fbfdff; }.credential-card.is-default-role { border-color: #8ad5b0; background: #effaf3; }.credential-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; color: #175cd3; }.credential-card-head > div:first-child { display: flex; align-items: center; gap: 8px; }.credential-actions { display: flex; align-items: center; gap: 6px; }.credential-card-head strong, .model-card > strong { font-size: 13px; }.credential-card :deep(.el-form-item), .model-card :deep(.el-form-item) { margin-bottom: 10px; }.credential-card :deep(.el-form-item:last-child), .model-card :deep(.el-form-item:last-child) { margin-bottom: 0; }.credential-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }.service-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 300px)); gap: 0 16px; justify-content: start; }.runtime-strategy-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 150px)); gap: 0 14px; justify-content: start; }.runtime-filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 210px)); gap: 0 14px; justify-content: start; }.timeout-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 150px)); gap: 0 14px; justify-content: start; }.runtime-strategy-grid :deep(.el-input-number), .runtime-filter-grid :deep(.el-select), .runtime-filter-grid :deep(.el-input), .timeout-grid :deep(.el-input-number) { width: 100%; }.global-salt-field { max-width: 460px; }.variable-editor { display: grid; gap: 8px; }.variable-row { display: grid; grid-template-columns: minmax(130px, .45fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }.structured-variable { display: flex; align-items: center; justify-content: space-between; padding: 9px 10px; border: 1px dashed #d0d5dd; border-radius: 4px; color: #667085; font-size: 12px; }.service-grid :deep(.el-select), .timeout-grid :deep(.el-input-number) { width: 100%; }.cleanup-options { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 12px; border: 1px solid #dbe6f0; border-radius: 6px; background: #f6fbff; }.config-dialog-footer { position: static; margin: 0; padding: 0; border: 0; background: transparent; }
 .runtime-panels { display: grid; gap: 20px; padding-top: 8px; }.runtime-panel { position: relative; padding: 22px 16px 14px; border: 1px solid #dbe6f0; border-radius: 6px; }.runtime-panel-title { position: absolute; top: -12px; left: 50%; padding: 0 12px; color: #1d2939; font-size: 14px; font-weight: 700; line-height: 24px; transform: translateX(-50%); }.execution-panel { border-left: 3px solid #3b82f6; background: #fbfdff; }.execution-panel .runtime-panel-title { background: #fbfdff; }.filter-panel { border-left: 3px solid #0f9f8b; background: #f7fdfa; }.filter-panel .runtime-panel-title { background: #f7fdfa; }.lifecycle-panel { border-left: 3px solid #e6a23c; background: #fffdf8; }.lifecycle-panel .runtime-panel-title { background: #fffdf8; }.runtime-panel :deep(.el-form-item) { margin-bottom: 0; }.runtime-strategy-grid, .runtime-filter-grid, .timeout-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 12px; }.runtime-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }.runtime-panel :deep(.el-input-number), .runtime-panel :deep(.el-select), .runtime-panel :deep(.el-input) { width: 100%; }.cleanup-options { margin-top: 12px; background: #fff; }.salt-row { display: grid; grid-template-columns: 72px minmax(0, 420px); align-items: center; gap: 12px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid #dbe6f0; border-radius: 6px; background: #f8fafc; }.salt-row > span { color: #344054; font-size: 13px; font-weight: 700; }.device-cli-switch { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; padding: 14px; border: 1px solid #d0d5dd; border-radius: 6px; background: #f8fafc; }.device-cli-switch strong { display: block; color: #344054; font-size: 13px; }.device-cli-switch span { display: block; max-width: 580px; margin-top: 4px; color: #667085; font-size: 12px; line-height: 1.5; }.blacklist-editor { display: grid; gap: 8px; width: 100%; }.blacklist-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }

@@ -12,7 +12,7 @@ from langchain_openai import ChatOpenAI
 import requests
 
 from backend.config_loader import config_loader
-from apps.requirement_analysis.models import AIModelConfig, PromptConfig
+from apps.ai_testing.models import AITestModelConfig, AITestPromptConfig
 
 logger = logging.getLogger('django')
 
@@ -89,48 +89,22 @@ class HermesAgent:
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
 
-        config_obj = AIModelConfig.objects.filter(role='hermes_agent', is_active=True).first()
-        config_base_url = config_loader.get('ai.hermes.base_url', '')
-        config_model_name = config_loader.get('ai.hermes.model_name', 'hermes-agent')
-        config_api_key = config_loader.get('ai.hermes.api_key', '')
+        config_obj = AITestModelConfig.objects.filter(role='hermes_agent', is_active=True).first()
+        if config_obj is None:
+            raise ValueError('No active AI Testing Hermes model is configured')
         self.request_timeout = float(config_loader.get('ai.hermes.request_timeout', 900))
         self.max_retries = int(config_loader.get('ai.hermes.max_retries', 1))
-        file_api_key = self._read_api_key_file(
-            os.getenv('HERMES_API_KEY_FILE')
-            or config_loader.get('ai.hermes.api_key_file', '')
-            or os.getenv('API_KEY_FILE')
-        )
-
-        explicit_api_key = (
-            (config_obj.api_key if config_obj else None)
-            or os.getenv('HERMES_API_KEY')
-            or os.getenv('HERMES_AUTH_TOKEN')
-            or config_api_key
-            or os.getenv('API_KEY')
-            or os.getenv('AUTH_TOKEN')
-        )
-        self.base_url = self._normalize_base_url(
-            (config_obj.base_url if config_obj else None)
-            or os.getenv('HERMES_BASE_URL')
-            or config_base_url
-            or os.getenv('BASE_URL')
-        )
-        self.model_name = (
-            (config_obj.model_name if config_obj else None)
-            or os.getenv('HERMES_MODEL_NAME')
-            or config_model_name
-            or os.getenv('MODEL_NAME')
-            or 'hermes-agent'
-        )
-        self.provider = (config_obj.model_type if config_obj else None) or 'other'
-        self.temperature = config_obj.temperature if config_obj else 0.0
-        self.api_key = file_api_key or explicit_api_key or self._fetch_dynamic_api_key(self.base_url)
+        self.base_url = self._normalize_base_url(config_obj.base_url)
+        self.model_name = config_obj.model_name
+        self.provider = config_obj.model_type
+        self.temperature = config_obj.temperature
+        self.api_key = config_obj.api_key
 
         if not self.api_key:
-            raise ValueError('No API Key found for mode: hermes')
+            raise ValueError('The active AI Testing Hermes model has no API key')
 
         if not self.base_url:
-            raise ValueError('No Base URL found for mode: hermes')
+            raise ValueError('The active AI Testing Hermes model has no base URL')
 
         self.llm = ChatOpenAI(
             model=self.model_name,
@@ -142,36 +116,11 @@ class HermesAgent:
         )
 
     def _load_prompt_content(self):
-        try:
-            db_config = PromptConfig.get_active_config('hermes_agent')
-            if db_config and db_config.content:
-                logger.info(f"📝 Loaded hermes_agent prompt from DB: {db_config.name}")
-                return db_config.content
-        except Exception as error:
-            logger.warning(f"⚠️ Failed to load Hermes prompt from DB: {error}")
-
-        try:
-            from django.conf import settings as django_settings
-
-            filepath = os.path.join(django_settings.BASE_DIR, 'docs', 'hermes_agent.md')
-            with open(filepath, 'r', encoding='utf-8') as file:
-                logger.info('📝 Loaded hermes_agent prompt from file: hermes_agent.md')
-                return file.read()
-        except Exception as error:
-            logger.warning(f"⚠️ Failed to load Hermes prompt from file: {error}")
-
-        logger.info('📝 Using fallback Hermes prompt')
-        return (
-            'You are Hermes, a device-control agent exposed through an OpenAI-compatible API. '
-            'Execute the user task on the device you manage by default. '
-            'Return only JSON with this schema: '
-            '{"success": boolean, "summary": string, "logs": [string, ...], '
-            '"task_results": [{"task_id": number, "status": "completed|failed|skipped", '
-            '"summary": string, "logs": [string, ...]}]}. '
-            'The logs array should contain concise execution logs in Chinese. '
-            'When task_results is provided, each item should map to the planned task list. '
-            'Do not include markdown fences or extra commentary.'
-        )
+        db_config = AITestPromptConfig.get_active_config('hermes_agent')
+        if not db_config or not db_config.content.strip():
+            raise ValueError('No active AI Testing Hermes prompt is configured')
+        logger.info(f"📝 Loaded Hermes prompt from dedicated AI Testing configuration: {db_config.name}")
+        return db_config.content
 
     async def _emit_callback(self, callback, payload):
         if not callback:

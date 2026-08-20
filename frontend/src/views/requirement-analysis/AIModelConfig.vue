@@ -390,7 +390,7 @@ export default {
     async loadConfigs() {
       try {
         console.log('Loading configs...')
-        const response = await api.get('/requirement-analysis/ai-models/')
+        const response = await api.get('/requirement-analysis/ai-gen/models/')
         console.log('API response:', response.data)
         
         // 处理分页API响应格式 {count: 1, next: null, previous: null, results: [...]}
@@ -528,11 +528,11 @@ export default {
           }
           
           console.log('Updating with data:', updateData)
-          await api.patch(`/requirement-analysis/ai-models/${this.editingConfigId}/`, updateData)
+          await api.patch(`/requirement-analysis/ai-gen/models/${this.editingConfigId}/`, updateData)
           ElMessage.success(this.t('configuration.aiModel.messages.updateSuccess'))
         } else {
           console.log('Creating with data:', this.configForm)
-          await api.post('/requirement-analysis/ai-models/', this.configForm)
+          await api.post('/requirement-analysis/ai-gen/models/', this.configForm)
           ElMessage.success(this.t('configuration.aiModel.messages.saveSuccess'))
         }
         
@@ -600,7 +600,7 @@ export default {
       }
 
       try {
-        await api.delete(`/requirement-analysis/ai-models/${configId}/`)
+        await api.delete(`/requirement-analysis/ai-gen/models/${configId}/`)
         ElMessage.success(this.t('configuration.aiModel.messages.deleteSuccess'))
         this.loadConfigs()
       } catch (error) {
@@ -614,7 +614,7 @@ export default {
       this.testingConfigId = config.id
 
       try {
-        const response = await api.post(`/requirement-analysis/ai-models/${config.id}/test_connection/`)
+        const response = await api.post(`/requirement-analysis/ai-gen/models/${config.id}/test_connection/`)
         this.testResult = response.data
         this.showTestResult = true
       } catch (error) {

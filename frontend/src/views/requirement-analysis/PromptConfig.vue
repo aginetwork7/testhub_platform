@@ -287,7 +287,7 @@ export default {
     async loadConfigs() {
       try {
         console.log('Loading prompt configs...')
-        const response = await api.get('/requirement-analysis/prompts/')
+        const response = await api.get('/requirement-analysis/ai-gen/prompts/')
         console.log('Prompts API response:', response.data)
         
         // 处理分页API响应格式
@@ -319,7 +319,7 @@ export default {
     async loadDefaultPrompts() {
       console.log('loadDefaultPrompts clicked')
       try {
-        const response = await api.get('/requirement-analysis/prompts/load_defaults/')
+        const response = await api.get('/requirement-analysis/ai-gen/prompts/load_defaults/')
         console.log('Default prompts response:', response.data)
         this.defaultPrompts = response.data.defaults
         this.showDefaultsModal = true
@@ -336,7 +336,7 @@ export default {
       try {
         // 创建编写提示词配置
         if (this.defaultPrompts.writer) {
-          await api.post('/requirement-analysis/prompts/', {
+          await api.post('/requirement-analysis/ai-gen/prompts/', {
             name: this.$t('promptConfig.defaultWriterName'),
             prompt_type: 'writer',
             content: this.defaultPrompts.writer,
@@ -346,7 +346,7 @@ export default {
 
         // 创建评审提示词配置
         if (this.defaultPrompts.reviewer) {
-          await api.post('/requirement-analysis/prompts/', {
+          await api.post('/requirement-analysis/ai-gen/prompts/', {
             name: this.$t('promptConfig.defaultReviewerName'),
             prompt_type: 'reviewer',
             content: this.defaultPrompts.reviewer,
@@ -396,10 +396,10 @@ export default {
       
       try {
         if (this.isEditing) {
-          await api.patch(`/requirement-analysis/prompts/${this.editingConfigId}/`, this.configForm)
+          await api.patch(`/requirement-analysis/ai-gen/prompts/${this.editingConfigId}/`, this.configForm)
           ElMessage.success(this.$t('promptConfig.updateSuccess'))
         } else {
-          await api.post('/requirement-analysis/prompts/', this.configForm)
+          await api.post('/requirement-analysis/ai-gen/prompts/', this.configForm)
           ElMessage.success(this.$t('promptConfig.addSuccess'))
         }
 
@@ -419,7 +419,7 @@ export default {
       }
 
       try {
-        await api.delete(`/requirement-analysis/prompts/${configId}/`)
+        await api.delete(`/requirement-analysis/ai-gen/prompts/${configId}/`)
         ElMessage.success(this.$t('promptConfig.deleteSuccess'))
         this.loadConfigs()
       } catch (error) {

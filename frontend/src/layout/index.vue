@@ -320,15 +320,15 @@
                 <el-icon><MagicStick /></el-icon>
                 <span>{{ $t('menu.aiCaseGenerationConfig') }}</span>
               </template>
-              <el-menu-item index="/configuration/ai-model">
+              <el-menu-item index="/configuration/ai-gen/config-model">
                 <el-icon><Cpu /></el-icon>
                 <span>{{ $t('menu.aiModelConfig') }}</span>
               </el-menu-item>
-              <el-menu-item index="/configuration/prompt-config">
+              <el-menu-item index="/configuration/ai-gen/config-prompt">
                 <el-icon><Edit /></el-icon>
                 <span>{{ $t('menu.promptConfigCenter') }}</span>
               </el-menu-item>
-              <el-menu-item index="/configuration/generation-config">
+              <el-menu-item index="/configuration/ai-gen/config-param">
                 <el-icon><Setting /></el-icon>
                 <span>{{ $t('menu.generationConfig') }}</span>
               </el-menu-item>
@@ -337,15 +337,15 @@
               <el-icon><FolderOpened /></el-icon>
               <span>{{ $t('menu.knowledgeBaseConfig') }}</span>
             </el-menu-item>
-            <el-menu-item index="/configuration/ui-env">
+            <el-menu-item index="/configuration/ui-setting">
               <el-icon><Monitor /></el-icon>
               <span>{{ $t('menu.uiEnvConfig') }}</span>
             </el-menu-item>
-            <el-menu-item index="/configuration/api-environment">
+            <el-menu-item index="/configuration/env-setting">
               <el-icon><Connection /></el-icon>
               <span>{{ $t('menu.apiAutomationEnvironment') }}</span>
             </el-menu-item>
-            <el-menu-item index="/configuration/app-env">
+            <el-menu-item index="/configuration/app-setting">
               <el-icon><Cellphone /></el-icon>
               <span>{{ $t('menu.appEnvConfig') }}</span>
             </el-menu-item>
@@ -354,18 +354,22 @@
                 <el-icon><Cpu /></el-icon>
                 <span>{{ $t('menu.aiModeConfig') }}</span>
               </template>
-              <el-menu-item index="/configuration/ai-mode">
+              <el-menu-item index="/configuration/ai-test/config-model">
                 <span>{{ $t('menu.aiModeModelConfig') }}</span>
               </el-menu-item>
-              <el-menu-item index="/configuration/ai-mode-prompt">
+              <el-menu-item index="/configuration/ai-test/config-prompt">
                 <span>{{ $t('menu.aiModePromptConfig') }}</span>
               </el-menu-item>
             </el-sub-menu>
-            <el-menu-item index="/configuration/agent-models">
-              <el-icon><Cpu /></el-icon>
-              <span>AI Agent配置</span>
-            </el-menu-item>
-            <el-menu-item index="/configuration/scheduled-task">
+            <el-sub-menu index="ai-agent-config">
+              <template #title>
+                <el-icon><Cpu /></el-icon>
+                <span>AI Agent配置</span>
+              </template>
+              <el-menu-item index="/configuration/ai-agent/config-model">模型配置</el-menu-item>
+              <el-menu-item index="/configuration/ai-agent/config-prompt">提示词配置</el-menu-item>
+            </el-sub-menu>
+            <el-menu-item index="/configuration/notify">
               <el-icon><Timer /></el-icon>
               <span>{{ $t('menu.scheduledTaskConfig') }}</span>
             </el-menu-item>
@@ -630,15 +634,17 @@ const breadcrumbTitle = computed(() => {
     '/configuration/meta-projects': t('menu.projectManagementCenter'),
 
     // 配置中心
-    '/configuration/ai-model': t('menu.aiModelConfig'),
-    '/configuration/prompt-config': t('menu.promptConfigCenter'),
-    '/configuration/generation-config': t('menu.generationConfig'),
+    '/configuration/ai-gen/config-model': t('menu.aiModelConfig'),
+    '/configuration/ai-gen/config-prompt': t('menu.promptConfigCenter'),
+    '/configuration/ai-gen/config-param': t('menu.generationConfig'),
     '/configuration/knowledge-base': t('menu.knowledgeBaseConfig'),
-    '/configuration/ui-env': t('menu.uiEnvConfig'),
-    '/configuration/api-environment': t('menu.apiAutomationEnvironment'),
-    '/configuration/ai-mode': t('menu.aiModeModelConfig'),
-    '/configuration/ai-mode-prompt': t('menu.aiModePromptConfig'),
-    '/configuration/scheduled-task': t('menu.scheduledTaskConfig'),
+    '/configuration/ui-setting': t('menu.uiEnvConfig'),
+    '/configuration/env-setting': t('menu.apiAutomationEnvironment'),
+    '/configuration/app-setting': t('menu.appEnvConfig'),
+    '/configuration/ai-test/config-model': t('menu.aiModeModelConfig'),
+    '/configuration/ai-test/config-prompt': t('menu.aiModePromptConfig'),
+    '/configuration/ai-agent/config-model': 'AI Agent配置',
+    '/configuration/notify': t('menu.scheduledTaskConfig'),
 
     '/profile': t('nav.profile')
   }

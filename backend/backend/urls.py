@@ -33,6 +33,7 @@ urlpatterns = [
     path('api/ai-testing/', include('apps.ai_testing.urls')),
     path('api/api-automation/', include('apps.api_automation.urls')),
     path('api/', include('apps.api_testing.urls')),
+    path('api/', include('backend.configuration_urls')),
     path('api/core/', include('apps.core.urls')),
     path('api/scheduler/', include('apps.scheduler.urls')),
     path('api/data-factory/', include('apps.data_factory.urls')),

@@ -902,7 +902,8 @@ def analyze_text(request):
 
 class AIModelConfigViewSet(viewsets.ModelViewSet):
     """AI模型配置视图集"""
-    queryset = AIModelConfig.objects.all()
+    REQUIREMENT_ROLES = {'writer', 'reviewer'}
+    queryset = AIModelConfig.objects.filter(role__in=REQUIREMENT_ROLES)
     serializer_class = AIModelConfigSerializer
 
     def get_queryset(self):
@@ -915,11 +916,8 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
 
         # 按角色过滤
         role = self.request.query_params.get('role')
-        if role:
+        if role in self.REQUIREMENT_ROLES:
             queryset = queryset.filter(role=role)
-        else:
-            # 如果没有指定角色，默认排除 AI智能模式专用模型
-            queryset = queryset.exclude(role__in=['browser_use_text', 'browser_use_vision', 'hermes_agent'])
 
         # 按是否启用过滤
         is_active = self.request.query_params.get('is_active')
@@ -1045,7 +1043,8 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
 
 class PromptConfigViewSet(viewsets.ModelViewSet):
     """提示词配置视图集"""
-    queryset = PromptConfig.objects.all()
+    REQUIREMENT_PROMPT_TYPES = {'writer', 'reviewer'}
+    queryset = PromptConfig.objects.filter(prompt_type__in=REQUIREMENT_PROMPT_TYPES)
     serializer_class = PromptConfigSerializer
 
     def get_queryset(self):
@@ -1053,7 +1052,7 @@ class PromptConfigViewSet(viewsets.ModelViewSet):
 
         # 按提示词类型过滤
         prompt_type = self.request.query_params.get('prompt_type')
-        if prompt_type:
+        if prompt_type in self.REQUIREMENT_PROMPT_TYPES:
             queryset = queryset.filter(prompt_type=prompt_type)
 
         # 按是否启用过滤

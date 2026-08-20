@@ -343,13 +343,6 @@ class AIModelConfig(models.Model):
     ROLE_CHOICES = [
         ('writer', '测试用例编写专家'),
         ('reviewer', '测试评审专家'),
-        ('planner_text', 'AI智能测试 - Planner文本模型'),
-        ('planner_vision', 'AI智能测试 - Planner视觉模型'),
-        ('executor_text', 'AI智能测试 - Executor文本模型'),
-        ('executor_vision', 'AI智能测试 - Executor视觉模型'),
-        ('hermes_agent', 'Hermes Agent'),
-        ('alpha_planner', 'Alpha Planner'),
-        ('alpha_reflection', 'Alpha Reflection'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')
@@ -391,9 +384,6 @@ class PromptConfig(models.Model):
     PROMPT_CHOICES = [
         ('writer', '用例编写提示词'),
         ('reviewer', '用例评审提示词'),
-        ('browser_use_text', 'AI智能模式-文本提示词'),
-        ('browser_use_vision', 'AI智能模式-视觉提示词'),
-        ('hermes_agent', 'Hermes Agent提示词'),
     ]
 
     name = models.CharField(max_length=100, verbose_name='配置名称')

@@ -23,9 +23,9 @@ router.register(r'analyses', RequirementAnalysisViewSet, basename='requirementan
 router.register(r'requirements', BusinessRequirementViewSet, basename='businessrequirement')
 router.register(r'test-cases', GeneratedTestCaseViewSet, basename='generatedtestcase')
 router.register(r'tasks', AnalysisTaskViewSet, basename='analysistask')
-router.register(r'ai-models', AIModelConfigViewSet, basename='aimodelconfig')
-router.register(r'prompts', PromptConfigViewSet, basename='promptconfig')
-router.register(r'generation-config', GenerationConfigViewSet, basename='generationconfig')
+router.register(r'ai-gen/models', AIModelConfigViewSet, basename='ai-gen-model-config')
+router.register(r'ai-gen/prompts', PromptConfigViewSet, basename='ai-gen-prompt-config')
+router.register(r'ai-gen/params', GenerationConfigViewSet, basename='ai-gen-parameter-config')
 router.register(r'testcase-generation', TestCaseGenerationTaskViewSet, basename='testcasegenerationtask')
 router.register(r'config', ConfigStatusViewSet, basename='configstatus')
 

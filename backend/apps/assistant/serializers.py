@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import AgentModelConfig, AssistantSession, AssistantMessage, ChatMessage
+from .models import AgentModelConfig, AgentPromptConfig, AssistantSession, AssistantMessage, ChatMessage
 
 
 class AgentModelConfigSerializer(serializers.ModelSerializer):
@@ -18,6 +18,13 @@ class AgentModelConfigSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'updated_at']
         extra_kwargs = {'api_key': {'write_only': True, 'required': False}}
+
+
+class AgentPromptConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentPromptConfig
+        fields = ['id', 'name', 'role', 'content', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class ChatMessageSerializer(serializers.ModelSerializer):

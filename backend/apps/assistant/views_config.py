@@ -1,8 +1,8 @@
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 
-from .models import AgentModelConfig
-from .serializers import AgentModelConfigSerializer
+from .models import AgentModelConfig, AgentPromptConfig
+from .serializers import AgentModelConfigSerializer, AgentPromptConfigSerializer
 
 
 class AgentModelConfigViewSet(viewsets.ModelViewSet):
@@ -27,4 +27,29 @@ class AgentModelConfigViewSet(viewsets.ModelViewSet):
         role = serializer.validated_data.get('role', serializer.instance.role)
         if serializer.validated_data.get('is_active', serializer.instance.is_active):
             AgentModelConfig.objects.filter(role=role).exclude(pk=serializer.instance.pk).update(is_active=False)
+        serializer.save()
+
+
+class AgentPromptConfigViewSet(viewsets.ModelViewSet):
+    """Dedicated Chat and Agent prompt configuration."""
+
+    queryset = AgentPromptConfig.objects.all()
+    serializer_class = AgentPromptConfigSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = AgentPromptConfig.objects.all()
+        role = self.request.query_params.get('role')
+        return queryset.filter(role=role) if role else queryset
+
+    def perform_create(self, serializer):
+        role = serializer.validated_data['role']
+        if serializer.validated_data.get('is_active', True):
+            AgentPromptConfig.objects.filter(role=role).update(is_active=False)
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        role = serializer.validated_data.get('role', serializer.instance.role)
+        if serializer.validated_data.get('is_active', serializer.instance.is_active):
+            AgentPromptConfig.objects.filter(role=role).exclude(pk=serializer.instance.pk).update(is_active=False)
         serializer.save()

@@ -32,7 +32,7 @@ export function deleteAppProject(id) {
  */
 export function getAppConfig() {
   return request({
-    url: '/app-automation/config/current/',
+    url: '/app-setting/check/',
     method: 'get'
   })
 }
@@ -42,7 +42,7 @@ export function getAppConfig() {
  */
 export function updateAppConfig(data) {
   return request({
-    url: '/app-automation/config/save/',
+    url: '/app-setting/save/',
     method: 'post',
     data
   })
