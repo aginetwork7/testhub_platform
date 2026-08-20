@@ -1,5 +1,13 @@
 <template>
   <div class="assistant-layout" :class="{ 'has-alpha-task-tree': showAlphaTaskTree }">
+    <svg class="assistant-mode-gradient-definitions" aria-hidden="true">
+      <defs>
+        <linearGradient id="assistant-mode-icon-gradient" x1="0" y1="0" x2="1" y2="1">
+          <stop stop-color="#3b82f6" />
+          <stop offset="1" stop-color="#8b5cf6" />
+        </linearGradient>
+      </defs>
+    </svg>
     <!-- 右侧主内容区 -->
     <div class="main-content">
       <!-- 场景1：新会话（居中输入框） -->
@@ -18,14 +26,14 @@
             <div class="input-toolbar">
               <div class="input-mode-tools">
                 <el-dropdown trigger="click" @command="assistantMode = $event">
-                  <button type="button" class="mode-icon" :aria-label="assistantMode === 'agent' ? 'Agent' : 'Chat'">
-                    <span v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>
-                    <span v-else class="mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-stroke)"/></svg></span>
+                  <button type="button" class="mode-selector" :aria-label="assistantMode === 'agent' ? '切换 Agent 模式' : '切换 Chat 模式'">
+                    <el-icon v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol assistant-mode-gradient"><Service /></el-icon>
+                    <el-icon v-else class="mode-symbol chat-symbol assistant-mode-gradient"><ChatDotSquare /></el-icon>
                   </button>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item command="chat"><span class="menu-mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-menu-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-menu-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-menu-stroke)"/></svg></span>Chat</el-dropdown-item>
-                      <el-dropdown-item command="agent"><span class="menu-mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>Agent</el-dropdown-item>
+                      <el-dropdown-item command="chat"><el-icon class="menu-mode-symbol chat-symbol assistant-mode-gradient"><ChatDotSquare /></el-icon>Chat</el-dropdown-item>
+                      <el-dropdown-item command="agent"><el-icon class="menu-mode-symbol agent-symbol assistant-mode-gradient"><Service /></el-icon>Agent</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -118,14 +126,14 @@
             <div class="input-toolbar">
             <div class="input-mode-tools">
               <el-dropdown trigger="click" @command="assistantMode = $event">
-                <button type="button" class="mode-icon" :aria-label="assistantMode === 'agent' ? 'Agent' : 'Chat'">
-                  <span v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>
-                  <span v-else class="mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-stroke-footer" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-stroke-footer)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-stroke-footer)"/></svg></span>
+                <button type="button" class="mode-selector" :aria-label="assistantMode === 'agent' ? '切换 Agent 模式' : '切换 Chat 模式'">
+                  <el-icon v-if="assistantMode === 'agent'" class="mode-symbol agent-symbol assistant-mode-gradient"><Service /></el-icon>
+                  <el-icon v-else class="mode-symbol chat-symbol assistant-mode-gradient"><ChatDotSquare /></el-icon>
                 </button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item command="chat"><span class="menu-mode-symbol chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-chat-menu-footer-stroke" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-chat-menu-footer-stroke)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-chat-menu-footer-stroke)"/></svg></span>Chat</el-dropdown-item>
-                    <el-dropdown-item command="agent"><span class="menu-mode-symbol agent-symbol"><span class="robot-face"><i></i><i></i></span></span>Agent</el-dropdown-item>
+                    <el-dropdown-item command="chat"><el-icon class="menu-mode-symbol chat-symbol assistant-mode-gradient"><ChatDotSquare /></el-icon>Chat</el-dropdown-item>
+                    <el-dropdown-item command="agent"><el-icon class="menu-mode-symbol agent-symbol assistant-mode-gradient"><Service /></el-icon>Agent</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -180,7 +188,7 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
-import { User, Cpu, Promotion, Loading } from '@element-plus/icons-vue'
+import { ChatDotSquare, Service, User, Cpu, Promotion, Loading } from '@element-plus/icons-vue'
 import api from '@/utils/api'
 import { assistantSessionStore } from '@/stores/assistantSession'
 
@@ -1374,25 +1382,28 @@ onBeforeUnmount(() => {
   }
 }
 
-.mode-icon {
+.mode-selector {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 0;
-  background: transparent;
-  color: #475467;
+  overflow: hidden;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  background: #fff;
   cursor: pointer;
 }
 
-.mode-icon .el-icon {
-  font-size: 17px;
+.mode-symbol {
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 
-.mode-icon:hover {
-  color: #1570ef;
+.mode-selector:hover {
+  background: #f8fafc;
 }
 
 .mode-symbol,
@@ -1403,11 +1414,6 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.mode-symbol {
-  width: 24px;
-  height: 24px;
-}
-
 .menu-mode-symbol {
   width: 18px;
   height: 18px;
@@ -1415,53 +1421,15 @@ onBeforeUnmount(() => {
   vertical-align: middle;
 }
 
-.chat-symbol svg {
-  width: 20px;
-  height: 20px;
-  overflow: visible;
-}
-
-.robot-face {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  width: 14px;
-  height: 11px;
-  padding: 1.5px;
-  border: 0;
-  border-radius: 3px;
-  position: relative;
-  isolation: isolate;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-}
-
-.robot-face::after {
-  content: '';
+.assistant-mode-gradient-definitions {
   position: absolute;
-  inset: 1.5px;
-  border-radius: 1.5px;
-  background: #fff;
-  z-index: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
-.robot-face::before {
-  content: '';
-  position: absolute;
-  top: -4px;
-  width: 1.5px;
-  height: 3px;
-  background: linear-gradient(#3b82f6, #8b5cf6);
-  z-index: 2;
-}
-
-.robot-face i {
-  position: relative;
-  z-index: 1;
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+.assistant-mode-gradient :deep(path) {
+  fill: url(#assistant-mode-icon-gradient);
 }
 
 .thinking-control {

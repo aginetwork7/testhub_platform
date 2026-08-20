@@ -60,12 +60,20 @@
 
           <template v-else-if="currentModule === 'assistant'">
             <div class="assistant-session-sidebar">
+              <svg class="assistant-history-gradient-definitions" aria-hidden="true">
+                <defs>
+                  <linearGradient id="assistant-history-icon-gradient" x1="0" y1="0" x2="1" y2="1">
+                    <stop stop-color="#3b82f6" />
+                    <stop offset="1" stop-color="#8b5cf6" />
+                  </linearGradient>
+                </defs>
+              </svg>
               <el-button type="primary" class="assistant-new-session" :icon="Plus" @click="startAssistantSession">
                 {{ $t('assistant.newChat') }}
               </el-button>
               <el-collapse v-model="assistantHistoryTabs" class="assistant-history">
                 <el-collapse-item name="chat">
-                  <template #title><span class="assistant-history-tab-title"><span class="assistant-chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-history-chat-gradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-history-chat-gradient)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-history-chat-gradient)"/></svg></span><span>Chat</span></span></template>
+                  <template #title><span class="assistant-history-tab-title"><el-icon class="assistant-history-mode-icon assistant-history-gradient"><ChatDotSquare /></el-icon><span>Chat</span></span></template>
                   <button
                     v-for="session in assistantHistory"
                     :key="session.id"
@@ -73,13 +81,13 @@
                     :class="{ active: assistantCurrentSession?.id === session.id && assistantMode === 'chat' }"
                     @click="selectAssistantSession(session)"
                   >
-                    <span class="assistant-chat-symbol"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="assistant-history-chat-item-gradient" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3b82f6" /><stop offset="1" stop-color="#8b5cf6" /></linearGradient></defs><path d="M6.25 5.25h11.5a2.5 2.5 0 0 1 2.5 2.5v6.5a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3H6.25a2.5 2.5 0 0 1-2.5-2.5v-6.5a2.5 2.5 0 0 1 2.5-2.5Z" fill="none" stroke="url(#assistant-history-chat-item-gradient)" stroke-linejoin="round" stroke-width="1.7"/><circle cx="9" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/><circle cx="12" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/><circle cx="15" cy="11" r=".85" fill="url(#assistant-history-chat-item-gradient)"/></svg></span>
+                    <el-icon class="assistant-history-mode-icon assistant-history-gradient"><ChatDotSquare /></el-icon>
                     <span>{{ session.title || $t('assistant.newChat') }}</span>
                     <el-icon class="assistant-history-delete" @click.stop="deleteAssistantSession(session.id)"><Delete /></el-icon>
                   </button>
                 </el-collapse-item>
                 <el-collapse-item name="agent">
-                  <template #title><span class="assistant-history-tab-title"><span class="assistant-agent-symbol"><span class="assistant-robot-face"><i></i><i></i></span></span><span>Agent</span></span></template>
+                  <template #title><span class="assistant-history-tab-title"><el-icon class="assistant-history-mode-icon assistant-history-gradient"><Service /></el-icon><span>Agent</span></span></template>
                   <button
                     v-for="run in assistantAlphaRuns"
                     :key="run.id"
@@ -87,7 +95,7 @@
                     :class="{ active: assistantActiveAlphaRun?.id === run.id && assistantMode === 'agent' }"
                     @click="selectAssistantAlphaRun(run)"
                   >
-                    <span class="assistant-agent-symbol"><span class="assistant-robot-face"><i></i><i></i></span></span>
+                    <el-icon class="assistant-history-mode-icon assistant-history-gradient"><Service /></el-icon>
                     <span>{{ run.original_request }}</span>
                     <el-icon class="assistant-history-delete" @click.stop="deleteAssistantAlphaRun(run.id)"><Delete /></el-icon>
                   </button>
@@ -106,7 +114,7 @@
               <span>{{ $t('dataFactory.scenarios.warehouse') }}</span>
             </el-menu-item>
             <el-menu-item index="/data-factory/test_data">
-              <el-icon><User /></el-icon>
+              <el-icon><Files /></el-icon>
               <span>{{ $t('dataFactory.scenarios.test_data') }}</span>
             </el-menu-item>
             <el-menu-item index="/data-factory/business">
@@ -351,7 +359,7 @@
             </el-sub-menu>
             <el-sub-menu index="ai-agent-config">
               <template #title>
-                <el-icon><Cpu /></el-icon>
+                <el-icon><ChatDotRound /></el-icon>
                 <span>AI智能体配置</span>
               </template>
               <el-menu-item index="/configuration/ai-agent/config-model">模型配置</el-menu-item>
@@ -446,8 +454,8 @@ import { ElMessage } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
-  DataAnalysis, ChatDotRound, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, User
+  DataAnalysis, ChatDotSquare, Service, DocumentCopy, Link, MagicStick,
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Files, User
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
 import logoHomePng from '@/assets/images/logo_home.png'
@@ -778,8 +786,7 @@ const handleCommand = (command) => {
   margin-right: 0 !important;
 }
 
-.assistant-chat-symbol,
-.assistant-agent-symbol {
+.assistant-history-mode-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -787,53 +794,15 @@ const handleCommand = (command) => {
   height: 18px;
 }
 
-.assistant-chat-symbol svg {
-  width: 18px;
-  height: 18px;
-  overflow: visible;
-}
-
-.assistant-robot-face {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  width: 14px;
-  height: 11px;
-  padding: 1.5px;
-  border: 0;
-  border-radius: 3px;
-  position: relative;
-  isolation: isolate;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-}
-
-.assistant-robot-face::after {
-  content: '';
+.assistant-history-gradient-definitions {
   position: absolute;
-  inset: 1.5px;
-  z-index: 0;
-  border-radius: 1.5px;
-  background: #001529;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
-.assistant-robot-face::before {
-  content: '';
-  position: absolute;
-  top: -4px;
-  z-index: 2;
-  width: 1.5px;
-  height: 3px;
-  background: linear-gradient(#3b82f6, #8b5cf6);
-}
-
-.assistant-robot-face i {
-  position: relative;
-  z-index: 1;
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+.assistant-history-gradient :deep(path) {
+  fill: url(#assistant-history-icon-gradient);
 }
 
 .assistant-history :deep(.el-collapse-item__wrap),
