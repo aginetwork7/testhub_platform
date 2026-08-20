@@ -52,6 +52,10 @@ expand/media/ai_recording/*
 media/*
 !media/.gitkeep
 
+# 忽略正式环境运行时缓存和媒体产物
+Data/Cache/action_cache.json
+expand/media/
+
 # 忽略 Data/PRD 下的归档文档，但保留.gitkeep
 Data/PRD/*
 !Data/PRD/.gitkeep
