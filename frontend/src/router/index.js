@@ -252,7 +252,7 @@ const routes = [
       },
       {
         path: 'configurations',
-        redirect: '/configuration/api-environment'
+        redirect: '/configuration/env-setting'
       },
       {
         path: 'scheduled-tasks',
@@ -430,18 +430,18 @@ const routes = [
             component: () => import('@/views/unified-projects/UnifiedProjectDetail.vue')
           },
           {
-            path: 'ai-model',
-            name: 'ConfigAIModel',
+            path: 'ai-gen/config-model',
+            name: 'ConfigAIGenModel',
             component: () => import('@/views/requirement-analysis/AIModelConfig.vue')
           },
           {
-            path: 'prompt-config',
-            name: 'ConfigPromptConfig',
+            path: 'ai-gen/config-prompt',
+            name: 'ConfigAIGenPrompt',
             component: () => import('@/views/requirement-analysis/PromptConfig.vue')
           },
           {
-            path: 'generation-config',
-            name: 'ConfigGenerationConfig',
+            path: 'ai-gen/config-param',
+            name: 'ConfigAIGenParam',
             component: () => import('@/views/requirement-analysis/GenerationConfigView.vue')
           },
           {
@@ -450,40 +450,45 @@ const routes = [
             component: () => import('@/views/configuration/KnowledgeBaseConfig.vue')
           },
           {
-            path: 'ui-env',
-            name: 'ConfigUIEnv',
+            path: 'ui-setting',
+            name: 'ConfigUISetting',
             component: () => import('@/views/configuration/UIEnvironmentConfig.vue')
           },
           {
-            path: 'api-environment',
-            name: 'ConfigApiAutomationEnvironment',
+            path: 'env-setting',
+            name: 'ConfigEnvironmentSetting',
             component: ApiAutomationWorkspace,
             props: { mode: 'configurations' }
           },
           {
-            path: 'app-env',
-            name: 'ConfigAppEnv',
+            path: 'app-setting',
+            name: 'ConfigAppSetting',
             component: () => import('@/views/app-automation/settings/AppSettings.vue')
           },
           {
-            path: 'ai-mode',
-            name: 'ConfigAIMode',
+            path: 'ai-test/config-model',
+            name: 'ConfigAITestModel',
             component: () => import('@/views/configuration/AIIntelligentModeConfig.vue')
           },
           {
-            path: 'ai-mode-prompt',
-            name: 'ConfigAIModePrompt',
+            path: 'ai-test/config-prompt',
+            name: 'ConfigAITestPrompt',
             component: () => import('@/views/configuration/AIModePromptConfig.vue')
           },
           {
-            path: 'scheduled-task',
+            path: 'notify',
             name: 'ConfigScheduledTask',
             component: () => import('@/views/ui-automation/notification/NotificationConfigs.vue')
           },
           {
-            path: 'agent-models',
-            name: 'ConfigAgentModels',
+            path: 'ai-agent/config-model',
+            name: 'ConfigAIAgentModel',
             component: () => import('@/views/configuration/AgentModelConfig.vue')
+          },
+          {
+            path: 'ai-agent/config-prompt',
+            name: 'ConfigAIAgentPrompt',
+            component: () => import('@/views/configuration/AgentPromptConfig.vue')
           }
         ]
       }

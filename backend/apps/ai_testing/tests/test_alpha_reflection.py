@@ -1,14 +1,15 @@
 from unittest.mock import AsyncMock, patch
 
+from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from apps.ai_testing.alpha.orchestrator import AlphaOrchestrator
-from apps.ai_testing.alpha.reflection import ReflectionVerdict
+from apps.ai_testing.alpha.reflection import AlphaReflectionService, ReflectionVerdict
 from apps.ai_testing.alpha.skills.catalog import build_phase_one_registry
 from apps.ai_testing.alpha.tasks import process_alpha_reflection
 from apps.ai_testing.models import AlphaRound, AlphaRun, AiProject
-from apps.assistant.models import AgentModelConfig
+from apps.assistant.models import AgentModelConfig, AgentPromptConfig
 
 
 class AlphaReflectionTests(TestCase):
@@ -39,12 +40,33 @@ class AlphaReflectionTests(TestCase):
         AgentModelConfig.objects.create(
             name='Alpha Reflection',
             model_type='other',
-            role='agent',
+            role='alpha_reflection',
             base_url='https://reflection.example.test',
             model_name='reflection-test-model',
             created_by=self.user,
             is_active=True,
         )
+        AgentPromptConfig.objects.create(
+            name='Alpha Agent Prompt',
+            role='agent',
+            content='Reflect only from supplied evidence.',
+            created_by=self.user,
+            is_active=True,
+        )
+
+    @patch(
+        'apps.requirement_analysis.models.AIModelService.call_openai_compatible_api',
+        new_callable=AsyncMock,
+    )
+    def test_reflection_uses_dedicated_reflection_model(self, model_call) -> None:
+        model_call.return_value = {
+            'choices': [{'message': {'content': '{"verdict":"pass","unmet_criteria":[]}'}}]
+        }
+
+        verdict = async_to_sync(AlphaReflectionService().reflect_revision)(self.revision.id)
+
+        self.assertEqual(verdict, ReflectionVerdict(verdict='pass', unmet_criteria=()))
+        self.assertEqual(model_call.await_args.args[0].role, 'alpha_reflection')
 
     @patch(
         'apps.ai_testing.alpha.tasks.AlphaReflectionService.reflect_revision',

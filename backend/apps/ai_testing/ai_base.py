@@ -1833,14 +1833,14 @@ class BaseBrowserAgent:
         self.case_name = case_name or "Adhoc Task"  # 用例名称
 
         # Load Config from DB
-        from apps.requirement_analysis.models import AIModelConfig
+        from apps.ai_testing.models import AITestModelConfig
 
         # Select Config: prefer Executor vision mode, fallback to Executor text mode
-        config_obj = AIModelConfig.objects.filter(role='executor_vision', is_active=True).first()
+        config_obj = AITestModelConfig.objects.filter(role='executor_vision', is_active=True).first()
         if config_obj:
             self.use_vision = True
         else:
-            config_obj = AIModelConfig.objects.filter(role='executor_text', is_active=True).first()
+            config_obj = AITestModelConfig.objects.filter(role='executor_text', is_active=True).first()
             self.use_vision = False
 
         model_config = {}
@@ -1853,14 +1853,14 @@ class BaseBrowserAgent:
                 'temperature': config_obj.temperature  # 读取配置的temperature
             }
 
-        self.api_key = model_config.get('api_key') or os.getenv('AUTH_TOKEN')
-        self.base_url = model_config.get('base_url') or os.getenv('BASE_URL')
-        self.model_name = model_config.get('model_name') or os.getenv('MODEL_NAME')
+        self.api_key = model_config.get('api_key')
+        self.base_url = model_config.get('base_url')
+        self.model_name = model_config.get('model_name')
         self.provider = model_config.get('provider', 'openai')
 
         if not self.api_key:
             logger.error(f"❌ 未找到API Key配置")
-            raise ValueError(f"No API Key found for mode: {execution_mode}")
+            raise ValueError(f'No active AI Testing executor model is configured for mode: {execution_mode}')
 
         # 确保 base_url 格式正确（去除末尾斜杠，添加 /v1 后缀如果缺失）
         if self.base_url:
@@ -2643,41 +2643,15 @@ class BaseBrowserAgent:
         final_task += f"\n\nCURRENT TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
 
         # 根据模式选择提示词类型
-        prompt_type = 'browser_use_vision' if self.use_vision else 'browser_use_text'
+        prompt_type = 'executor_vision' if self.use_vision else 'executor_text'
         prompt_content = None
 
-        # 1. 从数据库加载
-        try:
-            from apps.requirement_analysis.models import PromptConfig
-            db_config = PromptConfig.get_active_config(prompt_type)
-            if db_config and db_config.content:
-                prompt_content = db_config.content
-                logger.info(f"📝 Loaded {prompt_type} prompt from DB: {db_config.name}")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to load prompt from DB: {e}")
-
-        # 2. 从文件加载
-        if not prompt_content:
-            try:
-                from django.conf import settings as django_settings
-                filename = 'browser_use_vision.md' if self.use_vision else 'browser_use_text.md'
-                filepath = os.path.join(django_settings.BASE_DIR, 'docs', filename)
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    prompt_content = f.read()
-                logger.info(f"📝 Loaded {prompt_type} prompt from file: {filename}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to load prompt from file: {e}")
-
-        # 3. 最小兜底提示词
-        if not prompt_content:
-            prompt_content = (
-                "CRITICAL RULES:\n"
-                "1. Mark each task complete/failed/skipped immediately after execution.\n"
-                "2. One task per step. Do not pre-mark or skip marking.\n"
-                "3. Wait for UI changes before interacting with new elements.\n"
-                "4. Never invent credentials.\n"
-            )
-            logger.info("📝 Using minimal fallback prompt")
+        from apps.ai_testing.models import AITestPromptConfig
+        db_config = AITestPromptConfig.get_active_config(prompt_type)
+        if not db_config or not db_config.content.strip():
+            raise ValueError(f'No active AI Testing {prompt_type} prompt is configured')
+        prompt_content = db_config.content
+        logger.info(f"📝 Loaded {prompt_type} prompt from dedicated AI Testing configuration: {db_config.name}")
 
         final_task += "\n" + prompt_content
 

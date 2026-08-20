@@ -5,7 +5,6 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AppProjectViewSet,
-    AppConfigViewSet,
     AppDeviceViewSet,
     AppElementViewSet,
     AppComponentViewSet,
@@ -23,7 +22,6 @@ router = DefaultRouter()
 
 # 注册ViewSets
 router.register(r'projects', AppProjectViewSet, basename='app-project')
-router.register(r'config', AppConfigViewSet, basename='app-config')
 router.register(r'dashboard', AppDashboardViewSet, basename='app-dashboard')
 router.register(r'devices', AppDeviceViewSet, basename='app-device')
 router.register(r'elements', AppElementViewSet, basename='app-element')

@@ -259,6 +259,7 @@ class ApiAutomationConfiguration(models.Model):
     name = models.CharField(max_length=200, verbose_name='配置名称')
     environment = models.CharField(max_length=50, default='custom', verbose_name='运行环境')
     base_url = models.URLField(blank=True, verbose_name='HTTP基础地址')
+    web_url = models.URLField(blank=True, verbose_name='Web地址')
     websocket_url = models.URLField(blank=True, verbose_name='WebSocket地址')
     variables = models.JSONField(default=dict, verbose_name='环境变量')
     auth_profiles = models.JSONField(default=dict, verbose_name='认证角色配置')

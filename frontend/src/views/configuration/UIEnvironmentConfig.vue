@@ -103,7 +103,7 @@ const formatBrowserName = (name) => {
 const checkEnvironment = async () => {
   checking.value = true
   try {
-    const response = await api.get('/ui-automation/config/environment/check_environment/')
+    const response = await api.get('/ui-setting/check/')
     environmentData.value = response.data
     lastCheckTime.value = new Date().toLocaleString()
     ElMessage.success(t('configuration.uiEnv.messages.checkSuccess'))
@@ -118,7 +118,7 @@ const checkEnvironment = async () => {
 const installDriver = async (browserName) => {
   installing.value = browserName
   try {
-    await api.post('/ui-automation/config/environment/install_driver/', { browser: browserName })
+    await api.post('/ui-setting/install_driver/', { browser: browserName })
     ElMessage.success(t('configuration.uiEnv.messages.installSuccess', { browser: formatBrowserName(browserName) }))
     // Re-check environment
     await checkEnvironment()

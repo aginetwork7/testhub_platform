@@ -98,8 +98,10 @@
               <label>{{ $t('configuration.aiModePrompt.promptType') }} <span class="required">*</span></label>
               <select v-model="configForm.prompt_type" class="form-select" required :disabled="isEditing">
                 <option value="">{{ $t('configuration.aiModePrompt.selectPromptType') }}</option>
-                <option value="browser_use_text">{{ $t('configuration.aiModePrompt.textPrompt') }}</option>
-                <option value="browser_use_vision">{{ $t('configuration.aiModePrompt.visionPrompt') }}</option>
+                <option value="planner_text">Planner - {{ $t('configuration.aiModePrompt.textPrompt') }}</option>
+                <option value="planner_vision">Planner - {{ $t('configuration.aiModePrompt.visionPrompt') }}</option>
+                <option value="executor_text">Executor - {{ $t('configuration.aiModePrompt.textPrompt') }}</option>
+                <option value="executor_vision">Executor - {{ $t('configuration.aiModePrompt.visionPrompt') }}</option>
                 <option value="hermes_agent">{{ $t('configuration.aiModePrompt.hermesPrompt') }}</option>
               </select>
             </div>
@@ -160,10 +162,14 @@
         </div>
         <div class="modal-body">
           <div class="tabs">
-            <button class="tab-btn" :class="{ active: activeTab === 'browser_use_text' }"
-              @click="activeTab = 'browser_use_text'">{{ $t('configuration.aiModePrompt.textPrompt') }}</button>
-            <button class="tab-btn" :class="{ active: activeTab === 'browser_use_vision' }"
-              @click="activeTab = 'browser_use_vision'">{{ $t('configuration.aiModePrompt.visionPrompt') }}</button>
+            <button class="tab-btn" :class="{ active: activeTab === 'planner_text' }"
+              @click="activeTab = 'planner_text'">Planner - {{ $t('configuration.aiModePrompt.textPrompt') }}</button>
+            <button class="tab-btn" :class="{ active: activeTab === 'planner_vision' }"
+              @click="activeTab = 'planner_vision'">Planner - {{ $t('configuration.aiModePrompt.visionPrompt') }}</button>
+            <button class="tab-btn" :class="{ active: activeTab === 'executor_text' }"
+              @click="activeTab = 'executor_text'">Executor - {{ $t('configuration.aiModePrompt.textPrompt') }}</button>
+            <button class="tab-btn" :class="{ active: activeTab === 'executor_vision' }"
+              @click="activeTab = 'executor_vision'">Executor - {{ $t('configuration.aiModePrompt.visionPrompt') }}</button>
             <button class="tab-btn" :class="{ active: activeTab === 'hermes_agent' }"
               @click="activeTab = 'hermes_agent'">{{ $t('configuration.aiModePrompt.hermesPrompt') }}</button>
           </div>
@@ -184,7 +190,7 @@
 import api from '@/utils/api'
 import { ElMessage } from 'element-plus'
 
-const API_BASE = '/ui-automation/config/ai-mode-prompt'
+const API_BASE = '/ai-test/prompts'
 
 export default {
   name: 'AIModePromptConfig',
@@ -200,8 +206,8 @@ export default {
       isLoadingDefaults: false,
       editingConfigId: null,
       previewConfig: {},
-      defaultPrompts: { browser_use_text: '', browser_use_vision: '', hermes_agent: '' },
-      activeTab: 'browser_use_text',
+      defaultPrompts: { planner_text: '', planner_vision: '', executor_text: '', executor_vision: '', hermes_agent: '' },
+      activeTab: 'planner_text',
       configForm: {
         name: '',
         prompt_type: '',
@@ -216,8 +222,10 @@ export default {
   methods: {
     getTypeLabel(type) {
       const map = {
-        browser_use_text: this.$t('configuration.aiModePrompt.textPrompt'),
-        browser_use_vision: this.$t('configuration.aiModePrompt.visionPrompt'),
+        planner_text: `Planner - ${this.$t('configuration.aiModePrompt.textPrompt')}`,
+        planner_vision: `Planner - ${this.$t('configuration.aiModePrompt.visionPrompt')}`,
+        executor_text: `Executor - ${this.$t('configuration.aiModePrompt.textPrompt')}`,
+        executor_vision: `Executor - ${this.$t('configuration.aiModePrompt.visionPrompt')}`,
         hermes_agent: this.$t('configuration.aiModePrompt.hermesPrompt')
       }
       return map[type] || type

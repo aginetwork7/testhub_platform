@@ -7,8 +7,8 @@ from rest_framework.test import APIClient
 
 from apps.ai_testing.alpha.planning import AlphaPlannerService
 from apps.ai_testing.alpha.tasks import enqueue_alpha_planning
-from apps.ai_testing.models import AlphaRun, AiProject
-from apps.assistant.models import AgentModelConfig
+from apps.ai_testing.models import AITestPromptConfig, AlphaRun, AiProject
+from apps.assistant.models import AgentModelConfig, AgentPromptConfig
 
 
 class AlphaPlanningTests(TestCase):
@@ -24,9 +24,16 @@ class AlphaPlanningTests(TestCase):
         AgentModelConfig.objects.create(
             name='Alpha Planner',
             model_type='other',
-            role='agent',
+            role='alpha_planner',
             base_url='https://planner.example.test',
             model_name='planner-test-model',
+            created_by=self.user,
+            is_active=True,
+        )
+        AgentPromptConfig.objects.create(
+            name='Alpha Agent Prompt',
+            role='agent',
+            content='Plan only with registered skills.',
             created_by=self.user,
             is_active=True,
         )
@@ -58,6 +65,7 @@ class AlphaPlanningTests(TestCase):
         self.assertEqual(self.run.active_revision_id, revision.id)
         self.assertEqual(self.run.round_count, 1)
         model_call.assert_awaited_once()
+        self.assertEqual(model_call.await_args.args[0].role, 'alpha_planner')
 
     @patch('apps.ai_testing.alpha.views.enqueue_alpha_planning', return_value='django-q-task-id')
     def test_plan_api_queues_planning_and_records_task_id(self, enqueue_alpha_planning) -> None:
@@ -110,3 +118,9 @@ class AlphaPlanningTests(TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertTrue(AlphaRun.objects.filter(id=self.run.id).exists())
+
+    def test_planner_vision_default_prompt_is_seeded(self) -> None:
+        prompt = AITestPromptConfig.objects.get(prompt_type='planner_vision', is_active=True)
+
+        self.assertIn('Return only one JSON object: {"actions":[...]}. No prose.', prompt.content)
+        self.assertIn('Compare two playback screenshots.', prompt.content)

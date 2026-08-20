@@ -6,7 +6,7 @@ from rest_framework.test import APIRequestFactory
 
 from apps.ai_testing.models import AIExecutionRecord, AiProject
 from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
-from apps.ai_testing.ai_agent import BrowserAgent, HermesAgent, PyUICompatAgent, get_agent_class
+from apps.ai_testing.ai_testing import BrowserAgent, HermesAgent, PyUICompatAgent, get_agent_class
 from apps.unified_projects.models import MetaProject
 from apps.users.models import User
 from apps.ai_testing.views import (

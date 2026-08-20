@@ -13,7 +13,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import AgentModelConfig, AssistantMessage, AssistantSession, ChatMessage
+from .models import AgentModelConfig, AgentPromptConfig, AssistantMessage, AssistantSession, ChatMessage
 from .serializers import (
     AssistantMessageSerializer,
     AssistantSessionCreateSerializer,
@@ -133,6 +133,9 @@ class ChatViewSet(viewsets.ViewSet):
         chat_config = AgentModelConfig.objects.filter(role='chat', is_active=True).order_by('id').first()
         if not chat_config:
             return Response({'error': '未配置激活的 Chat 模型，请先在 AI Agent配置 中配置'}, status=status.HTTP_400_BAD_REQUEST)
+        chat_prompt = AgentPromptConfig.objects.filter(role='chat', is_active=True).order_by('id').first()
+        if not chat_prompt or not chat_prompt.content.strip():
+            return Response({'error': '未配置激活的 Chat 提示词，请先在 AI Agent配置 中配置'}, status=status.HTTP_400_BAD_REQUEST)
 
         user_message = ChatMessage.objects.create(session=session, role='user', content=message)
         request_tool_contract = parse_tool_call_from_request_contract(str(message), tool_call_payload=tool_call_payload)
@@ -158,7 +161,7 @@ class ChatViewSet(viewsets.ViewSet):
             return self._stream_response(local_tool_stream())
 
         history = list(ChatMessage.objects.filter(session=session).order_by('-created_at')[:20])
-        system_prompt = f'You are a professional software testing assistant. Answer clearly and concisely.\n\n{get_tool_contract_prompt()}'
+        system_prompt = f'{chat_prompt.content.strip()}\n\n{get_tool_contract_prompt()}'
         if not thinking_mode:
             system_prompt += '\n\nDo not reveal chain-of-thought or reasoning. Return only the final answer.'
         model_messages = [

@@ -197,7 +197,7 @@ class EnvironmentConfigViewSet(viewsets.ViewSet):
 
 
 import requests
-from apps.requirement_analysis.models import AIModelConfig, PromptConfig
+from apps.ai_testing.models import AITestModelConfig, AITestPromptConfig
 
 class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     """
@@ -206,9 +206,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     BROWSER_USE_ROLES = [
         'planner_text', 'planner_vision', 'executor_text', 'executor_vision',
-        'hermes_agent', 'alpha_planner', 'alpha_reflection',
+        'hermes_agent',
     ]
-    queryset = AIModelConfig.objects.filter(role__in=BROWSER_USE_ROLES)
+    queryset = AITestModelConfig.objects.filter(role__in=BROWSER_USE_ROLES)
 
     @staticmethod
     def _running_in_docker():
@@ -401,10 +401,10 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
 
         # 如果创建时启用，先禁用同一role的其他配置
         if data.get('is_active', True):
-            AIModelConfig.objects.filter(role=role, is_active=True).update(is_active=False)
+            AITestModelConfig.objects.filter(role=role, is_active=True).update(is_active=False)
 
         # 创建新配置
-        config = AIModelConfig.objects.create(
+        config = AITestModelConfig.objects.create(
             name=data['name'],
             model_type=data['model_type'],
             role=role,
@@ -441,7 +441,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 'created_at': config.created_at,
                 'updated_at': config.updated_at
             })
-        except AIModelConfig.DoesNotExist:
+        except AITestModelConfig.DoesNotExist:
             return Response(
                 {'error': 'Config not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -466,7 +466,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             disabled_config_names = []
             if new_is_active:
                 # 查找同一role下将被禁用的配置
-                active_configs = AIModelConfig.objects.filter(role=new_role, is_active=True).exclude(pk=pk)
+                active_configs = AITestModelConfig.objects.filter(role=new_role, is_active=True).exclude(pk=pk)
                 disabled_config_names = [c.name for c in active_configs]
                 active_configs.update(is_active=False)
 
@@ -505,7 +505,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 response_data['disabled_configs'] = disabled_config_names
 
             return Response(response_data)
-        except AIModelConfig.DoesNotExist:
+        except AITestModelConfig.DoesNotExist:
             return Response(
                 {'error': 'Config not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -533,7 +533,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 {'message': 'Config deleted successfully'},
                 status=status.HTTP_204_NO_CONTENT
             )
-        except AIModelConfig.DoesNotExist:
+        except AITestModelConfig.DoesNotExist:
             return Response(
                 {'error': 'Config not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -619,7 +619,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         """
         try:
             config = self.queryset.get(pk=pk)
-        except AIModelConfig.DoesNotExist:
+        except AITestModelConfig.DoesNotExist:
             return Response(
                 {'error': 'Config not found'},
                 status=status.HTTP_404_NOT_FOUND
@@ -687,10 +687,10 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
     AI智能模式提示词配置视图集
     """
     permission_classes = [IsAuthenticated]
-    BROWSER_USE_PROMPT_TYPES = ['browser_use_text', 'browser_use_vision', 'hermes_agent']
+    BROWSER_USE_PROMPT_TYPES = ['planner_text', 'planner_vision', 'executor_text', 'executor_vision', 'hermes_agent']
 
     def _get_queryset(self):
-        return PromptConfig.objects.filter(prompt_type__in=self.BROWSER_USE_PROMPT_TYPES)
+        return AITestPromptConfig.objects.filter(prompt_type__in=self.BROWSER_USE_PROMPT_TYPES)
 
     def list(self, request):
         configs = self._get_queryset().order_by('-created_at')
@@ -719,9 +719,9 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
 
         is_active = data.get('is_active', True)
         if is_active:
-            PromptConfig.objects.filter(prompt_type=prompt_type, is_active=True).update(is_active=False)
+            AITestPromptConfig.objects.filter(prompt_type=prompt_type, is_active=True).update(is_active=False)
 
-        config = PromptConfig.objects.create(
+        config = AITestPromptConfig.objects.create(
             name=data['name'],
             prompt_type=prompt_type,
             content=data['content'],
@@ -741,13 +741,13 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
     def update(self, request, pk=None):
         try:
             config = self._get_queryset().get(pk=pk)
-        except PromptConfig.DoesNotExist:
+        except AITestPromptConfig.DoesNotExist:
             return Response({'error': 'Config not found'}, status=status.HTTP_404_NOT_FOUND)
 
         data = request.data
         new_is_active = data.get('is_active', config.is_active)
         if new_is_active and not config.is_active:
-            PromptConfig.objects.filter(prompt_type=config.prompt_type, is_active=True).exclude(pk=pk).update(is_active=False)
+            AITestPromptConfig.objects.filter(prompt_type=config.prompt_type, is_active=True).exclude(pk=pk).update(is_active=False)
 
         if 'name' in data:
             config.name = data['name']
@@ -776,7 +776,7 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
             config = self._get_queryset().get(pk=pk)
             config.delete()
             return Response({'message': 'Config deleted'}, status=status.HTTP_204_NO_CONTENT)
-        except PromptConfig.DoesNotExist:
+        except AITestPromptConfig.DoesNotExist:
             return Response({'error': 'Config not found'}, status=status.HTTP_404_NOT_FOUND)
 
     @action(detail=False, methods=['get'])
@@ -785,8 +785,10 @@ class AIModePromptConfigViewSet(viewsets.ViewSet):
         from django.conf import settings
         defaults = {}
         for prompt_type, filename in [
-            ('browser_use_text', 'browser_use_text.md'),
-            ('browser_use_vision', 'browser_use_vision.md'),
+            ('planner_text', 'browser_use_text.md'),
+            ('planner_vision', 'browser_use_vision.md'),
+            ('executor_text', 'browser_use_text.md'),
+            ('executor_vision', 'browser_use_vision.md'),
             ('hermes_agent', 'hermes_agent.md'),
         ]:
             filepath = os.path.join(settings.BASE_DIR, 'docs', filename)

@@ -20,7 +20,6 @@ from .views import (
     UiNotificationLogViewSet,
     dashboard_stats
 )
-from .views_config import EnvironmentConfigViewSet, AIIntelligentModeConfigViewSet, AIModePromptConfigViewSet
 
 router = DefaultRouter()
 router.register(r'projects', UiProjectViewSet)
@@ -37,9 +36,6 @@ router.register(r'test-case-executions', TestCaseExecutionViewSet)
 router.register(r'recordings', RecordingSessionViewSet)
 router.register(r'ui-notification-logs', UiNotificationLogViewSet)
 router.register(r'operation-records', OperationRecordViewSet)
-router.register(r'config/environment', EnvironmentConfigViewSet, basename='ui-environment-config')
-router.register(r'config/ai-mode', AIIntelligentModeConfigViewSet, basename='ui-aimode-config')
-router.register(r'config/ai-mode-prompt', AIModePromptConfigViewSet, basename='ui-aimode-prompt-config')
 
 urlpatterns = [
     path('dashboard/stats/', dashboard_stats, name='ui-dashboard-stats'),

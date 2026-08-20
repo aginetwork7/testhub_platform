@@ -101,8 +101,6 @@
                 <option value="executor_text">Executor - {{ $t('configuration.aiMode.roles.text') }}</option>
                 <option value="executor_vision">Executor - {{ $t('configuration.aiMode.roles.vision') }}</option>
                 <option value="hermes_agent">{{ $t('configuration.aiMode.roles.hermes') }}</option>
-                <option value="alpha_planner">Alpha Planner</option>
-                <option value="alpha_reflection">Alpha Reflection</option>
               </select>
               <small class="form-hint">{{ $t('configuration.aiMode.executionModeHint') }}</small>
             </div>
@@ -278,21 +276,11 @@ const primaryGroups = computed(() => [
       { role: 'executor_text', label: 'Text Executor' }
     ]
   },
-  {
-    key: 'alpha',
-    title: 'Alpha Models',
-    description: 'Plan and reflect on durable Alpha workflow revisions.',
-    slots: [
-      { role: 'alpha_planner', label: 'Alpha Planner' },
-      { role: 'alpha_reflection', label: 'Alpha Reflection' }
-    ]
-  }
 ])
 
 const configsByRole = (role) => configs.value.filter(config => config.role === role)
 const legacyConfigs = computed(() => configs.value.filter(config => ![
-  'planner_text', 'planner_vision', 'executor_text', 'executor_vision',
-  'alpha_planner', 'alpha_reflection'
+  'planner_text', 'planner_vision', 'executor_text', 'executor_vision'
 ].includes(config.role)))
 
 const getProviderLabel = (modelType) => {
@@ -318,18 +306,12 @@ const getRoleLabel = (role) => {
   if (role === 'hermes_agent') {
     return t('configuration.aiMode.roles.hermes')
   }
-  if (role === 'alpha_planner') {
-    return 'Alpha Planner'
-  }
-  if (role === 'alpha_reflection') {
-    return 'Alpha Reflection'
-  }
   return t('configuration.aiMode.roles.text')
 }
 
 const loadConfigs = async () => {
   try {
-    const response = await api.get('/ui-automation/config/ai-mode/')
+    const response = await api.get('/ai-test/models/')
     if (response.data && Array.isArray(response.data)) {
       configs.value = response.data.map(config => ({
         ...config,
@@ -414,7 +396,7 @@ const saveConfig = async () => {
         delete saveData.api_key
       }
 
-      const response = await api.put(`/ui-automation/config/ai-mode/${editingConfigId.value}/`, saveData)
+      const response = await api.put(`/ai-test/models/${editingConfigId.value}/`, saveData)
 
       // 检查是否禁用了其他配置
       if (response.data.disabled_configs && response.data.disabled_configs.length > 0) {
@@ -426,7 +408,7 @@ const saveConfig = async () => {
       }
     } else {
       // 新增配置
-      const response = await api.post('/ui-automation/config/ai-mode/', saveData)
+      const response = await api.post('/ai-test/models/', saveData)
 
       // 检查是否禁用了其他配置
       if (response.data.disabled_configs && response.data.disabled_configs.length > 0) {
@@ -464,7 +446,7 @@ const deleteConfig = async (configId) => {
   }
 
   try {
-    await api.delete(`/ui-automation/config/ai-mode/${configId}/`)
+    await api.delete(`/ai-test/models/${configId}/`)
     ElMessage.success(t('configuration.aiMode.messages.deleteSuccess'))
     await loadConfigs()
   } catch (error) {
@@ -500,7 +482,7 @@ const toggleActive = async (config) => {
   config.toggling = true
 
   try {
-    await api.patch(`/ui-automation/config/ai-mode/${config.id}/`, {
+    await api.patch(`/ai-test/models/${config.id}/`, {
       is_active: config.is_active
     })
 
@@ -522,7 +504,7 @@ const testConnection = async (config) => {
   try {
     // 测试连接需要更长的超时时间（90秒），因为大模型响应较慢
     const response = await api.post(
-      `/ui-automation/config/ai-mode/${config.id}/test_connection/`,
+      `/ai-test/models/${config.id}/test_connection/`,
       {},
       { timeout: 90000 }  // 90秒超时
     )
@@ -561,7 +543,7 @@ const testConnectionInModal = async () => {
     try {
       // 测试连接需要90秒超时
       const response = await api.post(
-        `/ui-automation/config/ai-mode/${editingConfigId.value}/test_connection/`,
+        `/ai-test/models/${editingConfigId.value}/test_connection/`,
         {},
         { timeout: 90000 }
       )
@@ -590,7 +572,7 @@ const testConnectionInModal = async () => {
   try {
     // 测试连接需要90秒超时
     const response = await api.post(
-      '/ui-automation/config/ai-mode/test_connection/',
+      '/ai-test/models/test_connection/',
       {
         provider: configForm.value.model_type,
         role: configForm.value.role,

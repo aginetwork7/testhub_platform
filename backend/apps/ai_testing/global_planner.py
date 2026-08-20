@@ -112,9 +112,9 @@ class VisualStepReplanner:
 
     @staticmethod
     def _load_active_model_config():
-        from apps.requirement_analysis.models import AIModelConfig
+        from apps.ai_testing.models import AITestModelConfig
 
-        return AIModelConfig.objects.filter(role='planner_vision', is_active=True).first()
+        return AITestModelConfig.objects.filter(role='planner_vision', is_active=True).first()
 
     async def _get_active_model_config(self):
         return await sync_to_async(self._load_active_model_config)()
@@ -134,7 +134,10 @@ class GlobalTestPlanner:
 
         from apps.requirement_analysis.models import AIModelService
 
-        messages = self._build_messages(task_description, api_automation_configuration_id)
+        prompt_content = await sync_to_async(self._load_active_prompt_content)('planner_text')
+        if not prompt_content:
+            raise GlobalPlanError('未配置可用的 Planner 文本提示词。')
+        messages = self._build_messages(task_description, api_automation_configuration_id, prompt_content)
         last_error: GlobalPlanError | None = None
         for config in configs:
             retry_messages = list(messages)
@@ -156,7 +159,11 @@ class GlobalTestPlanner:
         raise GlobalPlanError('Planner 连续返回空或无效 JSON 计划。') from last_error
 
     @staticmethod
-    def _build_messages(task_description: str, configuration_id: int | None) -> list[dict[str, Any]]:
+    def _build_messages(
+        task_description: str,
+        configuration_id: int | None,
+        prompt_content: str,
+    ) -> list[dict[str, Any]]:
         device_context = (
             '设备 CLI 环境已配置，可以输出 device_cli 步骤。'
             if configuration_id is not None
@@ -166,6 +173,7 @@ class GlobalTestPlanner:
             {
                 'role': 'system',
                 'content': (
+                    f'{prompt_content}\n\n'
                     'You are a test planner. Convert the user goal into an ordered JSON object '
                     'with one key, steps. Each step must have executor and description. '
                     'executor can only be browser, data_factory, or device_cli. '
@@ -344,10 +352,10 @@ class GlobalTestPlanner:
 
     @staticmethod
     def _load_active_model_configs():
-        from apps.requirement_analysis.models import AIModelConfig
+        from apps.ai_testing.models import AITestModelConfig
 
         configs = list(
-            AIModelConfig.objects.filter(
+            AITestModelConfig.objects.filter(
                 role='planner_text',
                 is_active=True,
             ).order_by('id')
@@ -360,6 +368,13 @@ class GlobalTestPlanner:
                 seen.add(fingerprint)
                 unique_configs.append(config)
         return unique_configs
+
+    @staticmethod
+    def _load_active_prompt_content(prompt_type: str) -> str:
+        from apps.ai_testing.models import AITestPromptConfig
+
+        config = AITestPromptConfig.get_active_config(prompt_type)
+        return config.content.strip() if config and config.content else ''
 
     async def _get_active_model_configs(self):
         return await sync_to_async(self._load_active_model_configs)()

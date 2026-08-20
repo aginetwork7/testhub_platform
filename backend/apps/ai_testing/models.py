@@ -2,6 +2,72 @@ from django.db import models
 from django.conf import settings
 from apps.unified_projects.models import MetaProject
 
+
+class AITestModelConfig(models.Model):
+    """OpenAI-compatible model settings dedicated to AI Intelligent Testing."""
+
+    ROLE_CHOICES = [
+        ('planner_text', 'Planner 文本模型'),
+        ('planner_vision', 'Planner 视觉模型'),
+        ('executor_text', 'Executor 文本模型'),
+        ('executor_vision', 'Executor 视觉模型'),
+        ('hermes_agent', 'Hermes Agent 模型'),
+    ]
+    MODEL_TYPE_CHOICES = [
+        ('deepseek', 'DeepSeek'),
+        ('qwen', '通义千问'),
+        ('gemini', 'Google Gemini'),
+        ('siliconflow', '硅基流动'),
+        ('zhipu', '智谱'),
+        ('other', '其他'),
+    ]
+
+    name = models.CharField(max_length=100, verbose_name='配置名称')
+    model_type = models.CharField(max_length=20, choices=MODEL_TYPE_CHOICES, verbose_name='模型类型')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, verbose_name='角色')
+    api_key = models.CharField(max_length=200, blank=True, default='', verbose_name='API Key')
+    base_url = models.URLField(blank=True, default='', verbose_name='API Base URL')
+    model_name = models.CharField(max_length=100, verbose_name='模型名称')
+    max_tokens = models.IntegerField(default=4096, verbose_name='最大Token数')
+    temperature = models.FloatField(default=0.7, verbose_name='温度参数')
+    top_p = models.FloatField(default=0.9, verbose_name='Top P参数')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='ai_test_model_configs', verbose_name='创建者')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ai_testing_model_configs'
+        ordering = ['role', '-updated_at']
+
+
+class AITestPromptConfig(models.Model):
+    """Prompt settings dedicated to AI Intelligent Testing."""
+
+    PROMPT_TYPE_CHOICES = [
+        ('planner_text', 'Planner 文本提示词'),
+        ('planner_vision', 'Planner 视觉提示词'),
+        ('executor_text', 'Executor 文本提示词'),
+        ('executor_vision', 'Executor 视觉提示词'),
+        ('hermes_agent', 'Hermes Agent 提示词'),
+    ]
+
+    name = models.CharField(max_length=100, verbose_name='配置名称')
+    prompt_type = models.CharField(max_length=20, choices=PROMPT_TYPE_CHOICES, verbose_name='提示词类型')
+    content = models.TextField(verbose_name='提示词内容')
+    is_active = models.BooleanField(default=True, verbose_name='是否启用')
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='ai_test_prompt_configs', verbose_name='创建者')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ai_testing_prompt_configs'
+        ordering = ['prompt_type', '-updated_at']
+
+    @classmethod
+    def get_active_config(cls, prompt_type: str):
+        return cls.objects.filter(prompt_type=prompt_type, is_active=True).order_by('id').first()
+
 class AiProject(models.Model):
     """AI测试项目"""
     name = models.CharField(max_length=100, verbose_name='项目名称')
