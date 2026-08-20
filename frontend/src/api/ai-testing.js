@@ -186,12 +186,20 @@ export function confirmAIExecutionExperience(id, reviewNote = '') {
   })
 }
 
-// 拒绝并禁用一条错误经验
-export function rejectAIExecutionExperience(id, reviewNote = '') {
+// 删除一条经验
+export function deleteAIExecutionExperience(id) {
   return request({
-    url: `/ai-testing/ai-execution-experiences/${id}/reject/`,
-    method: 'post',
-    data: { review_note: reviewNote }
+    url: `/ai-testing/ai-execution-experiences/${id}/`,
+    method: 'delete'
+  })
+}
+
+// 清空当前筛选范围内的经验
+export function clearAIExecutionExperiences(params) {
+  return request({
+    url: '/ai-testing/ai-execution-experiences/clear/',
+    method: 'delete',
+    params
   })
 }
 

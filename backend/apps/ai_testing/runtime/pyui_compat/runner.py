@@ -985,15 +985,17 @@ class PyUICompatAgent:
                         step_description=str(step.get('description') or '').strip(),
                         page_url=page_context.get('url', ''),
                         action_sequence=safe_actions,
+                        status='pending',
+                        review_status='pending',
                     )
                     return True
                 experience.ai_case_id = self.ai_case_id
                 experience.execution_record_id = self.execution_record_id
                 experience.page_url = page_context.get('url', '')
                 experience.action_sequence = safe_actions
-                experience.status = 'verified'
-                experience.success_count += 1
-                experience.confidence = min(0.95, 0.7 + experience.success_count * 0.05)
+                if experience.status == 'verified':
+                    experience.success_count += 1
+                    experience.confidence = min(0.95, 0.7 + experience.success_count * 0.05)
                 experience.save()
                 return True
 

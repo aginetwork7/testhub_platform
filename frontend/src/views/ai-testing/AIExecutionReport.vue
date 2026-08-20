@@ -49,20 +49,20 @@
               </el-tag>
             </div>
             <div class="overview-card">
-              <div class="card-label">执行模式</div>
-              <div class="card-value">{{ reportData.overview.execution_mode_display || '-' }}</div>
+              <div class="card-label">{{ $t('uiAutomation.ai.executionReport.executionSteps') }}</div>
+              <div class="card-value">{{ reportData.overview.total_steps }} {{ $t('uiAutomation.ai.executionReport.steps') }}</div>
             </div>
             <div class="overview-card">
               <div class="card-label">{{ $t('uiAutomation.ai.executionReport.executionDuration') }}</div>
               <div class="card-value">{{ reportData.overview.duration_formatted }}</div>
             </div>
             <div class="overview-card">
-              <div class="card-label">{{ $t('uiAutomation.ai.executionReport.completionRate') }}</div>
-              <div class="card-value">{{ reportData.overview.completion_rate }}%</div>
+              <div class="card-label">执行模式</div>
+              <div class="card-value">{{ reportData.overview.execution_mode_display || '-' }}</div>
             </div>
             <div class="overview-card">
-              <div class="card-label">{{ $t('uiAutomation.ai.executionReport.executionSteps') }}</div>
-              <div class="card-value">{{ reportData.overview.total_steps }} {{ $t('uiAutomation.ai.executionReport.steps') }}</div>
+              <div class="card-label">{{ $t('uiAutomation.ai.executionReport.completionRate') }}</div>
+              <div class="card-value">{{ reportData.overview.completion_rate }}%</div>
             </div>
           </div>
         </div>
@@ -827,7 +827,7 @@ const handleClose = () => {
 
 .overview-cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 16px;
 }
 
