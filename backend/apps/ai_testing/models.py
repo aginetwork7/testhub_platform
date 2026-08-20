@@ -178,10 +178,12 @@ class AIExecutionExperience(models.Model):
     """A verified, reusable action sequence for one AI-planned step."""
 
     STATUS_CHOICES = [
+        ('pending', '待定'),
         ('verified', '已验证'),
         ('invalid', '已失效'),
     ]
     REVIEW_STATUS_CHOICES = [
+        ('pending', '待确认'),
         ('auto_verified', '自动验证'),
         ('confirmed', '人工确认'),
         ('rejected', '人工拒绝'),
@@ -196,8 +198,8 @@ class AIExecutionExperience(models.Model):
     page_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='页面指纹')
     environment_key = models.CharField(max_length=200, blank=True, default='', verbose_name='环境标识')
     action_sequence = models.JSONField(default=list, verbose_name='已验证动作序列')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='verified', db_index=True, verbose_name='状态')
-    review_status = models.CharField(max_length=20, choices=REVIEW_STATUS_CHOICES, default='auto_verified', verbose_name='审核状态')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True, verbose_name='状态')
+    review_status = models.CharField(max_length=20, choices=REVIEW_STATUS_CHOICES, default='pending', verbose_name='审核状态')
     review_note = models.TextField(blank=True, default='', verbose_name='审核备注')
     success_count = models.PositiveIntegerField(default=1, verbose_name='成功次数')
     failure_count = models.PositiveIntegerField(default=0, verbose_name='失败次数')

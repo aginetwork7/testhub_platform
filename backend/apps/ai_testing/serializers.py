@@ -147,6 +147,7 @@ class AIExecutionRecordSerializer(serializers.Serializer):
     ai_case_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     project_name = serializers.SerializerMethodField()
     ai_case_name = serializers.SerializerMethodField()
+    case_number = serializers.SerializerMethodField()
     case_name = serializers.CharField(max_length=200, required=False)
     task_description = serializers.CharField(required=False, allow_blank=True)
     execution_mode = serializers.CharField(required=False)
@@ -169,6 +170,9 @@ class AIExecutionRecordSerializer(serializers.Serializer):
 
     def get_ai_case_name(self, obj):
         return obj.ai_case.name if obj.ai_case else ''
+
+    def get_case_number(self, obj):
+        return obj.ai_case.case_number if obj.ai_case else ''
 
     def get_executed_by_name(self, obj):
         return obj.executed_by.username if obj.executed_by else ''

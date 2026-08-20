@@ -35,15 +35,9 @@
             {{ row.id }}
           </template>
         </el-table-column>
+        <el-table-column prop="case_number" label="用例编号" width="130" show-overflow-tooltip />
         <el-table-column prop="case_name" :label="$t('uiAutomation.ai.executionRecords.caseName')" min-width="200" show-overflow-tooltip />
         <el-table-column prop="project_name" label="项目" min-width="140" show-overflow-tooltip />
-        <el-table-column label="执行模式" width="120">
-          <template #default="{ row }">
-            <el-tag :type="getExecutionModeTag(row.execution_mode)">
-              {{ getExecutionModeText(row.execution_mode) }}
-            </el-tag>
-          </template>
-        </el-table-column>
 
         <el-table-column prop="status" :label="$t('uiAutomation.ai.executionRecords.status')" width="120">
           <template #default="{ row }">
@@ -159,17 +153,27 @@
           {{ learningMetrics.learning.experience_hits }}
         </el-descriptions-item>
         <el-descriptions-item label="有效经验">
-          {{ learningMetrics.learning.experience_active }}
+          {{ learningMetrics.learning.experience_confirmed }}
         </el-descriptions-item>
       </el-descriptions>
+
+      <div class="learning-toolbar">
+        <el-radio-group v-model="experienceStatus" @change="loadLearningData">
+          <el-radio-button value="pending">待定</el-radio-button>
+          <el-radio-button value="verified">有效</el-radio-button>
+        </el-radio-group>
+        <el-button type="danger" :disabled="experiences.length === 0" @click="clearExperiences">
+          清空
+        </el-button>
+      </div>
 
       <el-table v-loading="learningLoading" :data="experiences" style="margin-top: 16px">
         <el-table-column prop="step_description" label="步骤" min-width="260" show-overflow-tooltip />
         <el-table-column prop="environment_key" label="环境" min-width="120" show-overflow-tooltip />
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'verified' ? 'success' : 'danger'">
-              {{ row.status === 'verified' ? '有效' : '已失效' }}
+            <el-tag :type="row.review_status === 'confirmed' ? 'success' : 'warning'">
+              {{ row.review_status === 'confirmed' ? '有效' : '待定' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -183,11 +187,11 @@
         </el-table-column>
         <el-table-column label="操作" width="100" fixed="right">
           <template #default="{ row }">
-            <el-tooltip content="确认经验" placement="top">
-              <el-button circle type="success" :icon="Check" :disabled="row.status !== 'verified'" @click="confirmExperience(row)" />
+            <el-tooltip v-if="row.review_status !== 'confirmed'" content="确认经验" placement="top">
+              <el-button circle type="success" :icon="Check" @click="confirmExperience(row)" />
             </el-tooltip>
-            <el-tooltip content="禁用经验" placement="top">
-              <el-button circle type="danger" :icon="Close" :disabled="row.status !== 'verified'" @click="rejectExperience(row)" />
+            <el-tooltip content="删除经验" placement="top">
+              <el-button circle type="danger" :icon="Delete" @click="deleteExperience(row)" />
             </el-tooltip>
           </template>
         </el-table-column>
@@ -200,8 +204,8 @@
 import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Close, Delete } from '@element-plus/icons-vue'
-import { batchDeleteAIExecutionRecords, confirmAIExecutionExperience, getAIExecutionExperiences, getAIExecutionRecord, getAIExecutionRecords, getAILearningMetrics, getAiProjects, rejectAIExecutionExperience } from '@/api/ai-testing'
+import { Check, Delete } from '@element-plus/icons-vue'
+import { batchDeleteAIExecutionRecords, clearAIExecutionExperiences, confirmAIExecutionExperience, deleteAIExecutionExperience, getAIExecutionExperiences, getAIExecutionRecord, getAIExecutionRecords, getAILearningMetrics, getAiProjects } from '@/api/ai-testing'
 import AIExecutionReport from './AIExecutionReport.vue'
 
 const { t } = useI18n()
@@ -233,6 +237,7 @@ const showLearningDialog = ref(false)
 const learningMetrics = ref(null)
 const learningLoading = ref(false)
 const experiences = ref([])
+const experienceStatus = ref('pending')
 
 const projectOptions = computed(() => [
   { id: ALL_PROJECT_VALUE, name: 'ALL' },
@@ -393,7 +398,7 @@ const loadLearningData = async () => {
     const params = learningQueryParams()
     const [metricsResponse, experiencesResponse] = await Promise.all([
       getAILearningMetrics(params),
-      getAIExecutionExperiences({ ...params, page_size: 100 })
+      getAIExecutionExperiences({ ...params, review_scope: experienceStatus.value, page_size: 100 })
     ])
     learningMetrics.value = metricsResponse.data
     experiences.value = experiencesResponse.data.results || experiencesResponse.data
@@ -421,20 +426,38 @@ const confirmExperience = async (experience) => {
   }
 }
 
-const rejectExperience = async (experience) => {
+const deleteExperience = async (experience) => {
   try {
-    await ElMessageBox.confirm('禁用后，AI 将不再复用该经验。', '禁用经验', {
-      confirmButtonText: '确认禁用',
+    await ElMessageBox.confirm('删除后无法恢复该经验。', '删除经验', {
+      confirmButtonText: '确认删除',
       cancelButtonText: t('uiAutomation.common.cancel'),
       type: 'warning'
     })
-    await rejectAIExecutionExperience(experience.id)
-    ElMessage.success('经验已禁用')
+    await deleteAIExecutionExperience(experience.id)
+    ElMessage.success('经验已删除')
     await loadLearningData()
   } catch (error) {
     if (error !== 'cancel') {
-      console.error('禁用 AI 经验失败:', error)
-      ElMessage.error('禁用 AI 经验失败')
+      console.error('删除 AI 经验失败:', error)
+      ElMessage.error('删除 AI 经验失败')
+    }
+  }
+}
+
+const clearExperiences = async () => {
+  try {
+    await ElMessageBox.confirm(`确认清空当前页面的${experienceStatus.value === 'pending' ? '待定' : '有效'}经验？`, '清空经验', {
+      confirmButtonText: '确认清空',
+      cancelButtonText: t('uiAutomation.common.cancel'),
+      type: 'warning'
+    })
+    await clearAIExecutionExperiences({ ...learningQueryParams(), review_scope: experienceStatus.value })
+    ElMessage.success('当前页面经验已清空')
+    await loadLearningData()
+  } catch (error) {
+    if (error !== 'cancel') {
+      console.error('清空 AI 经验失败:', error)
+      ElMessage.error('清空 AI 经验失败')
     }
   }
 }
@@ -650,5 +673,12 @@ onUnmounted(() => {
 
 .mt-15 {
   margin-top: 15px;
+}
+
+.learning-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
 }
 </style>

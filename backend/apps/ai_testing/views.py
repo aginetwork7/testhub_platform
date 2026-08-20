@@ -968,7 +968,7 @@ def is_infrastructure_failure(error_message: str) -> bool:
     return any(marker in message for marker in infra_markers)
 
 
-class AIExecutionExperienceViewSet(viewsets.ReadOnlyModelViewSet):
+class AIExecutionExperienceViewSet(viewsets.ModelViewSet):
     queryset = AIExecutionExperience.objects.all()
     serializer_class = AIExecutionExperienceSerializer
     permission_classes = [IsAuthenticated]
@@ -977,9 +977,15 @@ class AIExecutionExperienceViewSet(viewsets.ReadOnlyModelViewSet):
     ordering = ['-confidence', '-last_verified_at']
 
     def get_queryset(self):
-        return AIExecutionExperience.objects.filter(
+        queryset = AIExecutionExperience.objects.filter(
             project__in=build_accessible_ai_project_queryset(self.request.user),
         ).select_related('project', 'ai_case', 'execution_record')
+        review_scope = str(self.request.query_params.get('review_scope') or '').strip().lower()
+        if review_scope == 'pending':
+            return queryset.filter(review_status__in=['pending', 'auto_verified'])
+        if review_scope == 'verified':
+            return queryset.filter(status='verified', review_status='confirmed')
+        return queryset
 
     @action(detail=True, methods=['post'])
     def confirm(self, request, pk=None):
@@ -991,15 +997,16 @@ class AIExecutionExperienceViewSet(viewsets.ReadOnlyModelViewSet):
         experience.save(update_fields=['status', 'review_status', 'review_note', 'confidence', 'updated_at'])
         return Response(self.get_serializer(experience).data)
 
-    @action(detail=True, methods=['post'])
-    def reject(self, request, pk=None):
+    def destroy(self, request, *args, **kwargs):
         experience = self.get_object()
-        experience.status = 'invalid'
-        experience.review_status = 'rejected'
-        experience.review_note = str(request.data.get('review_note') or '').strip()
-        experience.confidence = 0
-        experience.save(update_fields=['status', 'review_status', 'review_note', 'confidence', 'updated_at'])
-        return Response(self.get_serializer(experience).data)
+        experience.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=['delete'], url_path='clear')
+    def clear(self, request):
+        experiences = self.filter_queryset(self.get_queryset())
+        deleted_count, _ = experiences.delete()
+        return Response({'deleted_count': deleted_count})
 
 
 class AIExecutionRecordViewSet(viewsets.ModelViewSet):
@@ -1069,7 +1076,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             },
             'learning': {
                 'experience_total': experiences.count(),
-                'experience_active': experiences.filter(status='verified').count(),
+                'experience_active': experiences.filter(status='verified', review_status='confirmed').count(),
                 'experience_confirmed': experiences.filter(review_status='confirmed', status='verified').count(),
                 'experience_invalid': experiences.filter(status='invalid').count(),
                 'cache_hits': cache_hits,
