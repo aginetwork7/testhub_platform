@@ -74,17 +74,40 @@
               <el-collapse v-model="assistantHistoryTabs" class="assistant-history">
                 <el-collapse-item name="chat">
                   <template #title><span class="assistant-history-tab-title"><el-icon class="assistant-history-mode-icon assistant-history-gradient"><ChatDotSquare /></el-icon><span>Chat</span></span></template>
-                  <button
+                  <div
                     v-for="session in assistantHistory"
                     :key="session.id"
-                    type="button"
+                    class="assistant-history-session"
                     :class="{ active: assistantCurrentSession?.id === session.id && assistantMode === 'chat' }"
+                    role="button"
+                    tabindex="0"
                     @click="selectAssistantSession(session)"
+                    @keydown.enter="selectAssistantSession(session)"
                   >
                     <el-icon class="assistant-history-mode-icon assistant-history-gradient"><ChatDotSquare /></el-icon>
                     <span>{{ session.title || $t('assistant.newChat') }}</span>
-                    <el-icon class="assistant-history-delete" @click.stop="deleteAssistantSession(session.id)"><Delete /></el-icon>
-                  </button>
+                    <el-dropdown trigger="click" @command="handleAssistantSessionAction($event, session)">
+                      <button type="button" class="assistant-history-more" aria-label="会话操作" @click.stop>
+                        <el-icon><MoreFilled /></el-icon>
+                      </button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="toggle-pin">
+                            <el-icon><Unlock v-if="session.is_pinned" /><Lock v-else /></el-icon>
+                            {{ session.is_pinned ? 'Unpin' : 'Pin' }}
+                          </el-dropdown-item>
+                          <el-dropdown-item command="rename">
+                            <el-icon><EditPen /></el-icon>
+                            Rename
+                          </el-dropdown-item>
+                          <el-dropdown-item command="delete">
+                            <el-icon><Delete /></el-icon>
+                            Delete
+                          </el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
                 </el-collapse-item>
                 <el-collapse-item name="agent">
                   <template #title><span class="assistant-history-tab-title"><el-icon class="assistant-history-mode-icon assistant-history-gradient"><Service /></el-icon><span>Agent</span></span></template>
@@ -92,6 +115,7 @@
                     v-for="run in assistantAlphaRuns"
                     :key="run.id"
                     type="button"
+                    class="assistant-history-agent"
                     :class="{ active: assistantActiveAlphaRun?.id === run.id && assistantMode === 'agent' }"
                     @click="selectAssistantAlphaRun(run)"
                   >
@@ -450,12 +474,13 @@ import { computed, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
   DataAnalysis, ChatDotSquare, Service, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Files, User
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Files, User,
+  Delete, EditPen, Lock, MoreFilled, Unlock
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
 import logoHomePng from '@/assets/images/logo_home.png'
@@ -501,6 +526,35 @@ const deleteAssistantSession = async (sessionId) => {
     ElMessage.success(t('assistant.messages.sessionDeleted'))
   } catch (error) {
     ElMessage.error(t('assistant.messages.deleteSessionFailed'))
+  }
+}
+
+const renameAssistantSession = async (session) => {
+  const { value } = await ElMessageBox.prompt('请输入会话名称', '重命名会话', {
+    inputValue: session.title,
+    inputPattern: /\S+/,
+    inputErrorMessage: '会话名称不能为空',
+  })
+  await assistantSessionStore.updateSession(session.id, { title: value.trim() })
+}
+
+const handleAssistantSessionAction = async (command, session) => {
+  try {
+    if (command === 'toggle-pin') {
+      await assistantSessionStore.updateSession(session.id, { is_pinned: !session.is_pinned })
+      return
+    }
+    if (command === 'rename') {
+      await renameAssistantSession(session)
+      return
+    }
+    if (command === 'delete') {
+      await deleteAssistantSession(session.id)
+    }
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error('会话操作失败')
+    }
   }
 }
 
@@ -815,7 +869,8 @@ const handleCommand = (command) => {
   padding-bottom: 6px;
 }
 
-.assistant-history button {
+.assistant-history-session,
+.assistant-history-agent {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 16px;
   align-items: center;
@@ -831,12 +886,15 @@ const handleCommand = (command) => {
   text-align: left;
 }
 
-.assistant-history button:hover,
-.assistant-history button.active {
+.assistant-history-session:hover,
+.assistant-history-session.active,
+.assistant-history-agent:hover,
+.assistant-history-agent.active {
   background: #112a45;
 }
 
-.assistant-history button.active {
+.assistant-history-session.active,
+.assistant-history-agent.active {
   box-shadow: inset 3px 0 0 #1890ff;
   color: #fff;
 }
@@ -850,6 +908,31 @@ const handleCommand = (command) => {
 
 .assistant-history-delete {
   opacity: 0;
+}
+
+.assistant-history-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.assistant-history-session:hover .assistant-history-more,
+.assistant-history-session:focus-within .assistant-history-more {
+  opacity: 1;
+}
+
+.assistant-history-more:focus-visible {
+  outline: 1px solid #1890ff;
+  border-radius: 2px;
+  opacity: 1;
 }
 
 .assistant-history button:hover .assistant-history-delete {

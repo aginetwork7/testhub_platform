@@ -8,14 +8,43 @@ const assistantMode = ref('chat')
 const alphaRuns = ref([])
 const activeAlphaRun = ref(null)
 
+const sortHistorySessions = (sessions) => [...sessions].sort((first, second) => {
+  if (Boolean(first.is_pinned) !== Boolean(second.is_pinned)) {
+    return Number(Boolean(second.is_pinned)) - Number(Boolean(first.is_pinned))
+  }
+  return new Date(second.updated_at) - new Date(first.updated_at)
+})
+
 const startNewChat = () => {
   currentSession.value = null
   messages.value = []
 }
 
+const upsertHistorySession = (session) => {
+  historySessions.value = sortHistorySessions([
+    session,
+    ...historySessions.value.filter((item) => item.id !== session.id),
+  ])
+}
+
 const loadHistory = async () => {
   const response = await api.get('/assistant/sessions/')
-  historySessions.value = response.data.results || response.data || []
+  const sessions = response.data.results || response.data || []
+  historySessions.value = sortHistorySessions(Array.from(
+    new Map(sessions.map((session) => [session.id, session])).values(),
+  ))
+}
+
+const updateSession = async (sessionId, changes) => {
+  const response = await api.patch(`/assistant/sessions/${sessionId}/`, changes)
+  const session = response.data
+  upsertHistorySession(session)
+
+  if (currentSession.value?.id === session.id) {
+    currentSession.value = { ...currentSession.value, ...session }
+  }
+
+  return session
 }
 
 const loadAlphaRuns = async () => {
@@ -67,6 +96,8 @@ export const assistantSessionStore = {
   alphaRuns,
   activeAlphaRun,
   startNewChat,
+  upsertHistorySession,
+  updateSession,
   loadHistory,
   loadAlphaRuns,
   selectSession,

@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .models import AgentModelConfig, AgentPromptConfig, AssistantSession
+from .models import AgentModelConfig, AgentPromptConfig, AssistantSession, ChatMessage
 from apps.requirement_analysis.models import AIModelConfig
 
 class AgentModelConfigApiTests(TestCase):
@@ -160,3 +160,32 @@ class AgentModelConfigApiTests(TestCase):
 		self.assertIn('"type": "thinking"', payload)
 		self.assertIn('"type": "chunk"', payload)
 		self.assertIn('"type": "done"', payload)
+
+	def test_chat_message_persistence_updates_session_history(self):
+		session = AssistantSession.objects.create(user=self.user, session_id='persisted-session', title='Persisted')
+		AssistantSession.objects.filter(pk=session.pk).update(updated_at=timezone.now() - timedelta(minutes=5))
+		previous_updated_at = AssistantSession.objects.get(pk=session.pk).updated_at
+
+		ChatMessage.objects.create(session=session, role='user', content='保留这条消息')
+
+		refreshed_session = AssistantSession.objects.get(pk=session.pk)
+		messages_response = self.client.get(f'/api/assistant/sessions/{session.id}/messages/')
+
+		self.assertGreater(refreshed_session.updated_at, previous_updated_at)
+		self.assertEqual(messages_response.status_code, 200)
+		self.assertEqual(messages_response.data[0]['content'], '保留这条消息')
+
+	def test_chat_session_can_be_renamed_and_pinned(self):
+		session = AssistantSession.objects.create(user=self.user, session_id='mutable-session', title='Before')
+
+		response = self.client.patch(
+			f'/api/assistant/sessions/{session.id}/',
+			{'title': 'After', 'is_pinned': True},
+			format='json',
+		)
+
+		session.refresh_from_db()
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(session.title, 'After')
+		self.assertTrue(session.is_pinned)

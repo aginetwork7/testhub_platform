@@ -82,6 +82,7 @@ class AssistantSession(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='assistant_sessions', verbose_name='用户')
     session_id = models.CharField(max_length=200, verbose_name='会话ID')
     title = models.CharField(max_length=500, blank=True, verbose_name='会话标题')
+    is_pinned = models.BooleanField(default=False, verbose_name='是否置顶')
     created_at = models.DateTimeField(default=timezone.now, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
     
@@ -89,7 +90,7 @@ class AssistantSession(models.Model):
         db_table = 'assistant_sessions'
         verbose_name = '智能助手会话'
         verbose_name_plural = '智能助手会话'
-        ordering = ['-updated_at']
+        ordering = ['-is_pinned', '-updated_at']
     
     def __str__(self):
         return f"{self.user.username} - {self.title or self.session_id}"
@@ -115,6 +116,10 @@ class ChatMessage(models.Model):
     
     def __str__(self):
         return f"{self.get_role_display()}: {self.content[:50]}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        AssistantSession.objects.filter(pk=self.session_id).update(updated_at=timezone.now())
 
 
 class AssistantMessage(models.Model):
