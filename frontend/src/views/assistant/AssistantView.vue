@@ -660,8 +660,7 @@ const sendMessage = async () => {
       currentSession.value = sessionRes.data
       sessionId = currentSession.value.session_id // 注意：后端返回的是对象，这里需要用 session_id 字段
       
-      // 立即添加到历史列表
-      historySessions.value.unshift(currentSession.value)
+      assistantSessionStore.upsertHistorySession(currentSession.value)
     } else {
       // 如果是已有会话，使用 session_id 字段
       sessionId = currentSession.value.session_id
@@ -733,10 +732,10 @@ const sendMessage = async () => {
     if (!isFirstMessage) {
       const index = historySessions.value.findIndex(s => s.id === currentSession.value.id)
       if (index !== -1) {
-        historySessions.value[index] = { ...currentSession.value, updated_at: new Date().toISOString() }
-        // 重新排序（移到最前）
-        const updatedSession = historySessions.value.splice(index, 1)[0]
-        historySessions.value.unshift(updatedSession)
+        assistantSessionStore.upsertHistorySession({
+          ...currentSession.value,
+          updated_at: new Date().toISOString(),
+        })
       }
     }
     
@@ -770,7 +769,9 @@ const loadHistory = async () => {
 
 onMounted(() => {
   loadHistory()
-  startNewChat()
+  if (!currentSession.value) {
+    startNewChat()
+  }
 })
 
 watch(showThinking, (value) => {

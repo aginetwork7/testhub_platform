@@ -46,7 +46,7 @@ class AssistantSessionSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = AssistantSession
-        fields = ['id', 'session_id', 'title', 'created_at', 'updated_at', 'messages', 'chat_messages']
+        fields = ['id', 'session_id', 'title', 'is_pinned', 'created_at', 'updated_at', 'messages', 'chat_messages']
 
 
 class AssistantSessionCreateSerializer(serializers.ModelSerializer):
