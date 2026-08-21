@@ -90,18 +90,29 @@
           <p>{{ $t('home.appAutomationDesc') }}</p>
         </div>
 
+        <!-- 性能自动化测试 -->
+        <div class="nav-card" @click="handleNavigate('performance-automation')" role="button" tabindex="0">
+          <div class="card-icon performance-icon">
+            <el-icon>
+              <Aim/>
+            </el-icon>
+          </div>
+          <h3>{{ $t('home.performanceAutomation') }}</h3>
+          <p>{{ $t('home.performanceAutomationDesc') }}</p>
+        </div>
+
         <!-- 数据工厂 -->
         <div class="nav-card" @click="handleNavigate('data')" role="button" tabindex="0">
           <div class="card-icon data-icon">
             <el-icon>
-              <DataLine/>
+              <Box/>
             </el-icon>
           </div>
           <h3>{{ $t('home.dataFactory') }}</h3>
           <p>{{ $t('home.dataFactoryDesc') }}</p>
         </div>
 
-        <!-- AI 智能模式 -->
+        <!-- AI 智能测试 -->
         <div class="nav-card" @click="handleNavigate('ai-intelligent')" role="button" tabindex="0">
           <div class="card-icon ai-intelligent-icon">
             <el-icon>
@@ -110,6 +121,17 @@
           </div>
           <h3>{{ $t('home.aiIntelligentMode') }}</h3>
           <p>{{ $t('home.aiIntelligentModeDesc') }}</p>
+        </div>
+
+        <!-- AI基准测试 -->
+        <div class="nav-card" @click="handleNavigate('ai-benchmark')" role="button" tabindex="0">
+          <div class="card-icon benchmark-icon">
+            <el-icon>
+              <DataLine/>
+            </el-icon>
+          </div>
+          <h3>{{ $t('home.aiBenchmark') }}</h3>
+          <p>{{ $t('home.aiBenchmarkDesc') }}</p>
         </div>
 
         <!-- AI智能体 -->
@@ -139,6 +161,17 @@
           <h3>{{ $t('home.healthCheck') }}</h3>
           <p>{{ $t('home.healthCheckDesc') }}</p>
         </div>
+
+        <!-- 任务管理 -->
+        <div class="nav-card" @click="handleNavigate('task-management')" role="button" tabindex="0">
+          <div class="card-icon task-icon">
+            <el-icon>
+              <Tickets/>
+            </el-icon>
+          </div>
+          <h3>{{ $t('home.taskManagement') }}</h3>
+          <p>{{ $t('home.taskManagementDesc') }}</p>
+        </div>
       </div>
     </div>
   </div>
@@ -162,7 +195,10 @@ import {
   ArrowDown,
   Cellphone,
   Connection,
-  Odometer
+  Odometer,
+  Aim,
+  Box,
+  Tickets
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -203,11 +239,14 @@ const handleNavigate = (type) => {
     'api-automation': '/api-automation/dashboard',
     'ui': '/ui-automation/dashboard',
     'app': '/app-automation/dashboard',
+    'performance-automation': '/performance-automation',
     'ai-intelligent': '/ai-intelligent-mode/testing',
+    'ai-benchmark': '/ai-benchmark',
     'assistant': '/assistant',
     'config': '/configuration/project-center',
     'data': '/data-factory',
-    'health': '/health-check'
+    'health': '/health-check',
+    'task-management': '/task-management'
   }
 
   if (routes[type]) {
@@ -331,15 +370,18 @@ const handleNavigate = (type) => {
   overflow: hidden;
 }
 
-.nav-card:nth-child(1) { order: 4; }
+.nav-card:nth-child(1) { order: 7; }
 .nav-card:nth-child(2) { order: 1; }
 .nav-card:nth-child(3) { order: 2; }
 .nav-card:nth-child(4) { order: 3; }
-.nav-card:nth-child(5) { order: 8; }
-.nav-card:nth-child(6) { order: 6; }
-.nav-card:nth-child(7) { order: 5; }
-.nav-card:nth-child(8) { order: 9; }
-.nav-card:nth-child(9) { order: 7; }
+.nav-card:nth-child(5) { order: 4; }
+.nav-card:nth-child(6) { order: 10; }
+.nav-card:nth-child(7) { order: 6; }
+.nav-card:nth-child(8) { order: 8; }
+.nav-card:nth-child(9) { order: 5; }
+.nav-card:nth-child(10) { order: 12; }
+.nav-card:nth-child(11) { order: 11; }
+.nav-card:nth-child(12) { order: 9; }
 
 .nav-card {
   background: rgba(255, 255, 255, 0.9);
@@ -422,6 +464,11 @@ const handleNavigate = (type) => {
     color: #67c23a;
   }
 
+  &.performance-icon {
+    background: #f0f9eb;
+    color: #67c23a;
+  }
+
   &.ai-intelligent-icon {
     background: #eef4ff;
     color: #3b82f6;
@@ -441,11 +488,22 @@ const handleNavigate = (type) => {
     background: #fff7e6;
     color: #fa8c16;
   }
+
+  &.benchmark-icon {
+    background: #eef4ff;
+    color: #3b82f6;
+  }
+
+  &.task-icon {
+    background: #fff7e6;
+    color: #fa8c16;
+  }
 }
 
 .ai-icon :deep(svg path),
 .ai-intelligent-icon :deep(svg path),
-.assistant-icon :deep(svg path) {
+.assistant-icon :deep(svg path),
+.benchmark-icon :deep(svg path) {
   fill: url('#home-ai-blue-purple') !important;
 }
 
@@ -678,7 +736,7 @@ const handleNavigate = (type) => {
 
 /* Keep all nine module cards compact and ordered on common desktop viewports. */
 .cards-container {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   padding: 8px;
 }
@@ -707,7 +765,7 @@ const handleNavigate = (type) => {
 
 @media (max-width: 920px) {
   .cards-container {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

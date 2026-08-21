@@ -128,9 +128,16 @@
             </div>
           </template>
 
+          <template v-else-if="currentModule === 'profile'">
+            <el-menu-item index="/profile">
+              <el-icon><User /></el-icon>
+              <span>{{ $t('nav.profile') }}</span>
+            </el-menu-item>
+          </template>
+
           <template v-else-if="currentModule === 'data-factory'">
             <el-menu-item index="/data-factory">
-              <el-icon><DataAnalysis /></el-icon>
+              <el-icon><Box /></el-icon>
               <span>{{ $t('home.dataFactory') }}</span>
             </el-menu-item>
             <el-menu-item index="/data-factory/warehouse">
@@ -208,6 +215,13 @@
             <el-menu-item index="/api-automation/logs">
               <el-icon><Monitor /></el-icon>
               <span>{{ $t('menu.apiAutomationLogs') }}</span>
+            </el-menu-item>
+          </template>
+
+          <template v-else-if="currentModule === 'performance-automation'">
+            <el-menu-item index="/performance-automation">
+              <el-icon><Aim /></el-icon>
+              <span>{{ $t('home.performanceAutomation') }}</span>
             </el-menu-item>
           </template>
 
@@ -335,6 +349,20 @@
             <el-menu-item index="/ai-intelligent-mode/execution-records">
               <el-icon><Timer /></el-icon>
               <span>{{ $t('menu.aiExecutionRecords') }}</span>
+            </el-menu-item>
+          </template>
+
+          <template v-else-if="currentModule === 'ai-benchmark'">
+            <el-menu-item index="/ai-benchmark">
+              <el-icon><DataLine /></el-icon>
+              <span>{{ $t('home.aiBenchmark') }}</span>
+            </el-menu-item>
+          </template>
+
+          <template v-else-if="currentModule === 'task-management'">
+            <el-menu-item index="/task-management">
+              <el-icon><Tickets /></el-icon>
+              <span>{{ $t('menu.testTaskManagement') }}</span>
             </el-menu-item>
           </template>
 
@@ -478,8 +506,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import {
   Monitor, Folder, Document, Flag, Check, Collection, VideoPlay,
-  DataAnalysis, ChatDotSquare, Service, DocumentCopy, Link, MagicStick,
-  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Files, User,
+  DataAnalysis, DataLine, ChatDotSquare, Service, DocumentCopy, Link, MagicStick,
+  Odometer, Timer, Setting, AlarmClock, Bell, Aim, Box, Tickets, Edit, Cpu, ArrowDown, Cellphone, Connection, FolderOpened, Files, User,
   Delete, EditPen, Lock, MoreFilled, Unlock
 } from '@element-plus/icons-vue'
 import logoSvg from '@/assets/images/logo.svg'
@@ -584,14 +612,18 @@ const handleLanguageChange = (lang) => {
 }
 
 const currentModule = computed(() => {
+  if (route.path.startsWith('/profile')) return 'profile'
   if (route.path.startsWith('/ai-generation')) return 'ai-generation'
   if (route.path.startsWith('/assistant')) return 'assistant'
   if (route.path.startsWith('/data-factory')) return 'data-factory'
   if (route.path.startsWith('/health-check')) return 'health-check'
   if (route.path.startsWith('/api-automation')) return 'api-automation'
+  if (route.path.startsWith('/performance-automation')) return 'performance-automation'
   if (route.path.startsWith('/ui-automation')) return 'ui-automation'
   if (route.path.startsWith('/app-automation')) return 'app-automation'
   if (route.path.startsWith('/ai-intelligent-mode')) return 'ai-intelligent-mode'
+  if (route.path.startsWith('/ai-benchmark')) return 'ai-benchmark'
+  if (route.path.startsWith('/task-management')) return 'task-management'
   if (route.path.startsWith('/configuration')) return 'configuration'
   if (route.path.startsWith('/meta-projects')) return 'meta-projects'
   return ''
@@ -616,9 +648,12 @@ const moduleName = computed(() => {
     'data-factory': t('home.dataFactory'),
     'health-check': t('modules.healthCheck'),
     'api-automation': t('modules.apiAutomation'),
+    'performance-automation': t('modules.performanceAutomation'),
     'ui-automation': t('modules.uiAutomation'),
     'app-automation': t('modules.appAutomation'),
     'ai-intelligent-mode': t('modules.aiIntelligentMode'),
+    'ai-benchmark': t('modules.aiBenchmark'),
+    'task-management': t('modules.taskManagement'),
     'configuration': t('modules.configuration'),
     'meta-projects': t('modules.unifiedProject')
   }
@@ -657,6 +692,8 @@ const breadcrumbTitle = computed(() => {
     '/api-automation/notification-logs': t('menu.apiAutomationNotifications'),
     '/api-automation/logs': t('menu.apiAutomationLogs'),
 
+    '/performance-automation': t('home.performanceAutomation'),
+
     // UI自动化测试
     '/ui-automation/dashboard': t('menu.dashboard'),
     '/ui-automation/projects': t('menu.projectManagement'),
@@ -689,6 +726,9 @@ const breadcrumbTitle = computed(() => {
     '/ai-intelligent-mode/projects': t('menu.aiProjectManagement'),
     '/ai-intelligent-mode/cases': t('menu.aiCaseManagement'),
     '/ai-intelligent-mode/execution-records': t('menu.aiExecutionRecords'),
+
+    '/ai-benchmark': t('home.aiBenchmark'),
+    '/task-management': t('menu.testTaskManagement'),
 
 
     // 项目管理
@@ -736,7 +776,7 @@ const handleCommand = (command) => {
     ElMessage.success('退出登录成功')
     router.push('/login')
   } else if (command === 'profile') {
-    router.push('/ai-generation/profile')
+    router.push('/profile')
   }
 }
 </script>

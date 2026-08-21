@@ -8,9 +8,12 @@ export default {
   modules: {
     aiGeneration: 'AI Test Case Generation',
     apiAutomation: 'API Automation Testing',
+    performanceAutomation: 'Performance Automation Testing',
     uiAutomation: 'UI Automation Testing',
     appAutomation: 'APP Automation Testing',
     aiIntelligentMode: 'AI Intelligent Mode',
+    aiBenchmark: 'AI Benchmark Testing',
+    taskManagement: 'Task Management',
     configuration: 'Configuration Center',
     unifiedProject: 'Unified Project Management',
     healthCheck: 'Health Check'
@@ -81,6 +84,7 @@ export default {
     aiProjectManagement: 'AI Project Management',
     aiCaseManagement: 'AI Case Management',
     aiExecutionRecords: 'AI Test Reports',
+    testTaskManagement: 'Test Task Management',
 
     // Configuration Center
     aiCaseGenerationConfig: 'AI Case Generation Config',

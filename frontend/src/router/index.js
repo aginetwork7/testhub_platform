@@ -40,6 +40,18 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/profile',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        name: 'Profile',
+        component: () => import('@/views/profile/UserProfile.vue')
+      }
+    ]
+  },
+  {
     path: '/login',
     name: 'Login',
     component: Login,
@@ -185,11 +197,6 @@ const routes = [
         path: 'task-detail/:taskId',
         name: 'TaskDetail',
         component: () => import('@/views/requirement-analysis/TaskDetail.vue')
-      },
-      {
-        path: 'profile',
-        name: 'Profile',
-        component: () => import('@/views/profile/UserProfile.vue')
       },
     ]
   },
@@ -393,6 +400,43 @@ const routes = [
           icon: 'Document',
           requiresAuth: true
         }
+      }
+    ]
+  },
+  {
+    path: '/performance-automation',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        name: 'PerformanceAutomation',
+        component: ApiAutomationWorkspace,
+        props: { mode: 'dashboard' }
+      }
+    ]
+  },
+  {
+    path: '/ai-benchmark',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        name: 'AiBenchmark',
+        component: () => import('@/views/ai-benchmark/AiBenchmark.vue')
+      }
+    ]
+  },
+  {
+    path: '/task-management',
+    component: Layout,
+    meta: { requiresAuth: true },
+    children: [
+      {
+        path: '',
+        name: 'TaskManagement',
+        component: () => import('@/views/task-management/TaskManagement.vue')
       }
     ]
   },

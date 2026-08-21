@@ -166,16 +166,22 @@ export default {
     uiAutomationDesc: 'Visual Web/App UI automation testing',
     appAutomation: 'APP Automation Testing',
     appAutomationDesc: 'Android APP automation testing based on Airtest',
+    performanceAutomation: 'Performance Automation Testing',
+    performanceAutomationDesc: 'Run performance tests automatically and analyze results',
     dataFactory: 'Data Factory',
     dataFactoryDesc: 'Flexible test data construction and management',
     unifiedProject: 'Unified Project Management',
     unifiedProjectDesc: 'Cross-module unified project management platform',
-    aiIntelligentMode: 'AI Intelligent Mode',
+    aiIntelligentMode: 'AI Intelligent Testing',
     aiIntelligentModeDesc: 'Natural language-based intelligent test execution',
+    aiBenchmark: 'AI Benchmark Testing',
+    aiBenchmarkDesc: 'Evaluate AI testing capabilities and execution results',
     aiEvaluator: 'AI Evaluator',
     aiEvaluatorDesc: 'Professional software testing Q&A based on evaluator knowledge base',
     configCenter: 'Configuration Center',
     configCenterDesc: 'System environment, AI model and notification configuration',
+    taskManagement: 'Task Management',
+    taskManagementDesc: 'Manage testing tasks in one place',
 
     // Messages
     featureInDevelopment: 'Feature is under development......'

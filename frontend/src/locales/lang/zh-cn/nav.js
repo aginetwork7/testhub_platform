@@ -8,9 +8,12 @@ export default {
   modules: {
     aiGeneration: 'AI用例生成',
     apiAutomation: 'API自动化测试',
+    performanceAutomation: '性能自动化测试',
     uiAutomation: 'UI自动化测试',
     appAutomation: 'APP自动化测试',
     aiIntelligentMode: 'AI 智能模式',
+    aiBenchmark: 'AI基准测试',
+    taskManagement: '任务管理',
     configuration: '配置中心',
     unifiedProject: '项目管理',
     healthCheck: '健康检测'
@@ -81,6 +84,7 @@ export default {
     aiProjectManagement: 'AI 项目管理',
     aiCaseManagement: 'AI 用例管理',
     aiExecutionRecords: 'AI测试报告',
+    testTaskManagement: '测试任务管理',
 
     // 配置中心
     aiCaseGenerationConfig: 'AI生成配置',
