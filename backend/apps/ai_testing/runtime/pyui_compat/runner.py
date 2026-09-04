@@ -16,7 +16,7 @@ from django.db import DatabaseError, models, transaction
 
 logger = logging.getLogger('django')
 
-ACTION_CACHE_SCHEMA_VERSION = 'v4'
+ACTION_CACHE_SCHEMA_VERSION = 'v5'
 
 
 def _is_false_like(value):
@@ -35,20 +35,22 @@ class PyUICompatHistory:
 class PyUICompatAgent:
     """Initial pyuitest-inspired runtime scaffold for AI intelligent mode."""
 
-    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, api_automation_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
+    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, environment_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
         self.execution_mode = execution_mode
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
         self.use_cache = bool(use_cache)
         self.execution_user_id = execution_user_id
-        self.api_automation_configuration = api_automation_configuration
+        self.environment_configuration = environment_configuration
         self.ai_project_id = ai_project_id
         self.execution_record_id = execution_record_id
         self.ai_case_id = ai_case_id
         self._cache_context_by_step = {}
         self._recent_network_events = []
-        self._reported_event_ids = []
-        self._reported_alert_gpt_description = ''
+        self._runtime_correlation_values = []
+        self._recent_download_events = []
+        self._execution_resources = []
+        self._last_actionable_controls = []
 
     async def analyze_task(self, task_description, case_mode='freeform', task_steps=None):
         return self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -60,18 +62,11 @@ class PyUICompatAgent:
         return tasks
 
     def _resolve_browser_executable(self):
-        """Return a Chromium executable that can decode live camera streams.
-
-        Playwright's bundled Chromium is the open-source build without the
-        proprietary H.264/H.265 codecs required to play camera streams, so a
-        live-stream player stays stuck on a loading state forever. A system
-        Chromium (Debian package) ships those codecs via system ffmpeg, so prefer
-        it when available. Falls back to Playwright's bundled browser when no
-        codec-capable system browser is found.
-        """
+        """Prefer a browser that can decode original HEVC event media."""
         configured = os.environ.get('PLAYWRIGHT_CHROMIUM_PATH', '').strip()
         candidates = [configured] if configured else []
         candidates.extend([
+            '/usr/lib/chromium/chromium',
             '/usr/bin/chromium',
             '/usr/bin/chromium-browser',
             '/usr/bin/google-chrome',
@@ -89,7 +84,8 @@ class PyUICompatAgent:
 
             execution_steps = await GlobalTestPlanner().create_plan(
                 task_description,
-                getattr(self.api_automation_configuration, 'id', None),
+                getattr(self.environment_configuration, 'id', None),
+                use_cache=self.use_cache,
             )
             resolved_case_mode = 'hybrid'
 
@@ -103,7 +99,7 @@ class PyUICompatAgent:
                 'task_count': len(planned_tasks),
                 'source': 'global_planner' if case_mode == 'freeform' else ('planner_v2_bootstrap' if case_mode != 'hybrid' else 'planner_v2_hybrid'),
                 'step_retry_map': {},
-                'api_automation_configuration': self._planner_configuration_trace(),
+                'environment_configuration': self._planner_configuration_trace(),
                 'global_plan': self._planner_step_trace(execution_steps) if case_mode == 'freeform' else [],
             },
             cache_stats={
@@ -145,6 +141,7 @@ class PyUICompatAgent:
             return history
 
         normalized_steps = [self._normalize_step(raw_step, index) for index, raw_step in enumerate(execution_steps, start=1)]
+        self._validate_normalized_steps(normalized_steps)
         artifact_dir, artifact_prefix = self._prepare_artifact_dir()
         if all(step.get('executor') in {'device_cli', 'data_factory'} for step in normalized_steps):
             return await self._run_device_only_plan(
@@ -158,31 +155,7 @@ class PyUICompatAgent:
                 planned_tasks,
             )
 
-        first_browser_index = next(
-            (index for index, step in enumerate(normalized_steps) if step.get('executor') not in {'device_cli', 'data_factory'}),
-            0,
-        )
         step_index_start = 1
-        if first_browser_index:
-            await self._run_device_only_plan(
-                normalized_steps[:first_browser_index],
-                history,
-                step_callback,
-                should_stop,
-                artifact_dir,
-                artifact_prefix,
-                task_description,
-                planned_tasks,
-                finalize=False,
-            )
-            if not history.case_report['success'] or len(history.steps) < first_browser_index:
-                report_artifacts = self._write_case_report_artifacts(artifact_dir, artifact_prefix, history)
-                if report_artifacts:
-                    history.artifacts.extend(report_artifacts)
-                history.planner_trace['case_report'] = history.case_report
-                return history
-            step_index_start = first_browser_index + 1
-            normalized_steps = normalized_steps[first_browser_index:]
 
         try:
             from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
@@ -219,6 +192,7 @@ class PyUICompatAgent:
 
             try:
                 await self._bootstrap_pyuitest_session(page, step_callback)
+                self._runtime_correlation_values = []
 
                 for index, step in enumerate(normalized_steps, start=step_index_start):
                     if should_stop is not None and await self._check_stop(should_stop):
@@ -236,12 +210,16 @@ class PyUICompatAgent:
                     )
 
                     started_at = time.perf_counter()
+                    media_state_before = await self._capture_media_state(page)
+                    from apps.ai_testing.execution.browser_observers import capture_visual_frames
+                    visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
                     status = 'completed'
                     error_message = None
                     last_executed_action = step.get('action')
                     action_source = 'direct'
                     screenshot_rel_path = None
                     ai_actions = None
+                    action_output = None
 
                     try:
                         if step.get('executor') == 'device_cli':
@@ -256,7 +234,7 @@ class PyUICompatAgent:
                             action_source = 'device_cli'
                             history.artifacts.append(
                                 {
-                                    'type': 'device_cli',
+                                    'type': 'command_receipt',
                                     'step': index,
                                     'device_id': step['device_id'],
                                     'operation': device_result.get('operation'),
@@ -267,23 +245,37 @@ class PyUICompatAgent:
                                 }
                             )
                         elif step.get('executor') == 'data_factory':
-                            event_report = await self._execute_data_factory_step(step)
-                            self._reported_event_ids = event_report['event_ids']
-                            last_executed_action = 'report_vehicle_event'
+                            action_output = await self._execute_data_factory_step(step)
+                            self._execution_resources.append({
+                                'resource_type': action_output['resource_type'],
+                                'resource_id': action_output['resource_id'],
+                                'resource': action_output.get('resource'),
+                                'producer_step': index,
+                            })
+                            last_executed_action = 'create'
                             action_source = 'data_factory'
                             history.artifacts.append(
                                 {
-                                    'type': 'event_report',
+                                    'type': 'api_resource',
                                     'step': index,
-                                    'camera_name': step['camera_name'],
-                                    'event_ids': event_report['event_ids'],
+                                    'resource_type': action_output['resource_type'],
+                                    'resource_id': action_output['resource_id'],
+                                    'resource': action_output['resource'],
                                 }
                             )
+                            history.artifacts.append({
+                                'type': 'api_response',
+                                'step': index,
+                                'success': True,
+                                'resource_type': action_output['resource_type'],
+                                'resource_id': action_output['resource_id'],
+                                'resource': action_output['resource'],
+                            })
                             await self._emit(
                                 step_callback,
                                 {
                                     'type': 'log',
-                                    'content': f"[planner_v2] Step {index} reported vehicle event(s): {', '.join(event_report['event_ids'])}\n",
+                                    'content': f"[planner_v2] Step {index} created resource {action_output['resource_type']}:{action_output['resource_id']}\n",
                                 },
                             )
                         elif step.get('step_mode') == 'ai':
@@ -333,24 +325,6 @@ class PyUICompatAgent:
                                     )
                                 else:
                                     raise
-                        elif step.get('action') == 'report_vehicle_event':
-                            event_report = await self._report_vehicle_event(step)
-                            self._reported_event_ids = event_report['event_ids']
-                            history.artifacts.append(
-                                {
-                                    'type': 'event_report',
-                                    'step': index,
-                                    'environment_id': step.get('environment_id'),
-                                    'event_ids': event_report.get('event_ids', []),
-                                }
-                            )
-                            await self._emit(
-                                step_callback,
-                                {
-                                    'type': 'log',
-                                    'content': f"[planner_v2] Step {index} reported vehicle event(s): {', '.join(event_report.get('event_ids', []))}\n",
-                                },
-                            )
                         else:
                             await self._execute_step(page, step, timeout_error=PlaywrightTimeout)
                     except Exception as exc:
@@ -360,18 +334,6 @@ class PyUICompatAgent:
                             step_callback,
                             {'type': 'log', 'content': f"[planner_v2] Step {index} failed: {error_message}\n"},
                         )
-
-                    if (
-                        status == 'completed'
-                        and action_source == 'model'
-                        and self.use_cache
-                        and isinstance(ai_actions, list)
-                    ):
-                        await self._store_cached_ai_actions(step, ai_actions)
-                        history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
-                        experience_written = await self._store_verified_experience(step, ai_actions)
-                        if experience_written:
-                            history.cache_stats['experience_write'] = history.cache_stats.get('experience_write', 0) + 1
 
                     await page.wait_for_timeout(300)
                     screenshot_path = await self._capture_screenshot(
@@ -390,6 +352,51 @@ class PyUICompatAgent:
                                 'url': page.url,
                             }
                         )
+
+                    persisted_attempt = await self._persist_step_attempt(
+                        index,
+                        step,
+                        ai_actions[-1] if isinstance(ai_actions, list) and ai_actions else step,
+                        status,
+                        error_message,
+                        action_output if step.get('executor') == 'data_factory' else device_output if step.get('executor') == 'device_cli' else None,
+                        screenshot_rel_path,
+                        page,
+                        media_state_before,
+                        visual_frames_before,
+                    )
+                    assertion_statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
+                    required_statuses = self._required_assertion_statuses(step, assertion_statuses)
+                    assertions_verified = self._step_assertions_are_verified(step, required_statuses)
+                    action_completed = status == 'completed'
+                    status = self._status_after_assertions(status, required_statuses)
+                    if status != 'completed' and not error_message:
+                        error_message = f'Required assertions were not verified: {", ".join(required_statuses)}.'
+                    if self._should_retry_assertions(step, action_completed, assertions_verified, action_source):
+                        retry_result = await self._retry_assertion_failure(
+                            page, step, index, ai_actions, required_statuses, step_callback,
+                            PlaywrightTimeout, history, artifact_dir,
+                        )
+                        if retry_result is not None:
+                            status, error_message, last_executed_action, ai_actions, persisted_attempt, screenshot_rel_path = retry_result
+                            assertion_statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
+                            required_statuses = self._required_assertion_statuses(step, assertion_statuses)
+                            assertions_verified = self._step_assertions_are_verified(step, required_statuses)
+                    if action_source in {'cache', 'experience'} and assertions_verified:
+                        history.cache_stats['revalidated'] = history.cache_stats.get('revalidated', 0) + 1
+                        await self._record_successful_revalidation(step, persisted_attempt)
+                    if (
+                        status == 'completed'
+                        and action_source == 'model'
+                        and self.use_cache
+                        and isinstance(ai_actions, list)
+                        and assertions_verified
+                    ):
+                        await self._store_cached_ai_actions(step, ai_actions)
+                        history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
+                        experience_written = await self._store_verified_experience(step, ai_actions)
+                        if experience_written:
+                            history.cache_stats['experience_write'] = history.cache_stats.get('experience_write', 0) + 1
 
                     duration_seconds = round(time.perf_counter() - started_at, 2)
                     history.steps.append(
@@ -434,7 +441,7 @@ class PyUICompatAgent:
 
                     await self._emit(step_callback, {'task_id': index, 'status': status})
 
-                    if status == 'failed':
+                    if status != 'completed':
                         history.case_report['success'] = False
                         break
 
@@ -481,7 +488,7 @@ class PyUICompatAgent:
         return history
 
     def _planner_configuration_trace(self):
-        configuration = self.api_automation_configuration
+        configuration = self.environment_configuration
         if configuration is None:
             return None
         return {
@@ -516,12 +523,11 @@ class PyUICompatAgent:
             device_output = None
             try:
                 if step.get('executor') == 'data_factory':
-                    event_report = await self._execute_data_factory_step(step)
-                    self._reported_event_ids = event_report['event_ids']
+                    resource = await self._execute_data_factory_step(step)
                     result = {
                         'status': 'PASSED',
-                        'operation': 'report_vehicle_event',
-                        'stdout': f"event_ids={','.join(event_report['event_ids'])}",
+                        'operation': 'create',
+                        'stdout': f"resource={resource['resource_type']}:{resource['resource_id']}",
                         'stderr': '',
                     }
                 else:
@@ -534,10 +540,9 @@ class PyUICompatAgent:
                 error_message = f'{type(exc).__name__}: {exc}'
             duration_seconds = round(time.perf_counter() - started_at, 2)
             history.artifacts.append({
-                'type': step.get('executor'),
+                'type': 'command_receipt' if step.get('executor') == 'device_cli' else step.get('executor'),
                 'step': index,
                 'device_id': step.get('device_id'),
-                'camera_name': step.get('camera_name'),
                 'operation': (result or {}).get('operation', 'connection_check'),
                 'status': (result or {}).get('status', 'ERROR'),
                 'exit_code': (result or {}).get('exit_code'),
@@ -583,13 +588,13 @@ class PyUICompatAgent:
         return history
 
     async def _execute_device_cli_step(self, step):
-        if self.api_automation_configuration is None:
-            raise ValueError('device_cli 步骤需要绑定 API 自动化环境。')
-        from apps.api_automation.device_cli_skill import DeviceCliSkill
+        if self.environment_configuration is None:
+            raise ValueError('device_cli 步骤需要绑定全局环境配置。')
+        from apps.core.device_cli_capability import DeviceCliCapability
 
         return await asyncio.to_thread(
-            DeviceCliSkill().execute,
-            self.api_automation_configuration,
+            DeviceCliCapability().execute,
+            self.environment_configuration,
             device_id=step['device_id'],
             operation=step.get('operation'),
             arguments=step.get('arguments'),
@@ -598,26 +603,32 @@ class PyUICompatAgent:
         )
 
     async def _execute_data_factory_step(self, step):
-        if self.api_automation_configuration is None:
-            raise ValueError('data_factory 步骤需要绑定 API 自动化环境。')
-        if not self.execution_user_id:
-            raise PermissionError('data_factory 步骤需要执行用户上下文。')
-        edge_settings = ((self.api_automation_configuration.runtime_settings or {}).get('api', {}) or {}).get('edge', {}) or {}
-        cameras = (edge_settings.get('main_device', {}) or {}).get('cameras', []) or []
-        camera_name = str(step.get('camera_name') or '').strip()
-        camera_index = next(
-            (index for index, camera in enumerate(cameras) if str(camera.get('camera_name') or '').strip() == camera_name),
-            None,
-        )
-        if camera_index is None:
-            raise ValueError(f'当前环境未配置摄像头 {camera_name}。')
-        return await self._report_vehicle_event({
-            'environment_id': self.api_automation_configuration.id,
-            'device': 'main',
-            'camera_index': camera_index,
-            'media_path': 'vehicle/normal_snap_image_0.jpeg',
-            'vehicle_color': 1,
-        })
+        action = str(step.get('action') or 'create').strip()
+        if action == 'cleanup':
+            resource_reference = step.get('resource_reference')
+            if not isinstance(resource_reference, dict):
+                raise ValueError('data_factory cleanup 步骤必须声明 resource_reference。')
+            from apps.data_factory.resource_service import cleanup_resource
+
+            result = await asyncio.to_thread(cleanup_resource, resource_reference)
+        else:
+            resource_type = str(step.get('resource_type') or '').strip()
+            arguments = step.get('arguments')
+            if not resource_type or not isinstance(arguments, dict):
+                raise ValueError('data_factory 步骤必须声明 resource_type 和 arguments。')
+            if self.environment_configuration is None:
+                raise ValueError('data_factory 步骤需要绑定全局环境配置。')
+            from apps.ai_testing.execution.data_factory_resources import create_configured_resource
+
+            result = await asyncio.to_thread(
+                create_configured_resource,
+                self.environment_configuration,
+                resource_type,
+                arguments,
+            )
+        if not result.get('success'):
+            raise AssertionError(result.get('error') or 'data factory resource operation failed')
+        return result
 
     @staticmethod
     def _sanitize_device_output(stdout, stderr):
@@ -629,10 +640,6 @@ class PyUICompatAgent:
         return output[-8000:]
 
     async def _get_ai_actions_for_step(self, page, step, history, step_callback=None, step_index=None):
-        fallback_actions = self._fallback_actions_for_step(step)
-        if fallback_actions:
-            return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)], 'fallback'
-
         page_context = await self._build_page_context(page)
         self._cache_context_by_step[self._step_context_key(step)] = page_context
 
@@ -703,7 +710,7 @@ class PyUICompatAgent:
 
         raise ValueError(f'Hybrid AI step planner failed after {max_attempts} attempts: {last_error}')
 
-    async def _execute_ai_actions(self, page, step, ai_actions, index, step_callback, timeout_error, history=None, allow_replan=True):
+    async def _execute_ai_actions(self, page, step, ai_actions, index, step_callback, timeout_error, history=None, remaining_replans=2):
         history_artifact = {
             'type': 'ai_plan',
             'step': index,
@@ -718,12 +725,22 @@ class PyUICompatAgent:
         if history is not None:
             history.artifacts.append(history_artifact)
         for sub_index, ai_action in enumerate(ai_actions, start=1):
+            if self.execution_record_id is not None:
+                from apps.ai_testing.execution.capabilities import validate_browser_action
+
+                allowed_capabilities = step.get('allowed_capabilities')
+                if not isinstance(allowed_capabilities, list) or not allowed_capabilities:
+                    raise ValueError('Persisted browser step is missing allowed_capabilities.')
+                validate_browser_action(str(ai_action.get('action') or ''), allowed_capabilities)
             await self._emit(
                 step_callback,
                 {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {self._describe_action(ai_action)}\n"},
             )
             try:
-                action_result = await self._execute_step(page, ai_action, timeout_error=timeout_error)
+                if ai_action.get('action') == 'assert' and not ai_action.get('assert_kind'):
+                    action_result = None
+                else:
+                    action_result = await self._execute_step(page, ai_action, timeout_error=timeout_error)
                 if history is not None and isinstance(action_result, dict) and action_result.get('before_path'):
                     history.artifacts.extend([
                         {'type': 'playback_before_forward', 'step': index, 'path': action_result['before_path']},
@@ -735,29 +752,11 @@ class PyUICompatAgent:
                         {'type': 'playback_download_completed', 'step': index, 'path': action_result['download_completed_path']},
                     ])
             except Exception as error:
-                fallback_actions = self._fallback_actions_for_step(
-                    {'description': self._describe_action(ai_action)}
-                )
-                if fallback_actions:
-                    await self._emit(
-                        step_callback,
-                        {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: using deterministic fallback.\n"},
-                    )
-                    for fallback_action in fallback_actions:
-                        normalized_fallback = self._normalize_step(
-                            {**fallback_action, 'step_mode': 'direct'},
-                            sub_index,
-                        )
-                        fallback_result = await self._execute_step(page, normalized_fallback, timeout_error=timeout_error)
-                        if history is not None and isinstance(fallback_result, dict) and fallback_result.get('download_dialog_path'):
-                            history.artifacts.extend([
-                                {'type': 'playback_download_dialog', 'step': index, 'path': fallback_result['download_dialog_path']},
-                                {'type': 'playback_download_completed', 'step': index, 'path': fallback_result['download_completed_path']},
-                            ])
-                    continue
-                if not allow_replan:
+                if remaining_replans <= 0:
                     raise
 
+                if self.execution_record_id is not None:
+                    await self._persist_replan_failure(index, step, ai_action, error, page)
                 replanning_step = {
                     **step,
                     'description': (
@@ -781,6 +780,24 @@ class PyUICompatAgent:
                         'error': f'{type(error).__name__}: {error}',
                         'actions': replan_actions,
                     })
+                if self.execution_record_id is not None:
+                    from apps.ai_testing.execution.plan_persistence import persist_replanned_step
+
+                    await sync_to_async(persist_replanned_step)(
+                        self.execution_record_id,
+                        index,
+                        ai_action,
+                        f'{type(error).__name__}: {error}',
+                        replan_actions,
+                    )
+                    bindings = replan_actions[0].get('assertion_bindings', []) if replan_actions else []
+                    if bindings:
+                        from apps.ai_testing.execution.plan_persistence import persist_bound_step
+
+                        await sync_to_async(persist_bound_step)(self.execution_record_id, index, bindings)
+                        bound_step = self._bind_step_assertions(step, bindings)
+                        step.clear()
+                        step.update(bound_step)
                 await self._emit(
                     step_callback,
                     {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: replanning from current page.\n"},
@@ -793,9 +810,23 @@ class PyUICompatAgent:
                     step_callback,
                     timeout_error,
                     history=history,
-                    allow_replan=False,
+                    remaining_replans=remaining_replans - 1,
                 )
                 return
+
+    async def _persist_replan_failure(self, step_index, step, action, error, page):
+        """Record the failed action in the prior immutable plan revision."""
+        await self._persist_step_attempt(
+            step_index,
+            step,
+            action,
+            'failed',
+            f'{type(error).__name__}: {error}',
+            None,
+            None,
+            page,
+            None,
+        )
 
     def _cache_file_path(self):
         try:
@@ -819,7 +850,12 @@ class PyUICompatAgent:
             {
                 'project_id': self.ai_project_id,
                 'environment': self._experience_environment_key(),
+                'permission_fingerprint': hashlib.sha256(
+                    str(self.execution_user_id or '').encode('utf-8')
+                ).hexdigest(),
                 'page_fingerprint': context.get('fingerprint', ''),
+                'application_version': context.get('application_version', ''),
+                'assertion_contract': step.get('assertions', []),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -888,7 +924,7 @@ class PyUICompatAgent:
         return f"{int(step.get('index') or 0)}::{str(step.get('description') or '').strip()}"
 
     def _experience_environment_key(self):
-        configuration = self.api_automation_configuration
+        configuration = self.environment_configuration
         return str(getattr(configuration, 'environment', '') or '').strip()
 
     async def _build_page_context(self, page):
@@ -899,10 +935,21 @@ class PyUICompatAgent:
         normalized_url = urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', ''))
         page_title = ''
         page_text = ''
+        application_version = ''
         try:
             page_title = str(await page.title()).strip()
             page_text = str(await page.locator('body').inner_text(timeout=1000)).strip()
-        except (AttributeError, RuntimeError, TypeError):
+            version_meta = page.locator('meta[name="application-version"]')
+            version_node = page.locator('[data-app-version]')
+            if await version_meta.count():
+                application_version = str(
+                    await version_meta.first.get_attribute('content', timeout=1000) or ''
+                ).strip()
+            elif await version_node.count():
+                application_version = str(
+                    await version_node.first.get_attribute('data-app-version', timeout=1000) or ''
+                ).strip()
+        except (AttributeError, RuntimeError, TypeError, TimeoutError):
             pass
         fingerprint_source = json.dumps(
             {'url': normalized_url, 'title': page_title, 'text': re.sub(r'\s+', ' ', page_text)[:4000]},
@@ -912,12 +959,22 @@ class PyUICompatAgent:
         return {
             'url': normalized_url[:1000],
             'fingerprint': hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest(),
+            'application_version': application_version,
         }
 
     @staticmethod
     def _intent_hash(step):
         description = re.sub(r'\s+', ' ', str(step.get('description') or '').strip().lower())
         return hashlib.sha256(description.encode('utf-8')).hexdigest()
+
+    def _permission_fingerprint(self):
+        return hashlib.sha256(str(self.execution_user_id or '').encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _assertion_contract_hash(step):
+        contract = step.get('assertions', []) if isinstance(step, dict) else []
+        serialized = json.dumps(contract, ensure_ascii=True, separators=(',', ':'), sort_keys=True)
+        return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
     @staticmethod
     def _safe_experience_actions(actions):
@@ -940,6 +997,8 @@ class PyUICompatAgent:
             queryset = AIExecutionExperience.objects.filter(
                 project_id=self.ai_project_id,
                 intent_hash=self._intent_hash(step),
+                permission_fingerprint=self._permission_fingerprint(),
+                assertion_contract_hash=self._assertion_contract_hash(step),
                 status='verified',
                 confidence__gte=0.7,
             )
@@ -974,6 +1033,8 @@ class PyUICompatAgent:
                 'intent_hash': self._intent_hash(step),
                 'page_fingerprint': page_context.get('fingerprint', ''),
                 'environment_key': self._experience_environment_key(),
+                'permission_fingerprint': self._permission_fingerprint(),
+                'assertion_contract_hash': self._assertion_contract_hash(step),
             }
             with transaction.atomic():
                 experience = AIExecutionExperience.objects.select_for_update().filter(**lookup).first()
@@ -1005,6 +1066,30 @@ class PyUICompatAgent:
             logger.warning('planner_v2 failed to store verified experience: %s', error)
             return False
 
+    async def _record_successful_revalidation(self, step, audit):
+        if not self.ai_project_id or not isinstance(audit, dict):
+            return
+        page_context = self._cache_context_by_step.get(self._step_context_key(step), {})
+
+        def update_experience():
+            from apps.ai_testing.models import AIExecutionExperience
+
+            return AIExecutionExperience.objects.filter(
+                project_id=self.ai_project_id,
+                intent_hash=self._intent_hash(step),
+                page_fingerprint=page_context.get('fingerprint', ''),
+                environment_key=self._experience_environment_key(),
+                permission_fingerprint=self._permission_fingerprint(),
+                assertion_contract_hash=self._assertion_contract_hash(step),
+                status='verified',
+            ).update(
+                last_verified_plan_revision=audit.get('plan_revision'),
+                last_verified_attempt=audit.get('attempt_number'),
+                last_verified_evidence_hashes=audit.get('evidence_hashes', []),
+            )
+
+        await sync_to_async(update_experience, thread_sensitive=True)()
+
     async def _invalidate_verified_experience(self, step):
         if not self.ai_project_id:
             return
@@ -1013,13 +1098,22 @@ class PyUICompatAgent:
         def invalidate_experience():
             from apps.ai_testing.models import AIExecutionExperience
 
-            return AIExecutionExperience.objects.filter(
+            experience = AIExecutionExperience.objects.select_for_update().filter(
                 project_id=self.ai_project_id,
                 intent_hash=self._intent_hash(step),
                 page_fingerprint=page_context.get('fingerprint', ''),
                 environment_key=self._experience_environment_key(),
+                permission_fingerprint=self._permission_fingerprint(),
+                assertion_contract_hash=self._assertion_contract_hash(step),
                 status='verified',
-            ).update(status='invalid', failure_count=models.F('failure_count') + 1)
+            ).first()
+            if experience is None:
+                return 0
+            experience.status = 'invalid'
+            experience.failure_count += 1
+            experience.confidence = max(0.0, experience.confidence - 0.2)
+            experience.save(update_fields=['status', 'failure_count', 'confidence', 'updated_at'])
+            return 1
 
         try:
             await sync_to_async(invalidate_experience, thread_sensitive=True)()
@@ -1125,19 +1219,301 @@ class PyUICompatAgent:
             return f'action={action_value}'
         return None
 
+    async def _persist_step_attempt(
+        self,
+        step_index,
+        step,
+        executed_action,
+        status,
+        error_message,
+        output,
+        screenshot_path,
+        page,
+        media_state_before,
+        visual_frames_before=None,
+    ):
+        if self.execution_record_id is None:
+            return []
+
+        from apps.ai_testing.execution.runtime_persistence import persist_step_attempt
+
+        page_url = page.url or ''
+        try:
+            page_text = await page.locator('body').text_content(timeout=3000)
+        except Exception as error:
+            logger.warning('planner_v2 failed to capture DOM evidence: %s', error)
+            page_text = None
+        from apps.ai_testing.execution.browser_observers import BrowserObservationContext, collect_browser_observations
+
+        environment_value = str(getattr(self.environment_configuration, 'id', '') or page_url or '')
+        permission_value = str(self.execution_user_id or '')
+        artifacts = [
+            {'type': 'url_snapshot', 'url': page_url},
+            {'type': 'page_state', 'url': page_url},
+            {'type': 'planner_actionable_controls', 'controls': self._last_actionable_controls},
+        ]
+        artifacts.extend([
+            {'type': 'network_response', **event}
+            for event in self._recent_network_events[-10:]
+            if isinstance(event, dict)
+        ])
+        if page_text is not None:
+            artifacts.append({'type': 'dom_snapshot', 'text': str(page_text)})
+        try:
+            artifacts.extend(await collect_browser_observations(
+                page,
+                step.get('assertions') or [],
+                BrowserObservationContext(
+                    native_media_before=media_state_before,
+                    visual_frames_before=tuple(visual_frames_before or []),
+                    download_events=tuple(self._recent_download_events),
+                ),
+            ))
+        except Exception as error:
+            logger.warning('planner_v2 failed to collect browser observations: %s', error)
+        if screenshot_path:
+            artifacts.append({'type': 'screenshot', 'path': screenshot_path, 'url': page_url})
+        if step.get('executor') == 'data_factory' and isinstance(output, dict):
+            resource_type = output.get('resource_type')
+            resource_id = output.get('resource_id')
+            resource = output.get('resource')
+            if resource_type and resource_id is not None and isinstance(resource, dict):
+                artifacts.extend([
+                    {
+                        'type': 'api_resource',
+                        'resource_type': resource_type,
+                        'resource_id': resource_id,
+                        'resource': resource,
+                    },
+                    {
+                        'type': 'api_response',
+                        'success': True,
+                        'resource_type': resource_type,
+                        'resource_id': resource_id,
+                        'resource': resource,
+                    },
+                ])
+
+        persisted_attempt = await sync_to_async(persist_step_attempt)(
+            self.execution_record_id,
+            step_index,
+            self._audit_action_payload(executed_action, step),
+            {'output': output} if output is not None else {},
+            'completed' if status == 'completed' else status,
+            error_message or '',
+            hashlib.sha256(environment_value.encode('utf-8')).hexdigest(),
+            hashlib.sha256(permission_value.encode('utf-8')).hexdigest(),
+            artifacts,
+        )
+        return {
+            **persisted_attempt,
+            'assertion_statuses': await self._evaluate_persisted_assertions(step_index),
+        }
+
+    @staticmethod
+    def _audit_action_payload(executed_action, step):
+        action = executed_action if isinstance(executed_action, dict) else {}
+        return {
+            'action': str(action.get('action') or executed_action or step.get('action') or ''),
+            'selector': str(action.get('selector') or ''),
+            'url': str(action.get('url') or ''),
+            'param': str(action.get('param') or ''),
+            'assert_kind': str(action.get('assert_kind') or ''),
+            'value_present': bool(action.get('value')),
+            'source': step.get('step_mode') or 'direct',
+            'executor': step.get('executor') or 'browser',
+        }
+
+    @staticmethod
+    def _bind_step_assertions(step, bindings):
+        bound_step = dict(step)
+        assertions = [dict(assertion) for assertion in step.get('assertions', [])]
+        for binding in bindings:
+            assertion = assertions[int(binding['assertion_index']) - 1]
+            semantic_intent = assertion.get('target', {})
+            while isinstance(semantic_intent, dict) and 'intent' in semantic_intent:
+                semantic_intent = semantic_intent['intent']
+            if isinstance(semantic_intent, dict) and set(semantic_intent) == {'locator'}:
+                semantic_intent = semantic_intent['locator']
+            assertion['target'] = {'locator': binding['locator'], 'intent': semantic_intent}
+        bound_step['assertions'] = assertions
+        return bound_step
+
+    async def _evaluate_persisted_assertions(self, step_index):
+        from apps.ai_testing.execution.assertion_persistence import evaluate_step_assertions
+
+        statuses = await sync_to_async(evaluate_step_assertions)(self.execution_record_id, step_index)
+        if statuses:
+            logger.info('planner_v2 evaluated persisted assertions: step=%s statuses=%s', step_index, statuses)
+        return statuses
+
+    @staticmethod
+    def _assertions_are_verified(statuses):
+        return bool(statuses) and all(status == 'passed' for status in statuses)
+
+    @staticmethod
+    def _required_assertion_statuses(step, statuses):
+        assertions = step.get('assertions', []) if isinstance(step, dict) else []
+        if not isinstance(assertions, list) or not assertions:
+            return list(statuses)
+        return [
+            status
+            for assertion, status in zip(assertions, statuses)
+            if not isinstance(assertion, dict) or assertion.get('required', True) is not False
+        ]
+
+    @staticmethod
+    def _step_assertions_are_verified(step, required_statuses):
+        assertions = step.get('assertions', []) if isinstance(step, dict) else []
+        has_required_assertion = any(
+            not isinstance(assertion, dict) or assertion.get('required', True) is not False
+            for assertion in assertions
+        )
+        return not has_required_assertion or PyUICompatAgent._assertions_are_verified(required_statuses)
+
+    @staticmethod
+    def _should_retry_assertions(step, action_completed, assertions_verified, action_source):
+        return (
+            step.get('verification_required', True) is not False
+            and action_completed
+            and not assertions_verified
+            and action_source == 'model'
+        )
+
+    @staticmethod
+    def _status_after_assertions(action_status, assertion_statuses):
+        if action_status != 'completed' or not assertion_statuses:
+            return action_status
+        if 'failed' in assertion_statuses:
+            return 'failed'
+        if any(status in {'inconclusive', 'invalid_evidence'} for status in assertion_statuses):
+            return 'inconclusive'
+        return action_status
+
+    async def _retry_assertion_failure(self, page, step, step_index, actions, assertion_statuses, step_callback, timeout_error, history, artifact_dir):
+        if self.execution_record_id is None:
+            return None
+        failure = f'Required assertions were not verified: {", ".join(assertion_statuses)}.'
+        replan_limit = self._assertion_replan_limit()
+        prior_actions = [self._audit_action_payload(action, step) for action in actions[-8:]]
+        for attempt in range(1, replan_limit + 1):
+            replanning_step = {
+                **step,
+                '_planner_failure': failure,
+            '_prior_actions': prior_actions[-16:],
+                'description': (
+                    f"{step['description']}\n"
+                    f'{failure} Inspect the current page evidence and choose a different action sequence.'
+                ),
+            }
+            replan_actions = await self._plan_ai_step_with_retries(
+                page, replanning_step, history, step_callback=step_callback, step_index=step_index,
+            )
+            from apps.ai_testing.execution.plan_persistence import persist_replanned_step
+
+            await sync_to_async(persist_replanned_step)(
+                self.execution_record_id, step_index, actions[-1] if actions else {}, failure, replan_actions,
+            )
+            bindings = replan_actions[0].get('assertion_bindings', []) if replan_actions else []
+            if bindings:
+                from apps.ai_testing.execution.plan_persistence import persist_bound_step
+
+                await sync_to_async(persist_bound_step)(self.execution_record_id, step_index, bindings)
+                bound_step = self._bind_step_assertions(step, bindings)
+                step.clear()
+                step.update(bound_step)
+            await self._emit(
+                step_callback,
+                {'type': 'log', 'content': f'[planner_v2] Step {step_index}: replanning after assertion failure ({attempt}/{replan_limit}).\n'},
+            )
+            media_state_before = await self._capture_media_state(page)
+            from apps.ai_testing.execution.browser_observers import capture_visual_frames
+            visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
+            try:
+                await self._execute_ai_actions(
+                    page, step, replan_actions, step_index, step_callback, timeout_error, history=history,
+                )
+                action_status = 'completed'
+                error_message = ''
+            except Exception as error:
+                action_status = 'failed'
+                error_message = f'{type(error).__name__}: {error}'
+            screenshot_path = await self._capture_screenshot(
+                page, artifact_dir, self._step_screenshot_filename(step_index),
+            )
+            persisted_attempt = await self._persist_step_attempt(
+                step_index, step, replan_actions[-1] if replan_actions else {}, action_status,
+                error_message, None, screenshot_path, page, media_state_before, visual_frames_before,
+            )
+            statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
+            required_statuses = self._required_assertion_statuses(step, statuses)
+            status = self._status_after_assertions(action_status, required_statuses)
+            if self._step_assertions_are_verified(step, required_statuses) or action_status != 'completed':
+                return status, error_message, replan_actions[-1].get('action') if replan_actions else '', replan_actions, persisted_attempt, screenshot_path
+            failure = f'Required assertions were not verified: {", ".join(required_statuses)}.'
+            actions = replan_actions
+            prior_actions.extend(self._audit_action_payload(action, step) for action in replan_actions)
+        return status, failure, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
+
+    def _assertion_replan_limit(self):
+        settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
+        browser = settings.get('ai_testing_browser', {}) if isinstance(settings, dict) else {}
+        try:
+            return max(1, min(12, int(browser.get('assertion_replan_limit', 8))))
+        except (TypeError, ValueError):
+            return 8
+
+    async def _capture_media_state(self, page):
+        try:
+            return await page.locator('video, audio').evaluate_all(
+                """
+                elements => elements.map(element => ({
+                    tag: element.tagName.toLowerCase(),
+                    paused: Boolean(element.paused),
+                    ended: Boolean(element.ended),
+                    readyState: Number(element.readyState),
+                    networkState: Number(element.networkState),
+                    currentTime: Number(element.currentTime),
+                    duration: Number.isFinite(element.duration) ? Number(element.duration) : null,
+                    videoWidth: Number(element.videoWidth || 0),
+                    videoHeight: Number(element.videoHeight || 0),
+                    currentSrc: String(element.currentSrc || element.src || ''),
+                }))
+                """
+            )
+        except Exception as error:
+            logger.warning('planner_v2 failed to capture media evidence: %s', error)
+            return None
+
+    @staticmethod
+    def _media_progress_seconds(before, after):
+        if not isinstance(before, list) or not isinstance(after, list):
+            return None
+        before_times = [item.get('currentTime') for item in before if isinstance(item, dict)]
+        after_times = [item.get('currentTime') for item in after if isinstance(item, dict)]
+        for before_time, after_time in zip(before_times, after_times):
+            try:
+                return max(0.0, float(after_time) - float(before_time))
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _build_planned_tasks(self, task_description, case_mode='freeform', task_steps=None):
         if case_mode in {'structured', 'hybrid'} and isinstance(task_steps, list) and task_steps:
             planned_tasks = []
             for index, step in enumerate(task_steps, start=1):
                 if isinstance(step, dict):
                     description = str(step.get('description') or step.get('task') or step.get('name') or '').strip()
+                    planned_task = dict(step)
                 else:
                     description = str(step).strip()
-                planned_tasks.append({
+                    planned_task = {}
+                planned_task.update({
                     'id': index,
                     'description': description or f'步骤 {index}',
                     'status': 'pending',
                 })
+                planned_tasks.append(planned_task)
             return planned_tasks
 
         normalized_lines = [line.strip() for line in str(task_description or '').splitlines() if line.strip()]
@@ -1200,53 +1576,19 @@ class PyUICompatAgent:
         description = str(raw_step.get('description') or raw_step.get('name') or f'步骤 {index}').strip()
         step_mode = str(raw_step.get('step_mode') or 'direct').strip().lower()
         if not action and step_mode == 'direct':
-            wait_match = re.search(r'等待\s*(\d+)\s*秒', description)
-            url_match = re.search(r'断言当前\s*URL\s*包含\s*(\S+)', description, re.IGNORECASE)
-            if wait_match:
-                action = 'wait'
-                raw_step = {**raw_step, 'value': str(int(wait_match.group(1)) * 1000)}
-            elif '按下 Enter' in description:
-                action = 'press'
-                raw_step = {**raw_step, 'selector': 'body', 'value': 'Enter'}
-            elif url_match:
-                action = 'assert_url_contains'
-                raw_step = {**raw_step, 'expected': url_match.group(1)}
-            else:
-                step_mode = 'ai'
+            step_mode = 'ai'
         selector = raw_step.get('selector') or raw_step.get('locator') or raw_step.get('target')
-        expected = raw_step.get('expected') or raw_step.get('assert_value') or raw_step.get('url_contains')
-        if expected is None and action in {'assert_url_contains', 'url_contains'}:
-            expected = raw_step.get('url')
-        if expected is None and action in {'assert_text_contains', 'text_contains', 'assert_url_contains', 'url_contains'}:
-            expected = raw_step.get('value') or raw_step.get('text')
+        expected = raw_step.get('expected') or raw_step.get('assert_value')
         assert_kind = str(raw_step.get('assert_kind') or '').strip().lower()
-        semantic_assertions = {
-            'site_list': (["[class*='site-item']", "[class*='site'] [class*='item']", '#btnSite'], 80, 120, 120, 20),
-            'camera_list': (["div[class*='grid'] > div", "div[class*='grid'] > button", "[class*='camera-item']", "[class*='preview']"], 80, 120, 40, 20),
-            'camera_previews': (["[class*='preview']", "[class*='thumbnail']", 'img', 'video', 'canvas'], 80, 120, 40, 20),
-        }
-        semantic_assertion = semantic_assertions.get(assert_kind)
-        if action == 'assert' and semantic_assertion:
-            selector_candidates, min_x, min_y, min_width, min_height = semantic_assertion
-            raw_step = {
-                **raw_step,
-                'assert_kind': 'selector_non_empty',
-                'param': assert_kind,
-                'expected': raw_step.get('expected') or 'true',
-                'selector_candidates': raw_step.get('selector_candidates') or selector_candidates,
-                'min_count': raw_step.get('min_count') or 1,
-                'min_x': raw_step.get('min_x') or min_x,
-                'min_y': raw_step.get('min_y') or min_y,
-                'min_width': raw_step.get('min_width') or min_width,
-                'min_height': raw_step.get('min_height') or min_height,
-            }
-            assert_kind = 'selector_non_empty'
         return {
             'index': index,
             'executor': str(raw_step.get('executor') or 'browser').strip().lower(),
             'step_mode': step_mode,
             'action': action,
             'description': description,
+            'allowed_capabilities': raw_step.get('allowed_capabilities') or self._direct_action_capabilities(action),
+            'assertions': raw_step.get('assertions') or [],
+            'verification_required': raw_step.get('verification_required', True) is not False,
             'selector': selector,
             'loc': raw_step.get('loc'),
             'param': raw_step.get('param'),
@@ -1254,12 +1596,14 @@ class PyUICompatAgent:
             'value': raw_step.get('value') or raw_step.get('text') or raw_step.get('input_value'),
             'expected': raw_step.get('expected') or expected,
             'assert_kind': assert_kind,
+            'assertion_bindings': raw_step.get('assertion_bindings') or [],
             'fields': raw_step.get('fields'),
             'selector_candidates': raw_step.get('selector_candidates'),
             'environment_id': raw_step.get('environment_id'),
-            'camera_name': raw_step.get('camera_name'),
             'device_id': raw_step.get('device_id'),
             'command': raw_step.get('command'),
+            'resource_type': raw_step.get('resource_type'),
+            'resource_reference': raw_step.get('resource_reference'),
             'operation': raw_step.get('operation'),
             'arguments': raw_step.get('arguments') or {},
             'device': raw_step.get('device'),
@@ -1275,118 +1619,36 @@ class PyUICompatAgent:
             'thinking': raw_step.get('thinking'),
         }
 
-    async def _report_vehicle_event(self, step):
-        environment_id = step.get('environment_id')
-        if not isinstance(environment_id, int) or environment_id <= 0:
-            raise ValueError('report_vehicle_event requires a positive environment_id')
-        if not self.execution_user_id:
-            raise PermissionError('report_vehicle_event requires the execution user context')
-
-        payload = {
-            'environment_id': environment_id,
-            'device': str(step.get('device') or 'main'),
-            'camera_index': int(step.get('camera_index') or 0),
-            'media_path': str(step.get('media_path') or ''),
-            'vehicle_color': int(step.get('vehicle_color') or 1),
-            'alert_type': 'vehicle',
-            'report_event': True,
-        }
-
-        def report_event():
-            from django.contrib.auth import get_user_model
-            from apps.data_factory.views import DataFactoryViewSet
-
-            user = get_user_model().objects.get(id=self.execution_user_id)
-            return DataFactoryViewSet().execute_business_tool(
-                'construct_alert_event',
-                payload,
-                user,
-            )
-
-        report = await asyncio.to_thread(report_event)
-        if not report.get('success'):
-            raise AssertionError(report.get('error') or 'vehicle event report failed')
-        nested_report = report.get('report') if isinstance(report.get('report'), dict) else {}
-        event_ids = report.get('event_ids') or nested_report.get('event_ids')
-        if not event_ids:
-            raise AssertionError('vehicle event report did not return event IDs')
-        return {'event_ids': event_ids}
+    @staticmethod
+    def _direct_action_capabilities(action):
+        normalized_action = str(action or '').strip().lower()
+        if normalized_action == 'assert':
+            return ['browser.inspect']
+        if normalized_action == 'navigate':
+            return ['browser.navigate']
+        if normalized_action:
+            return ['browser.act']
+        return []
 
     @staticmethod
-    def _has_gpt_analysis(alert):
-        if not isinstance(alert, dict):
-            return False
+    def _validate_normalized_steps(steps):
+        allowed_actions = {
+            'navigate', 'click', 'double_click', 'right_click', 'hover',
+            'fill', 'press', 'select', 'scroll', 'wait', 'assert',
+        }
+        from apps.ai_testing.execution.capabilities import validate_browser_action
 
-        gpt_raw = alert.get('gptRaw')
-        if isinstance(gpt_raw, dict) and str(gpt_raw.get('natural_language_description') or '').strip():
-            return True
-
-        for status in alert.get('statuses') or []:
-            note = ((status.get('noteRecord') or {}).get('new') or {}).get('note')
-            if str(note or '').strip():
-                return True
-        return False
-
-    async def _wait_for_reported_alert_gpt_analysis(self, page, timeout_ms):
-        if not self._reported_event_ids:
-            raise AssertionError('no reported event ID is available for GPT analysis readiness check')
-
-        event_id = self._reported_event_ids[-1]
-        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000
-        last_failure = 'alert was not found'
-
-        while time.monotonic() < deadline:
-            try:
-                async with page.expect_response(
-                    lambda response: '/alert/alerts?' in response.url and response.request.method == 'GET',
-                    timeout=min(timeout_ms, 30000),
-                ) as response_info:
-                    await page.reload(wait_until='domcontentloaded', timeout=min(timeout_ms, 60000))
-                response = await response_info.value
-                headers = await response.request.all_headers()
-                query_url = re.sub(r'([?&]paging\.limit=)\d+', r'\g<1>100', response.url)
-                api_response = await page.context.request.get(query_url, headers=headers)
-                payload = await api_response.json()
-                alert = next(
-                    (item for item in payload.get('data', []) if item.get('eventId') == event_id),
-                    None,
-                )
-                gpt_raw = alert.get('gptRaw') if isinstance(alert, dict) else None
-                description = str((gpt_raw or {}).get('natural_language_description') or '').strip()
-                if description:
-                    self._reported_alert_gpt_description = description
-                    return
-                last_failure = 'alert has not received a GPT analysis yet' if alert else 'alert was not found'
-            except Exception as error:
-                last_failure = f'alert query failed: {type(error).__name__}: {error}'
-
-            await page.wait_for_timeout(5000)
-
-        raise AssertionError(f"reported event '{event_id}' {last_failure}")
-
-    async def _assert_reported_alert_gpt_analysis(self, page, timeout_ms):
-        await self._wait_for_reported_alert_gpt_analysis(page, timeout_ms)
-
-    async def _assert_reported_alert_note_matches_gpt(self, page, timeout_ms):
-        expected = self._normalize_text_for_contains(self._reported_alert_gpt_description)
-        if not expected:
-            raise AssertionError('no GPT natural-language description is available for Alert Note comparison')
-
-        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000
-        last_text = ''
-        while time.monotonic() < deadline:
-            last_text = str(await page.locator('body').first.text_content(timeout=timeout_ms) or '')
-            if expected in self._normalize_text_for_contains(last_text):
-                return
-            await page.wait_for_timeout(1000)
-
-        raise AssertionError('Alert Note does not contain the reported alert GPT natural-language description')
+        for index, step in enumerate(steps, start=1):
+            if step.get('executor') != 'browser' or step.get('step_mode') == 'ai':
+                continue
+            action = str(step.get('action') or '').strip().lower()
+            if action not in allowed_actions:
+                raise ValueError(f'Planner step {index} uses unsupported browser action {action}.')
+            if step.get('loc'):
+                raise ValueError(f'Planner step {index} must not use fixed coordinates.')
+            validate_browser_action(action, step.get('allowed_capabilities') or [])
 
     async def _plan_ai_step(self, page, step):
-        fallback_actions = self._fallback_actions_for_step(step)
-        if fallback_actions:
-            return [self._normalize_step({**action, 'step_mode': 'direct'}, offset) for offset, action in enumerate(fallback_actions, start=1)]
-
         current_url = page.url or ''
         try:
             page_title = await page.title()
@@ -1404,11 +1666,71 @@ class PyUICompatAgent:
 
         from apps.ai_testing.global_planner import VisualStepReplanner
 
+        actionable_controls = await self._build_actionable_controls(page)
+        self._last_actionable_controls = [
+            {
+                key: control.get(key)
+                for key in ('selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'top_layer', 'blocking_layer', 'z_index', 'container_text')
+            }
+            for control in actionable_controls[:300]
+            if isinstance(control, dict)
+        ]
+        observable_elements = await self._build_observable_elements(page)
+        try:
+            page_metrics = await page.evaluate(
+                """() => {
+                    const selectorFor = element => {
+                        const parts = [];
+                        let current = element;
+                        while (current && current !== document.body) {
+                            const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
+                            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
+                            if (current.parentElement === document.body) return `body > ${parts.join(' > ')}`;
+                            current = current.parentElement;
+                        }
+                        return '';
+                    };
+                    const scrollContainers = Array.from(document.querySelectorAll('body *')).filter(element => {
+                        const style = getComputedStyle(element);
+                        const rect = element.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && element.scrollHeight > element.clientHeight + 1;
+                    }).map(element => ({
+                        selector: selectorFor(element),
+                        scroll_top: element.scrollTop,
+                        scroll_height: element.scrollHeight,
+                        client_height: element.clientHeight,
+                        remaining: element.scrollHeight - element.clientHeight - element.scrollTop,
+                    })).filter(item => item.selector && item.remaining > 1).sort((left, right) => right.remaining - left.remaining).slice(0, 20);
+                    return { scroll_y: window.scrollY, scroll_height: document.documentElement.scrollHeight, viewport_height: window.innerHeight, scroll_containers: scrollContainers };
+                }"""
+            )
+        except Exception:
+            page_metrics = {}
+
         actions = await VisualStepReplanner().create_actions(
             step['description'],
             {
                 'url': current_url,
+                'title': page_title,
                 'visible_text': normalized_text,
+                'actionable_controls': actionable_controls,
+                'observable_elements': observable_elements,
+                'page_metrics': page_metrics,
+                'allowed_capabilities': step.get('allowed_capabilities') or [],
+                'assertions': step.get('assertions') or [],
+                'execution_resources': [
+                    *self._execution_resources,
+                    {
+                        'resource_type': 'mutation_response',
+                        'resource': {
+                            'result_correlation': {
+                                'match_values': self._runtime_correlation_values[-50:],
+                            },
+                        },
+                    },
+                ],
+                'prior_actions': step.get('_prior_actions') or [],
+                'require_assertion_bindings': step.get('_require_assertion_bindings') is True,
                 'error': step.get('_planner_failure', ''),
                 'screenshot': await self._capture_inline_screenshot_data(page),
             },
@@ -1425,8 +1747,141 @@ class PyUICompatAgent:
             )
             normalized_action['thinking'] = 'planned_by=planner_vision'
             normalized_actions.append(normalized_action)
-        self._validate_planned_actions(normalized_actions, step['description'])
+        self._validate_planned_actions(
+            normalized_actions,
+            step['description'],
+            step.get('allowed_capabilities') or [],
+        )
         return normalized_actions
+
+    async def _build_actionable_controls(self, page):
+        try:
+            return await page.locator('body *').evaluate_all(
+                """
+                elements => elements.filter(element => {
+                    const style = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
+                    const interactiveRole = ['button', 'link', 'option', 'menuitem', 'row'].includes(element.getAttribute('role'));
+                    const frameworkListener = Object.getOwnPropertySymbols(element).some(symbol => {
+                        const value = element[symbol];
+                        return String(symbol.description || '').includes('_vei') && value && typeof value === 'object' && Object.keys(value).length > 0;
+                    }) || Object.getOwnPropertyNames(element).some(property => {
+                        const value = element[property];
+                        return property.startsWith('__reactProps') && value && typeof value === 'object' && Object.keys(value).some(key => /^on[A-Z]/.test(key));
+                    });
+                    const interactive = nativeControl || interactiveRole || element.hasAttribute('tabindex') || element.hasAttribute('onclick') || frameworkListener || style.cursor === 'pointer';
+                    const hitTarget = document.elementFromPoint(
+                        rect.left + rect.width / 2,
+                        rect.top + rect.height / 2,
+                    );
+                    return interactive && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && (hitTarget === element || element.contains(hitTarget));
+                }).filter(element => {
+                    const rect = element.getBoundingClientRect();
+                    const containsInteractive = Array.from(element.querySelectorAll('*')).some(child => {
+                        const childStyle = getComputedStyle(child);
+                        const childFrameworkListener = Object.getOwnPropertySymbols(child).some(symbol => String(symbol.description || '').includes('_vei')) || Object.getOwnPropertyNames(child).some(property => property.startsWith('__reactProps'));
+                        return ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(child.tagName) || ['button', 'link', 'option', 'menuitem', 'row'].includes(child.getAttribute('role')) || child.hasAttribute('onclick') || childFrameworkListener || childStyle.cursor === 'pointer';
+                    });
+                    const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
+                    const viewportRatio = (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight);
+                    return nativeControl || !containsInteractive || viewportRatio < 0.25;
+                }).map((element, index) => {
+                    const title = element.getAttribute('title');
+                    const href = element.getAttribute('href');
+                    const semanticChild = element.querySelector('[aria-label], [title], [alt], [data-icon], [data-lucide], svg title, svg, use');
+                    const semanticName = semanticChild ? (
+                        semanticChild.getAttribute('aria-label')
+                        || semanticChild.getAttribute('title')
+                        || semanticChild.getAttribute('alt')
+                        || semanticChild.getAttribute('data-icon')
+                        || semanticChild.getAttribute('data-lucide')
+                        || semanticChild.textContent
+                        || semanticChild.getAttribute('href')
+                        || semanticChild.getAttribute('xlink:href')
+                        || semanticChild.getAttribute('class')
+                        || ''
+                    ) : '';
+                    const name = (element.getAttribute('aria-label') || title || element.innerText || element.value || href || semanticName || '').trim().slice(0, 120);
+                    const uniqueId = element.id && document.querySelectorAll(`#${CSS.escape(element.id)}`).length === 1;
+                    const attributeSelector = (attribute, value) => `[${attribute}=${JSON.stringify(value)}]`;
+                    const structuralSelector = () => {
+                        const parts = [];
+                        let current = element;
+                        while (current && current !== document.body) {
+                            const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
+                            const position = siblings.indexOf(current) + 1;
+                            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${position})`);
+                            if (current.parentElement === document.body) {
+                                const candidate = `body > ${parts.join(' > ')}`;
+                                if (document.querySelectorAll(candidate).length === 1) return candidate;
+                            }
+                            current = current.parentElement;
+                        }
+                        return '';
+                    };
+                    const selector = uniqueId ? `#${CSS.escape(element.id)}` : element.dataset.testid ? attributeSelector('data-testid', element.dataset.testid) : element.getAttribute('aria-label') ? attributeSelector('aria-label', element.getAttribute('aria-label')) : title ? attributeSelector('title', title) : href ? attributeSelector('href', href) : structuralSelector();
+                    const url = href ? new URL(href, document.baseURI).href : '';
+                    const rect = element.getBoundingClientRect();
+                    const depth = (() => { let value = 0; let current = element; while (current && current !== document.body) { value += 1; current = current.parentElement; } return value; })();
+                    const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
+                    const containerText = (element.parentElement?.innerText || '').trim().slice(0, 240);
+                    const className = typeof element.className === 'string' ? element.className.trim() : '';
+                    const group = className ? Array.from(element.parentElement.children).filter(sibling => sibling.tagName === element.tagName && sibling.className === element.className) : [element];
+                    const dialog = element.closest('[role="dialog"], dialog, [aria-modal="true"]');
+                    const positioned = (() => { let current = element; while (current && current !== document.body) { const style = getComputedStyle(current); const zIndex = Number.parseInt(style.zIndex, 10) || 0; if (['fixed', 'sticky'].includes(style.position) || zIndex > 0) return current; current = current.parentElement; } return null; })();
+                    const positionedRect = positioned?.getBoundingClientRect();
+                    const positionedRatio = positionedRect ? (positionedRect.width * positionedRect.height) / Math.max(1, window.innerWidth * window.innerHeight) : 0;
+                    const zIndex = Number.parseInt(getComputedStyle(dialog || positioned || element).zIndex, 10) || 0;
+                    const topLayer = Boolean(dialog || positioned || zIndex > 0);
+                    const blockingLayer = Boolean(dialog || (positioned && getComputedStyle(positioned).position === 'fixed' && positionedRatio >= 0.3));
+                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || '', name, selector, url, native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: group.length, group_ordinal: group.indexOf(element), top_layer: topLayer, blocking_layer: blockingLayer, z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                }).filter(control => control.selector || control.name).sort((left, right) => {
+                    const blockingLayerRank = Number(right.blocking_layer) - Number(left.blocking_layer);
+                    const namedRank = Number(Boolean(right.name)) - Number(Boolean(left.name));
+                    const nativeRank = Number(right.native_control) - Number(left.native_control);
+                    const topLayerRank = Number(right.top_layer) - Number(left.top_layer);
+                    const repeatedRank = Number(right.group_size > 1) - Number(left.group_size > 1);
+                    return blockingLayerRank || namedRank || nativeRank || topLayerRank || right.z_index - left.z_index || repeatedRank || left.rect.y - right.rect.y || left.rect.x - right.rect.x || left.depth - right.depth;
+                }).slice(0, 300);
+                """
+            )
+        except Exception:
+            return []
+
+    async def _build_observable_elements(self, page):
+        try:
+            return await page.locator('body *').evaluate_all(
+                """
+                elements => elements.filter(element => {
+                    const style = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    const text = (element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('alt') || element.innerText || element.value || '').trim();
+                    const ratio = (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight);
+                    return element.parentElement !== document.body && text && text.length <= 240 && ratio < 0.25 && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                }).slice(0, 200).map((element, index) => {
+                    const structuralSelector = () => {
+                        const parts = [];
+                        let current = element;
+                        while (current && current !== document.body) {
+                            const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
+                            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
+                            if (current.parentElement === document.body) {
+                                const candidate = `body > ${parts.join(' > ')}`;
+                                if (document.querySelectorAll(candidate).length === 1) return candidate;
+                            }
+                            current = current.parentElement;
+                        }
+                        return '';
+                    };
+                    const text = (element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('alt') || element.innerText || element.value || '').trim().slice(0, 240);
+                    const rect = element.getBoundingClientRect();
+                    return { index, tag: element.tagName.toLowerCase(), text, selector: structuralSelector(), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                }).filter(element => element.selector);
+                """
+            )
+        except Exception:
+            return []
 
     async def _capture_inline_screenshot_data(self, page):
         try:
@@ -1505,613 +1960,38 @@ class PyUICompatAgent:
         return [item for item in parsed if isinstance(item, dict)]
 
     @staticmethod
-    def _validate_planned_actions(actions, step_description=''):
+    def _validate_planned_actions(actions, step_description='', allowed_capabilities=None):
+        allowed_actions = {
+            'navigate', 'click', 'double_click', 'right_click', 'hover',
+            'fill', 'press', 'select', 'scroll', 'wait', 'assert',
+        }
+        from apps.ai_testing.execution.capabilities import validate_browser_action
+
         for index, action in enumerate(actions, start=1):
             name = str(action.get('action') or '').strip()
             if not name:
                 raise ValueError(f'Planner action {index} is missing action')
-            if name in {'click', 'hover'} and not (action.get('selector') or action.get('loc')):
-                raise ValueError(f'Planner action {index} {name} requires selector or loc')
+            if name not in allowed_actions:
+                raise ValueError(f'Planner action {index} uses unsupported action {name}')
+            if action.get('loc'):
+                raise ValueError(f'Planner action {index} must not use fixed coordinates')
+            if name in {'click', 'double_click', 'right_click', 'hover'} and not str(action.get('selector') or '').strip():
+                raise ValueError(f'Planner action {index} {name} requires selector')
             if name == 'navigate' and not action.get('url'):
                 raise ValueError(f'Planner action {index} navigate requires url')
-            if name in {'assert_url_contains', 'assert_text_contains'} and not action.get('expected'):
-                raise ValueError(f'Planner action {index} {name} requires expected')
             if name in {'fill', 'press', 'select'} and not action.get('value'):
                 raise ValueError(f'Planner action {index} {name} requires value')
-        assertion_markers = ('断言', 'assert', '检查', 'verify', '确认', '正常')
-        requires_assertion = any(marker in str(step_description).lower() for marker in assertion_markers)
-        assertion_actions = {
-            'assert',
-            'assert_text_contains',
-            'assert_url_contains',
-            'assert_popup_contains',
-            'assert_reported_alert_gpt_analysis',
-            'assert_reported_alert_note_matches_gpt',
-        }
-        if requires_assertion and not any(str(action.get('action') or '') in assertion_actions for action in actions):
-            raise ValueError('Planner step with an assertion intent requires an assertion action')
-        live_stream_markers = ('直播流', '直播视频流', '实时视频流', 'live stream')
-        if any(marker in str(step_description).lower() for marker in live_stream_markers):
-            has_media_assertion = any(
-                str(action.get('action') or '') == 'assert'
-                and str(action.get('assert_kind') or '') in {'stream_active', 'video_visible'}
-                for action in actions
-            )
-            if not has_media_assertion:
-                raise ValueError('Planner live-stream step requires stream_active or video_visible assertion')
-        camera_list_markers = ('cameras列表', '摄像头列表', '摄像机列表', '缩略图')
-        if any(marker in str(step_description).lower() for marker in camera_list_markers):
-            has_camera_list_assertion = any(
-                str(action.get('action') or '') == 'assert'
-                and str(action.get('assert_kind') or '') == 'selector_non_empty'
-                and str(action.get('param') or '') in {'site_list', 'camera_list', 'camera_previews'}
-                for action in actions
-            )
-            if not has_camera_list_assertion:
-                raise ValueError('Planner camera-list step requires site_list, camera_list, or camera_previews assertion')
-
-    def _fallback_actions_for_step(self, step):
-        text = str(step.get('description') or '')
-        normalized_text = text.lower()
-        if '打开 cameras 页面' in normalized_text and 'site 列表' in normalized_text:
-            return [{'action': 'open_camera_list', 'reason': 'camera workflow capability'}]
-        if '摄像头在线数量大于 0 的 site' in normalized_text and '展开' in normalized_text:
-            return [{'action': 'select_site_with_online_cameras', 'reason': 'camera workflow capability'}]
-        if '选择在线 camera' in normalized_text and '直播流' in text:
-            return [
-                {'action': 'select_online_camera', 'reason': 'camera workflow capability'},
-                {'action': 'assert', 'assert_kind': 'stream_active', 'expected': 'true', 'reason': 'camera workflow live stream assertion'},
-            ]
-        if '10s forward' in normalized_text and any(keyword in normalized_text for keyword in ('playback', '回放')):
-            return [{'action': 'seek_playback_forward_ten_seconds', 'reason': 'playback capability'}]
-        if 'View Playback' in text:
-            return [
-                {
-                    'action': 'wait',
-                    'value': 3000,
-                    'reason': 'fallback wait for live-stream toolbar',
-                },
-                {
-                    'action': 'click_exact_text',
-                    'value': 'View Playback',
-                    'reason': 'fallback deterministic view-playback click',
-                },
-                {
-                    'action': 'assert_playback_loaded',
-                    'reason': 'fallback playback media and toolbar assertion',
-                },
-            ]
-        if 'download' in text.lower() and ('playback' in text.lower() or '回放' in text):
-            return [{
-                'action': 'download_playback',
-                'reason': 'fallback deterministic playback download',
-            }]
-        popup_expected = self._extract_popup_expected_text(text)
-        if self._looks_like_popup_assertion(text):
-            return [{
-                'action': 'assert_popup_contains',
-                'expected': popup_expected,
-                'reason': 'fallback deterministic popup assertion',
-            }]
-        if '组织管理按钮' in text and '三个人图标' in text:
-            return [{
-                'action': 'hover',
-                'selector': 'text=Organization',
-                'reason': 'fallback deterministic organization sidebar hover',
-            }]
-        if 'Create User' in text and '点击' in text:
-            return [{
-                'action': 'click_exact_text',
-                'value': 'Create User',
-                'reason': 'fallback deterministic create user click',
-            }]
-        if 'Deactivate' in text and '点击' in text:
-            return [{
-                'action': 'click_exact_text',
-                'value': 'Deactivate',
-                'reason': 'fallback deterministic deactivate user click',
-            }]
-        if 'User deleted successfully' in text:
-            return [{
-                'action': 'assert_popup_contains',
-                'expected': 'User deleted successfully',
-                'reason': 'fallback visible user deletion success popup assertion',
-            }]
-        if 'User created successfully' in text:
-            return [{
-                'action': 'assert_user_in_left_list',
-                'value': 'ai@test.com',
-                'reason': 'fallback created user appears in left list assertion',
-            }]
-        email_match = re.search(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', text)
-        if email_match and '左侧' in text and '搜索' in text:
-            return [
-                {
-                    'action': 'fill',
-                    'selector': "input[placeholder*='Search by name or email' i]",
-                    'value': email_match.group(0),
-                    'reason': 'fallback deterministic organization user search',
-                },
-                {'action': 'press', 'selector': "input[placeholder*='Search by name or email' i]", 'value': 'Enter'},
-                {'action': 'wait', 'value': '500'},
-            ]
-        if '高级搜索面板' in text and 'Magic Search V2' in text and '包含' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'text_visible',
-                'param': 'Magic Search V2',
-                'reason': 'fallback deterministic advanced-search option assertion',
-            }]
-        if '放大镜图标' in text and '高级搜索面板' in text and '展开' in text:
-            return [{
-                'action': 'click',
-                'selector': "div.colorBorder:has(input[placeholder='Magic Search']) > div.ant-dropdown-trigger",
-                'reason': 'fallback deterministic advanced-search leading magnifier click',
-            }]
-        if '高级搜索列表' in text and 'Magic Search V2' in text and '点击' in text:
-            return [{
-                'action': 'click',
-                'selector': 'Magic Search V2',
-                'reason': 'fallback deterministic advanced-search option click',
-            }]
-        if '状态选项列表' in text and 'Close' in text and '点击' in text:
-            return [{
-                'action': 'change_alert_status',
-                'selector': '.alert-select-root',
-                'value': 'Close',
-                'reason': 'fallback deterministic alert-status option change',
-            }]
-        if '显示列表中的第一个结果' in text and '点击' in text:
-            return [{
-                'action': 'click',
-                'loc': '(180,245)',
-                'param': 'first alert result',
-                'reason': 'fallback deterministic first alert result click',
-            }]
-        if '页面中存在可见媒体内容' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': [
-                    "div[id^='alert_'].cursor-pointer > div.relative.rounded-lg",
-                    "[class*='preview']",
-                    'video',
-                    'canvas',
-                    'img',
-                ],
-                'min_count': 1,
-                'min_x': 120,
-                'min_y': 80,
-                'min_width': 40,
-                'min_height': 20,
-                'param': 'alert_media',
-                'expected': 'True',
-                'reason': 'fallback deterministic visible media assertion',
-            }]
-        if 'video_video_0.mp4' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': ['video', 'canvas', 'img', "[class*='preview']", "[class*='media']"],
-                'min_count': 1,
-                'min_x': 80,
-                'min_y': 80,
-                'min_width': 80,
-                'min_height': 60,
-                'param': 'search_result_media',
-                'expected': 'True',
-                'reason': 'fallback rendered search preview media assertion',
-            }]
-        if '背景色' in text and '深色' in text and ('断言' in text or '期望断言结果' in text):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'page_dark_theme',
-                'expected': 'True',
-                'param': 'page_background',
-                'reason': 'fallback deterministic page dark-theme assertion',
-            }]
-        if '背景色' in text and '浅色' in text and ('断言' in text or '期望断言结果' in text):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'page_dark_theme',
-                'expected': 'False',
-                'param': 'page_background',
-                'reason': 'fallback deterministic page light-theme assertion',
-            }]
-        if 'To Do' in text and '下拉框' in text:
-            return [{
-                'action': 'click',
-                'selector': '.alert-select-root .ant-select-selector',
-                'reason': 'fallback deterministic alert-status dropdown open',
-            }]
-        if '断言组织管理子选项' in text and 'Team' in text:
-            return [
-                {
-                    'action': 'hover',
-                    'param': 'Team sidebar fallback',
-                    'reason': 'fallback expand organization sidebar before Team assertion',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'text_visible',
-                    'param': 'Team',
-                    'reason': 'fallback assert Team option is visible',
-                },
-            ]
-        if '点击组织管理子选项' in text and 'Team' in text:
-            return [
-                {
-                    'action': 'hover',
-                    'param': 'Team sidebar fallback',
-                    'reason': 'fallback expand organization sidebar before Team click',
-                },
-                {
-                    'action': 'click',
-                    'selector': 'Team',
-                    'param': 'Team',
-                    'reason': 'fallback click Team option',
-                },
-            ]
-        if '角色下拉框' in text and '当前值为Org Admin' in text:
-            return [{
-                'action': 'click',
-                'selector': 'text=Org Admin (Can manage and view all sites)',
-                'reason': 'fallback deterministic role dropdown open',
-            }]
-        if '下拉框列表中包含"Site Manager"选项' in text or '下拉框列表中包含“Site Manager”选项' in text:
-            return [{
-                'action': 'assert_text_contains',
-                'selector': 'body',
-                'expected': 'Site Manager (Can manage and view specified sites)',
-                'reason': 'fallback deterministic role option assertion',
-            }]
-        if '选择并点击Site Manager选项' in text:
-            return [{
-                'action': 'click',
-                'selector': 'text=Site Manager (Can manage and view specified sites)',
-                'reason': 'fallback deterministic role option click',
-            }]
-        if '当前值为Site Manager' in text:
-            return [{
-                'action': 'assert_text_contains',
-                'selector': 'body',
-                'expected': 'Site Manager (Can manage and view specified sites)',
-                'reason': 'fallback deterministic selected role assertion',
-            }]
-        if '蓝色加号' in text and ('创建新的角色' in text or '创建新的用户' in text):
-            return [
-                {
-                    'action': 'click',
-                    'selector': 'button[aria-label="Add New User"]',
-                    'reason': 'fallback click add-user button on organization page',
-                }
-            ]
-        if 'Phone Number' in text and '415-341-7120' in text:
-            return [{
-                'action': 'type_phone_us',
-                'selector': "input[type='tel'], input[placeholder*='Phone' i], input[name*='phone' i]",
-                'value': '+14153417120',
-                'param': '415-341-7120',
-                'reason': 'fallback type US phone number with +1 country code',
-            }]
-        if 'Email输入框填写ai@test.com' in text:
-            return [{
-                'action': 'fill',
-                'selector': "input[type='email'][placeholder='Email']",
-                'value': 'ai@test.com',
-                'reason': 'fallback deterministic email fill',
-            }]
-        if 'First Name输入框填写AI' in text:
-            return [{
-                'action': 'fill',
-                'selector': "input[type='text'][placeholder='First Name']",
-                'value': 'AI',
-                'reason': 'fallback deterministic first-name fill',
-            }]
-        if 'Last Name输入框填写Test' in text:
-            return [{
-                'action': 'fill',
-                'selector': "input[type='text'][placeholder='Last Name']",
-                'value': 'Test',
-                'reason': 'fallback deterministic last-name fill',
-            }]
-        if 'Email地址为ai@test.com' in text and 'First Name字段为AI' in text and 'Phone Number字段为+1(415)341-7120' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'field_values_match',
-                'fields': [
-                    {
-                        'name': 'Email',
-                        'selector': "input[type='email'][placeholder='Email']",
-                        'expected': 'ai@test.com',
-                        'match': 'exact',
-                    },
-                    {
-                        'name': 'First Name',
-                        'selector': "input[type='text'][placeholder='First Name']",
-                        'expected': 'AI',
-                        'match': 'exact',
-                    },
-                    {
-                        'name': 'Last Name',
-                        'selector': "input[type='text'][placeholder='Last Name']",
-                        'expected': 'Test',
-                        'match': 'exact',
-                    },
-                    {
-                        'name': 'Phone Number',
-                        'selector': "input[type='tel'][placeholder='Phone number']",
-                        'expected': '+1(415)341-7120',
-                        'match': 'phone_digits',
-                    },
-                ],
-                'reason': 'fallback deterministic multi-field assertion for create-user form',
-            }]
-        if ('搜索结果' in text and '不为空' in text) or ('用户列表' in text and '不包含' not in text):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': [
-                    'text=To Do',
-                    'text=Person',
-                    "[class*='result'] [class*='item']",
-                    "[class*='list'] [class*='item']",
-                    "[role='row']",
-                    "[class*='card']",
-                    'li',
-                ],
-                'min_count': 1,
-                'min_x': 120,
-                'min_y': 80,
-                'min_width': 30,
-                'min_height': 16,
-                'param': 'results',
-                'expected': 'True',
-            }]
-        email_match = re.search(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', text)
-        if email_match and '包含' in text and '不包含' not in text and any(keyword in text for keyword in ('搜索结果', '用户列表', '左侧展示')):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'text_visible',
-                'param': email_match.group(0),
-                'expected': 'True',
-                'reason': 'fallback deterministic positive list assertion',
-            }]
-        if email_match and '不包含' in text and any(keyword in text for keyword in ('搜索结果', '用户列表', '左侧展示')):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'text_visible',
-                'param': email_match.group(0),
-                'expected': 'False',
-                'reason': 'fallback deterministic negative list assertion',
-            }]
-        if 'placeholder' in text and 'Magic Search V2' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'placeholder_equals',
-                'selector': "input[placeholder*='Magic Search' i]",
-                'param': 'Magic Search V2',
-                'expected': 'True',
-                'reason': 'fallback deterministic Magic Search V2 placeholder assertion',
-            }]
-        if '在搜索框中输入' in text and 'black hair' in text:
-            return [{'action': 'type', 'selector': "input[type='text']", 'param': 'black hair'}]
-        if '预览缩略图' in text or ('第一条结果' in text and '预览' in text):
-            return [{
-                'action': 'click',
-                'selector': "div[id^='alert_'].cursor-pointer > div.relative.rounded-lg",
-                'param': 'first preview',
-                'reason': 'fallback deterministic first result preview thumbnail click',
-            }]
-        if '站点列表' in text and '在线和离线的摄像头数量' in text:
-            return [
-                {
-                    'action': 'wait',
-                    'value': '20000',
-                    'reason': 'fallback wait for streaming page site list to hydrate',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'selector_non_empty',
-                    'selector_candidates': [
-                        '#btnSite',
-                        "button[id='btnSite']",
-                        "[id='btnSite']",
-                    ],
-                    'min_count': 1,
-                    'min_x': 80,
-                    'min_y': 120,
-                    'min_width': 120,
-                    'min_height': 20,
-                    'param': 'site_list',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic site list assertion',
-                },
-            ]
-        if '搜索结果中包含目标站点名称' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': [
-                    '#btnSite',
-                    "button[id='btnSite']",
-                    "[id='btnSite']",
-                ],
-                'min_count': 1,
-                'min_x': 80,
-                'min_y': 120,
-                'min_width': 120,
-                'min_height': 20,
-                'param': 'site_search_results',
-                'expected': 'True',
-                'reason': 'fallback deterministic site search assertion',
-            }]
-        if 'Search site name' in text and '目标站点名称' in text:
-            return [{
-                'action': 'search_site_with_cameras',
-                'selector': "input[placeholder*='Search site name' i], input[placeholder*='Search' i]",
-                'reason': 'fallback search the first site that has available cameras',
-            }]
-        if '点击搜索结果中目标站点名称' in text:
-            return [{
-                'action': 'click',
-                'selector': '#btnSite',
-                'param': 'first site result',
-                'reason': 'fallback deterministic site result click',
-            }]
-        if '目标站点名称下方展示出该站点的摄像头列表' in text:
-            return [
-                {
-                    'action': 'wait',
-                    'value': '15000',
-                    'reason': 'fallback wait for selected site camera list to hydrate',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'selector_non_empty',
-                    'selector_candidates': [
-                        "div[class*='grid'] > div",
-                        "div[class*='grid'] > button",
-                        "div[class*='grid'] [class*='rounded']",
-                        "[class*='camera'] [class*='item']",
-                        "[class*='camera-item']",
-                        "[class*='list'] [class*='item']",
-                        "[class*='card']",
-                        "[class*='preview']",
-                        "[class*='thumbnail']",
-                        'img',
-                        'video',
-                        'canvas',
-                    ],
-                    'min_count': 1,
-                    'min_x': 80,
-                    'min_y': 120,
-                    'min_width': 40,
-                    'min_height': 20,
-                    'param': 'camera_list',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic camera list assertion',
-                },
-            ]
-        if '每个摄像头的预览图都能够正常展示' in text:
-            return [{
-                'action': 'assert',
-                'assert_kind': 'selector_non_empty',
-                'selector_candidates': [
-                    "div[class*='grid'] > div",
-                    "div[class*='grid'] > button",
-                    "div[class*='grid'] [class*='rounded']",
-                    "[class*='camera'] [class*='item']",
-                    "[class*='camera-item']",
-                    "[class*='preview']",
-                    "[class*='thumbnail']",
-                    'img',
-                    'video',
-                    'canvas',
-                ],
-                'min_count': 1,
-                'min_x': 80,
-                'min_y': 120,
-                'min_width': 40,
-                'min_height': 20,
-                'param': 'camera_previews',
-                'expected': 'True',
-                'reason': 'fallback deterministic camera preview assertion',
-            }]
-        if '第一个在线的摄像头' in text and '预览图' in text and '点击' in text:
-            return [{
-                'action': 'click_first_online_camera',
-                'reason': 'fallback semantic online camera selection',
-            }]
-        if '摄像头在线数量大于 0 的 site' in text.lower() and '展开' in text:
-            return [{
-                'action': 'select_site_with_online_cameras',
-                'reason': 'fallback select and expand site with online cameras',
-            }]
-        if any(marker in text.lower() for marker in ('目标摄像头', '目标camera', 'target camera')) and '点击' in text and any(keyword in text for keyword in ('直播流', '直播视频流', '实时视频流')):
-            return [
-                {
-                    'action': 'click_first_online_camera',
-                    'reason': 'fallback semantic target camera selection',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'stream_active',
-                    'expected': 'True',
-                    'reason': 'fallback media-level live stream assertion',
-                },
-            ]
-        if '视频流关闭按钮' in text and '带盖垃圾桶形状' in text:
-            return [{
-                'action': 'close_active_stream',
-                'reason': 'fallback semantic trash-button stream close',
-            }]
-        if '实时视频流' in text and any(keyword in text for keyword in ('展示出', '持续播放', '时间戳', '画面随时间刷新')):
-            return [{
-                'action': 'assert',
-                'assert_kind': 'stream_active',
-                'param': 'stream_view',
-                'expected': 'True',
-                'reason': 'fallback deterministic active stream assertion',
-            }]
-        if '实时视频流页面关闭' in text:
-            return [{
-                'action': 'assert_stream_closed',
-                'reason': 'fallback semantic stream-close assertion',
-            }]
-        if 'Dark Mode' in text or '深色模式' in text or '浅色模式' in text or '三角形和菱形' in text:
-            return [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}]
-        if '主页图标' in text or '房子的形状' in text:
-            return [{'action': 'click', 'loc': '(48,92)', 'param': ':left:top:25:25'}]
-        if len(text.strip()) <= 50 and ('Alerts' in text or '铃铛形状' in text):
-            return [{'action': 'click', 'loc': '(48,196)', 'param': ':left:top:25:25'}]
-        if 'Cameras' in text or '摄像头的形状' in text:
-            return [
-                {'action': 'click', 'loc': '(48,142)', 'param': ':left:top:25:25', 'reason': 'fallback open cameras sidebar entry'},
-                {'action': 'click', 'selector': 'text=Cameras', 'param': 'Cameras', 'reason': 'fallback click cameras submenu item'},
-            ]
-        return []
-
-    def _looks_like_popup_assertion(self, text):
-        normalized = str(text or '').strip()
-        lowered = normalized.lower()
-        if not normalized:
-            return False
-        has_assertion_intent = '断言' in normalized or 'assert' in lowered
-        if not has_assertion_intent:
-            return False
-        popup_keywords = (
-            '提示弹窗',
-            '弹窗',
-            '提示消息',
-            '提示框',
-            'notification',
-            'toast',
-            'popup',
-            'message',
-        )
-        return any(keyword in lowered or keyword in normalized for keyword in popup_keywords)
-
-    def _extract_popup_expected_text(self, text):
-        normalized = str(text or '').strip()
-        patterns = [
-            r'包含[“"](?P<expected>[^”"]+)[”"]',
-            r'contains?[\s:]+[“"]?(?P<expected>[^”"\n]+)[”"]?',
-            r'显示[“"](?P<expected>[^”"]+)[”"]',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, normalized, flags=re.IGNORECASE)
-            if match:
-                return str(match.group('expected') or '').strip()
-        return ''
+            if allowed_capabilities is not None:
+                validate_browser_action(name, allowed_capabilities)
 
     def _normalize_text_for_contains(self, text):
         return re.sub(r'\s+', '', str(text or '').strip())
 
     def _attach_runtime_observers(self, page):
         self._recent_network_events = []
+        self._recent_download_events = []
 
-        def on_response(response):
+        async def on_response(response):
             try:
                 request = response.request
                 method = str(request.method or '').upper()
@@ -2131,37 +2011,58 @@ class PyUICompatAgent:
                     }
                 )
                 self._recent_network_events = self._recent_network_events[-50:]
+                if response.ok:
+                    try:
+                        payload = await response.json()
+                    except (TypeError, ValueError):
+                        payload = None
+                    self._runtime_correlation_values.extend(self._extract_correlation_values(payload))
+                    self._runtime_correlation_values = list(dict.fromkeys(self._runtime_correlation_values))[-50:]
             except Exception:
                 logger.debug('planner_v2 failed to record runtime response', exc_info=True)
 
         page.on('response', on_response)
 
-    def _popup_success_compatible_with_recent_mutation(self, expected):
-        normalized = str(expected or '').strip().lower()
-        if not normalized:
-            return False
+    @staticmethod
+    def _extract_correlation_values(payload):
+        values = []
+        sensitive_keys = {'access', 'authorization', 'credential', 'password', 'refresh', 'secret', 'token'}
 
-        if 'created successfully' in normalized or '创建成功' in normalized:
-            allowed_methods = {'POST'}
-        elif 'deleted successfully' in normalized or '删除成功' in normalized or 'deactivated successfully' in normalized:
-            allowed_methods = {'DELETE', 'PATCH', 'POST'}
-        elif 'updated successfully' in normalized or 'saved successfully' in normalized or '更新成功' in normalized or '保存成功' in normalized:
-            allowed_methods = {'PUT', 'PATCH', 'POST'}
-        else:
-            return False
+        def collect(value, key=''):
+            if any(term in key.casefold() for term in sensitive_keys):
+                return
+            if isinstance(value, dict):
+                for child_key, child_value in value.items():
+                    collect(child_value, str(child_key))
+                return
+            if isinstance(value, list):
+                for child_value in value[:50]:
+                    collect(child_value, key)
+                return
+            if isinstance(value, bool) or value is None:
+                return
+            text = str(value).strip()
+            if 3 <= len(text) <= 128:
+                values.append(text)
 
-        now = time.time()
-        for event in reversed(self._recent_network_events):
-            if now - float(event.get('ts') or 0) > 120:
-                continue
-            if not event.get('ok'):
-                continue
-            if int(event.get('status') or 0) >= 400:
-                continue
-            if str(event.get('method') or '').upper() not in allowed_methods:
-                continue
-            return True
-        return False
+        collect(payload)
+        return values[:50]
+
+        def on_download(download):
+            async def capture_download_result():
+                try:
+                    failure = await download.failure()
+                    self._recent_download_events.append({
+                        'status': 'failed' if failure else 'completed',
+                        'filename': str(download.suggested_filename or ''),
+                    })
+                except Exception as error:
+                    self._recent_download_events.append({'status': 'failed', 'error': type(error).__name__})
+                self._recent_download_events = self._recent_download_events[-20:]
+
+            asyncio.create_task(capture_download_result())
+
+        page.on('download', on_download)
 
     def _parse_point(self, raw_value):
         text = str(raw_value or '').strip()
@@ -2227,233 +2128,6 @@ class PyUICompatAgent:
             return False
         return False
 
-    def _normalize_alert_status_token(self, text):
-        normalized = re.sub(r'[^a-z0-9]+', '_', str(text or '').strip().lower()).strip('_')
-        return normalized
-
-    def _resolve_alert_status_target(self, requested_label, current_label, option_labels):
-        requested = self._normalize_alert_status_token(requested_label)
-        current = self._normalize_alert_status_token(current_label)
-        normalized_options = {
-            self._normalize_alert_status_token(label): str(label or '').strip()
-            for label in option_labels
-            if str(label or '').strip()
-        }
-
-        if requested in normalized_options:
-            return normalized_options[requested]
-
-        alias_groups = {
-            'close': ('close', 'closed', 'false_alarm', 'false_alarm_label'),
-            'closed': ('close', 'closed', 'false_alarm', 'false_alarm_label'),
-            'false_alarm': ('false_alarm', 'false_alarm_label', 'close', 'closed'),
-        }
-        for alias in alias_groups.get(requested, (requested,)):
-            if alias in normalized_options:
-                return normalized_options[alias]
-
-        remaining_options = [
-            str(label or '').strip()
-            for label in option_labels
-            if self._normalize_alert_status_token(label) != current and str(label or '').strip()
-        ]
-        if len(remaining_options) == 1:
-            return remaining_options[0]
-        return None
-
-    async def _change_alert_status(self, page, selector, value, timeout_ms):
-        root_selector = str(selector or '.alert-select-root').strip() or '.alert-select-root'
-        root_locator = page.locator(root_selector).first
-        if await root_locator.count() == 0:
-            raise ValueError('change_alert_status step requires a valid alert status root selector')
-
-        current_label = str(await root_locator.text_content() or '').strip()
-        trigger_locator = root_locator.locator('.ant-select-selector').first
-        if await trigger_locator.count() == 0:
-            trigger_locator = root_locator
-
-        await trigger_locator.click(timeout=timeout_ms)
-        await page.wait_for_timeout(300)
-
-        option_data = await page.locator('[role="option"]').evaluate_all(
-            "els => els.map((el, i) => ({index: i, label: el.getAttribute('aria-label') || (el.innerText || el.textContent || '').trim(), selected: el.getAttribute('aria-selected') === 'true'}))"
-        )
-        option_labels = [str(item.get('label') or '').strip() for item in option_data if str(item.get('label') or '').strip()]
-        target_label = self._resolve_alert_status_target(value, current_label, option_labels)
-        if not target_label:
-            raise AssertionError(f'alert status option {value!r} is not available; options={option_labels!r}')
-
-        current_index = next((item['index'] for item in option_data if item.get('selected')), None)
-        target_index = next(
-            (
-                item['index']
-                for item in option_data
-                if self._normalize_alert_status_token(item.get('label')) == self._normalize_alert_status_token(target_label)
-            ),
-            None,
-        )
-        if target_index is None:
-            raise AssertionError(f'alert status target {target_label!r} was not found in options={option_labels!r}')
-
-        if current_index is None:
-            current_index = next(
-                (
-                    item['index']
-                    for item in option_data
-                    if self._normalize_alert_status_token(item.get('label')) == self._normalize_alert_status_token(current_label)
-                ),
-                0,
-            )
-
-        if target_index != current_index:
-            key = 'ArrowDown' if target_index > current_index else 'ArrowUp'
-            for _ in range(abs(target_index - current_index)):
-                await page.keyboard.press(key)
-                await page.wait_for_timeout(100)
-        await page.keyboard.press('Enter')
-        await page.wait_for_timeout(300)
-
-    async def _search_site_with_cameras(self, page, selector, timeout_ms):
-        site_rows = []
-        for candidate in ("[class*='site-item']", "[class*='site'] [class*='item']"):
-            try:
-                site_rows = await page.locator(candidate).evaluate_all(
-                    "els => els.map(el => ({text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()})).filter(item => item.text)"
-                )
-            except Exception:
-                site_rows = []
-            if site_rows:
-                break
-
-        target_site = ''
-        for row in site_rows:
-            row_text = str(row.get('text') or '').strip()
-            match = re.search(r'^(?P<name>.+?)\s+(?P<online>\d+)\s*/\s*(?P<offline>\d+)$', row_text)
-            if not match:
-                continue
-            online_count = int(match.group('online'))
-            offline_count = int(match.group('offline'))
-            if online_count > 0:
-                target_site = str(match.group('name') or '').strip()
-                break
-
-        if not target_site:
-            raise AssertionError('search_site_with_cameras could not find any visible site with online cameras')
-
-        locator = await self._resolve_locator(page, selector or "input[placeholder*='Search site name' i], input[placeholder*='Search' i]")
-        if locator is None:
-            raise ValueError('search_site_with_cameras requires a searchable site input')
-        await locator.fill(target_site, timeout=timeout_ms)
-        await page.wait_for_timeout(300)
-
-    async def _select_site_with_online_cameras(self, page, timeout_ms):
-        selector = "input[placeholder*='Search site name' i], input[placeholder*='Search' i]"
-        await self._search_site_with_cameras(page, selector, timeout_ms)
-        await page.locator('body').press('Enter')
-        await page.wait_for_timeout(500)
-        site = page.locator('#btnSite').first
-        await site.wait_for(state='visible', timeout=timeout_ms)
-        await site.click(timeout=timeout_ms)
-        await page.wait_for_timeout(800)
-
-    async def _click_first_online_camera(self, page, timeout_ms):
-        async def has_visible_camera_card():
-            for selector in (
-                "div[class*='grid'] > div",
-                "div[class*='grid'] > button",
-                "[class*='camera-item']",
-                "[class*='camera'] [class*='preview']",
-            ):
-                locator = page.locator(selector)
-                for index in range(await locator.count()):
-                    try:
-                        if await locator.nth(index).is_visible(timeout=200):
-                            return True
-                    except Exception:
-                        continue
-            return False
-
-        if not await has_visible_camera_card():
-            site_rows = []
-            for selector in ("[class*='site-item']", "[class*='site'] [class*='item']", "button"):
-                try:
-                    site_rows = await page.locator(selector).evaluate_all(
-                        "els => els.map(el => (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim()).filter(Boolean)"
-                    )
-                except Exception:
-                    site_rows = []
-                for row_text in site_rows:
-                    match = re.search(r'^(?P<name>.+?)\s+(?P<online>\d+)\s*/\s*(?P<offline>\d+)$', str(row_text))
-                    if match and int(match.group('online')) > 0:
-                        site = page.get_by_role('button', name=match.group('name').strip(), exact=True)
-                        await site.click(timeout=timeout_ms)
-                        await page.wait_for_timeout(800)
-                        break
-                if await has_visible_camera_card():
-                    break
-
-        selectors = (
-            "div[class*='grid'] > div",
-            "div[class*='grid'] > button",
-            "[class*='camera-item']",
-            "[class*='camera'] [class*='preview']",
-        )
-        for selector in selectors:
-            locator = page.locator(selector)
-            for index in range(await locator.count()):
-                candidate = locator.nth(index)
-                try:
-                    if not await candidate.is_visible(timeout=300):
-                        continue
-                    online = await candidate.evaluate(
-                        """
-                        element => {
-                          const nodes = [element, ...element.querySelectorAll('*')];
-                          return nodes.some(node => {
-                            const className = String(node.className || '').toLowerCase();
-                            if (/(online|status-green|bg-green|text-green)/.test(className)) return true;
-                                                        const styles = getComputedStyle(node);
-                                                        return [styles.color, styles.backgroundColor, styles.fill, styles.stroke, styles.borderColor].some(color => {
-                                                            const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-                                                            return match && Number(match[2]) > Number(match[1]) * 1.15 && Number(match[2]) > Number(match[3]) * 1.15;
-                                                        });
-                          });
-                        }
-                        """
-                    )
-                    if online:
-                        await candidate.click(timeout=timeout_ms)
-                        return
-                except Exception:
-                    continue
-        raise AssertionError('no visible online camera card was found')
-
-    async def _close_active_stream(self, page, timeout_ms):
-        trash_button = page.locator("button:has(svg path[d*='M16 9V19H8V9H16'])").first
-        await trash_button.wait_for(state='visible', timeout=timeout_ms)
-        await trash_button.click(timeout=timeout_ms)
-
-    async def _assert_stream_closed(self, page, timeout_ms):
-        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000.0
-        while time.monotonic() < deadline:
-            media = page.locator('img, canvas, video')
-            has_stream_surface = False
-            for index in range(min(await media.count(), 20)):
-                candidate = media.nth(index)
-                try:
-                    if not await candidate.is_visible(timeout=200):
-                        continue
-                    box = await candidate.bounding_box()
-                    if box and box['x'] >= 80 and box['width'] >= 600 and box['height'] >= 320:
-                        has_stream_surface = True
-                        break
-                except Exception:
-                    continue
-            if not has_stream_surface:
-                return
-            await page.wait_for_timeout(300)
-        raise AssertionError('stream close did not remove the active player surface')
-
     def _sidebar_hover_keywords(self, step):
         haystack = ' '.join(
             str(step.get(key) or '')
@@ -2497,7 +2171,7 @@ class PyUICompatAgent:
 
     async def _execute_step(self, page, step, timeout_error):
         action = step['action']
-        timeout_ms = step['timeout_ms']
+        timeout_ms = int(step.get('timeout_ms') or 10000)
         selector = str(step.get('selector') or '').strip()
         loc = step.get('loc')
         param = step.get('param')
@@ -2520,74 +2194,11 @@ class PyUICompatAgent:
                 await locator.click(timeout=timeout_ms)
             elif point is not None:
                 await page.mouse.click(point[0], point[1])
+            elif selector:
+                raise ValueError(f'click selector did not resolve on the current page: {selector}')
             else:
                 raise ValueError('click step requires selector or loc')
             return
-
-        if action == 'click_first_online_camera':
-            await self._click_first_online_camera(page, timeout_ms)
-            return
-
-        if action in {'open_camera_list', 'select_site_with_online_cameras', 'select_online_camera', 'seek_playback_forward_ten_seconds', 'assert_playback_loaded'}:
-            from apps.ai_testing.runtime.pyui_compat.capabilities import CameraWorkflowCapabilities
-
-            capability = CameraWorkflowCapabilities(page)
-            if action == 'open_camera_list':
-                await capability.open_camera_list(timeout_ms)
-            elif action == 'select_site_with_online_cameras':
-                await capability.select_site_with_online_cameras(timeout_ms)
-            elif action == 'select_online_camera':
-                await capability.select_online_camera(timeout_ms)
-            elif action == 'seek_playback_forward_ten_seconds':
-                evidence = await capability.seek_forward_ten_seconds(timeout_ms)
-                from apps.ai_testing.global_planner import VisualStepReplanner
-
-                assessment = await VisualStepReplanner().assess_playback_advance(
-                    evidence['before_screenshot'],
-                    evidence['after_screenshot'],
-                )
-                if not 8 <= assessment['advanced_seconds'] <= 15:
-                    raise AssertionError(
-                        f"Playback advanced {assessment['advanced_seconds']:.2f}s, expected 10s within OCR tolerance"
-                    )
-                return evidence
-            else:
-                await capability.assert_playback_loaded(timeout_ms)
-            return
-
-        if action == 'select_site_with_online_cameras':
-            await self._select_site_with_online_cameras(page, timeout_ms)
-            return
-
-        if action == 'close_active_stream':
-            await self._close_active_stream(page, timeout_ms)
-            return
-
-        if action == 'assert_stream_closed':
-            await self._assert_stream_closed(page, timeout_ms)
-            return
-
-        if action == 'click_exact_text':
-            target_text = str(step.get('value') or param or '').strip()
-            if not target_text:
-                raise ValueError('click_exact_text requires text')
-            await page.get_by_text(target_text, exact=True).click(timeout=timeout_ms)
-            return
-
-        if action == 'assert_user_in_left_list':
-            email = str(step.get('value') or '').strip()
-            users = page.get_by_text(email, exact=True)
-            for index in range(await users.count()):
-                candidate = users.nth(index)
-                try:
-                    if not await candidate.is_visible(timeout=300):
-                        continue
-                    box = await candidate.bounding_box()
-                    if box and box['x'] < 480:
-                        return
-                except Exception:
-                    continue
-            raise AssertionError(f'created user {email!r} was not visible in the left user list')
 
         if action in {'double_click'}:
             locator = await self._resolve_locator(page, selector) if selector else None
@@ -2642,22 +2253,6 @@ class PyUICompatAgent:
                 raise ValueError('type/fill step requires selector or loc')
             return
 
-        if action in {'type_phone_us'}:
-            value = str(step.get('value') or '+14153417120').strip()
-            locator = await self._resolve_locator(page, selector or "input[type='tel']")
-            if locator is None:
-                raise ValueError('type_phone_us step requires selector')
-            await locator.click(timeout=timeout_ms)
-            await page.keyboard.press('Control+A')
-            await page.keyboard.press('Backspace')
-            await page.wait_for_timeout(200)
-            await page.keyboard.type(value, delay=80)
-            return
-
-        if action in {'search_site_with_cameras'}:
-            await self._search_site_with_cameras(page, selector, timeout_ms)
-            return
-
         if action in {'press', 'keyboard_press', 'key', 'hotkey'}:
             value = str(step.get('value') or param or '').strip()
             locator = await self._resolve_locator(page, selector) if selector else None
@@ -2679,40 +2274,6 @@ class PyUICompatAgent:
             await page.locator(selector).first.select_option(value, timeout=timeout_ms)
             return
 
-        if action in {'change_alert_status'}:
-            await self._change_alert_status(
-                page,
-                selector=selector,
-                value=str(step.get('value') or param or '').strip(),
-                timeout_ms=timeout_ms,
-            )
-            return
-
-        if action == 'download_playback':
-            return await self._download_playback(page, timeout_ms)
-
-        if action == 'ensure_switch_enabled':
-            label = str(step.get('value') or param or '').strip()
-            if not label:
-                raise ValueError('ensure_switch_enabled step requires a switch label')
-            switch_row = page.locator(f'div:has(> span:has-text("{label}"))').last
-            switch = switch_row.locator('input[role="switch"]').first
-            if await switch.count() == 0:
-                raise AssertionError(f"switch '{label}' was not found")
-            if not await switch.is_checked():
-                await switch_row.locator('.react-switch-bg').first.click(timeout=timeout_ms)
-            if not await switch.is_checked():
-                raise AssertionError(f"switch '{label}' is not enabled")
-            return
-
-        if action in {'assert_reported_alert_gpt_analysis', 'wait_for_reported_alert_gpt_analysis'}:
-            await self._wait_for_reported_alert_gpt_analysis(page, timeout_ms)
-            return
-
-        if action == 'assert_reported_alert_note_matches_gpt':
-            await self._assert_reported_alert_note_matches_gpt(page, timeout_ms)
-            return
-
         if action in {'wait', 'sleep'}:
             raw_wait = step.get('value') or param
             try:
@@ -2724,12 +2285,23 @@ class PyUICompatAgent:
 
         if action in {'scroll'}:
             direction = str(param or step.get('value') or 'down').strip().lower()
+            if selector:
+                delta = -0.8 if direction in {'up', 'pageup'} else 0.8
+                await page.locator(selector).first.evaluate(
+                    '(element, ratio) => element.scrollBy({ top: element.clientHeight * ratio, behavior: "instant" })',
+                    delta,
+                )
+                return
             key = 'PageDown' if direction in {'down', 'pagedown'} else 'PageUp'
             await page.keyboard.press(key)
             return
 
         if action in {'assert'}:
             assert_kind = str(step.get('assert_kind') or '').strip().lower()
+            from apps.ai_testing.execution.assertion_registry import ASSERTION_KINDS
+
+            if assert_kind in ASSERTION_KINDS:
+                return
             expected = str(step.get('expected') or param or '').strip()
             if assert_kind == 'text_visible':
                 target_text = str(param or step.get('value') or '').strip()
@@ -2938,144 +2510,7 @@ class PyUICompatAgent:
 
             raise ValueError(f'unsupported assert kind: {assert_kind}')
 
-        if action in {'assert_url_contains', 'url_contains'}:
-            expected = str(step.get('expected') or '').strip()
-            if not expected:
-                raise ValueError('assert_url_contains step requires expected')
-            try:
-                await page.wait_for_url(f'**{expected}**', wait_until='commit', timeout=timeout_ms)
-            except timeout_error:
-                pass
-            current_url = page.url or ''
-            if expected not in current_url:
-                raise AssertionError(f"current url '{current_url}' does not contain '{expected}'")
-            return
-
-        if action in {'assert_text_contains', 'text_contains'}:
-            selector = str(step.get('selector') or 'body').strip()
-            expected = str(step.get('expected') or '').strip()
-            if not expected:
-                raise ValueError('assert_text_contains step requires expected')
-            actual_text = await page.locator(selector).first.text_content(timeout=timeout_ms)
-            normalized_text = str(actual_text or '').strip()
-            if expected not in normalized_text:
-                compact_expected = self._normalize_text_for_contains(expected)
-                compact_actual = self._normalize_text_for_contains(normalized_text)
-                if compact_expected and compact_expected in compact_actual:
-                    return
-                raise AssertionError(f"text '{normalized_text}' does not contain '{expected}'")
-            return
-
-        if action == 'assert_popup_contains':
-            expected = str(step.get('expected') or '').strip()
-            if expected:
-                text_locator = page.get_by_text(expected, exact=False).first
-                try:
-                    await text_locator.wait_for(state='visible', timeout=timeout_ms)
-                    return
-                except Exception:
-                    pass
-
-            selector_candidates = [
-                '[role="alert"]',
-                '[role="status"]',
-                '.ant-message-notice',
-                '.ant-notification-notice',
-                '.Toastify__toast',
-                '[class*="toast"]',
-                '[class*="message"]',
-                '[class*="notification"]',
-            ]
-
-            last_text = ''
-            for selector in selector_candidates:
-                try:
-                    locator = page.locator(selector)
-                    await locator.first.wait_for(state='visible', timeout=min(timeout_ms, 3000))
-                    last_text = str(await locator.first.text_content(timeout=1000) or '').strip()
-                    if not expected or expected in last_text:
-                        return
-                except Exception:
-                    continue
-
-            raise AssertionError(f"visible popup text '{expected}' not found; last popup text='{last_text}'")
-
-        if action == 'assert_media_visible':
-            media_selector = 'img, video, canvas'
-            locator = page.locator(media_selector)
-            count = await locator.count()
-            for idx in range(min(count, 20)):
-                try:
-                    if await locator.nth(idx).is_visible(timeout=1000):
-                        return
-                except Exception:
-                    continue
-            raise AssertionError('no visible media element found')
-
-        if action == 'assert_video_visible':
-            expected = str(step.get('expected') or '').strip()
-            selector_candidates = ['video', '[class*="video"] video', '[data-testid*="video"] video']
-            for selector in selector_candidates:
-                locator = page.locator(selector)
-                count = await locator.count()
-                for idx in range(min(count, 10)):
-                    try:
-                        target = locator.nth(idx)
-                        if not await target.is_visible(timeout=1000):
-                            continue
-                        if not expected:
-                            return
-                        source = (await target.get_attribute('src')) or ''
-                        poster = (await target.get_attribute('poster')) or ''
-                        payload = f'{source} {poster}'
-                        if expected in payload:
-                            return
-                    except Exception:
-                        continue
-            raise AssertionError(f"no visible video element matched '{expected}'" if expected else 'no visible video element found')
-
         raise ValueError(f"unsupported planner_v2 action: {action}")
-
-    async def _download_playback(self, page, timeout_ms):
-        toolbar = page.locator('#playerContainer').locator('xpath=..')
-        download_button = toolbar.locator("button:has(svg path[d*='M19.3552 11.0833'])").first
-        await download_button.wait_for(state='visible', timeout=timeout_ms)
-        await download_button.click(timeout=timeout_ms, force=True)
-        dialog_text = ''
-        deadline = time.monotonic() + max(timeout_ms, 1000) / 1000.0
-        while time.monotonic() < deadline:
-            dialog_text = str(await page.locator('body').inner_text() or '')
-            if 'Start Time' in dialog_text and 'End Time' in dialog_text:
-                break
-            await page.wait_for_timeout(200)
-        if 'Start Time' not in dialog_text or 'End Time' not in dialog_text:
-            raise AssertionError('Playback download dialog did not open')
-        dialog_path = await self._save_playback_screenshot(page, 'download_dialog')
-
-        download_button = page.get_by_text('Download', exact=True).last
-        async with page.expect_download(timeout=min(max(timeout_ms, 1000), 180000)) as download_info:
-            await download_button.click(timeout=timeout_ms)
-        download = await download_info.value
-        if not str(download.suggested_filename or '').strip():
-            raise AssertionError('Playback download did not provide a filename')
-        try:
-            await asyncio.wait_for(download.path(), timeout=180)
-        except asyncio.TimeoutError as error:
-            raise AssertionError('Playback download did not complete within 3 minutes') from error
-        failure = await download.failure()
-        if failure:
-            raise AssertionError(f'Playback download failed: {failure}')
-        completed_path = await self._save_playback_screenshot(page, 'download_completed')
-        return {'download_dialog_path': dialog_path, 'download_completed_path': completed_path}
-
-    async def _save_playback_screenshot(self, page, label):
-        from django.conf import settings
-
-        directory = Path(settings.MEDIA_ROOT) / 'ai_testing' / 'playback_evidence'
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f'{label}_{datetime.now().strftime("%Y%m%d%H%M%S%f")}.png'
-        await page.screenshot(path=str(path), type='png')
-        return self._relative_media_path(path)
 
     async def _assert_stream_active(self, page, timeout_ms):
         loading_markers = ['Loading streaming...', 'No Signal', 'Reconnect', 'Stream unavailable']
@@ -3209,22 +2644,24 @@ class PyUICompatAgent:
         )
 
     async def _bootstrap_pyuitest_session(self, page, step_callback):
-        target_url, email, password = self._resolve_pyuitest_bootstrap()
-        if not target_url:
+        from apps.core.browser_auth import resolve_browser_login
+
+        login = resolve_browser_login(self.environment_configuration)
+        if login is None:
             return
 
         current_url = str(page.url or '').strip()
         if '/dashboard/' in current_url:
             return
 
-        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Bootstrap navigate: {target_url}\n'})
+        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Bootstrap navigate: {login.login_url}\n'})
         navigation_committed = False
         try:
-            await page.goto(target_url, wait_until='load', timeout=60000)
+            await page.goto(login.login_url, wait_until='commit', timeout=60000)
             navigation_committed = True
         except Exception as exc:
             current_url = str(page.url or '').strip()
-            navigation_committed = current_url.startswith(target_url)
+            navigation_committed = current_url.startswith(login.login_url)
             logger.warning(
                 'planner_v2 bootstrap load wait timeout, current_url=%s committed=%s: %s',
                 current_url,
@@ -3232,7 +2669,7 @@ class PyUICompatAgent:
                 exc,
             )
             if not navigation_committed:
-                await page.goto(target_url, wait_until='commit', timeout=60000)
+                await page.goto(login.login_url, wait_until='commit', timeout=60000)
 
         try:
             await page.wait_for_load_state('domcontentloaded', timeout=15000)
@@ -3253,20 +2690,30 @@ class PyUICompatAgent:
                 await self._capture_bootstrap_debug(page, step_callback, 'login_form_not_ready')
             raise AssertionError('planner_v2 bootstrap could not find login form')
 
-        if email and password:
-            await page.locator('input[id="login_email"], input[type="email"], input[name*="email" i], input[placeholder*="email" i]').first.fill(email, timeout=10000)
-            await page.locator('input[id="login_password"], input[type="password"], input[name*="password" i], input[placeholder*="password" i]').first.fill(password, timeout=10000)
-            await page.locator('button[type="submit"], button:has-text("Sign in"), button:has-text("Login"), button:has-text("Log in")').first.click(timeout=10000)
-            await page.wait_for_timeout(300)
-            terms_prompt = page.get_by_text('I have read and agree to the Terms of Use.', exact=False).first
-            if await terms_prompt.is_visible():
-                await terms_prompt.click(timeout=10000)
-                await page.get_by_text('Continue', exact=True).first.click(timeout=10000)
+        if login.username and login.password:
+            last_login_error = None
+            for login_attempt in range(1, 4):
+                await page.locator('input[id="login_email"], input[type="email"], input[name*="email" i], input[placeholder*="email" i]').first.fill(login.username, timeout=10000)
+                await page.locator('input[id="login_password"], input[type="password"], input[name*="password" i], input[placeholder*="password" i]').first.fill(login.password, timeout=10000)
+                await page.locator('button[type="submit"], button:has-text("Sign in"), button:has-text("Login"), button:has-text("Log in")').first.click(timeout=10000)
+                await page.wait_for_timeout(1000)
+                terms_prompt = page.get_by_text('I have read and agree to the Terms of Use.', exact=False).first
+                if await terms_prompt.is_visible():
+                    await terms_prompt.click(timeout=10000)
+                    await page.get_by_text('Continue', exact=True).first.click(timeout=10000)
 
-            try:
-                await self._wait_dashboard_ready(page)
-            except Exception as exc:
-                raise AssertionError(f'planner_v2 bootstrap login did not reach dashboard: {exc}') from exc
+                try:
+                    await self._wait_dashboard_ready(page, timeout=20000)
+                    last_login_error = None
+                    break
+                except Exception as exc:
+                    last_login_error = exc
+                    if login_attempt < 3:
+                        logger.warning('planner_v2 bootstrap login attempt %s/3 did not reach dashboard', login_attempt)
+                        await page.goto(login.login_url, wait_until='commit', timeout=60000)
+                        await self._wait_login_page_ready(page, timeout_ms=30000)
+            if last_login_error is not None:
+                raise AssertionError(f'planner_v2 bootstrap login did not reach dashboard: {last_login_error}') from last_login_error
 
             await self._emit(step_callback, {'type': 'log', 'content': '[planner_v2] Bootstrap login complete.\n'})
 
@@ -3294,19 +2741,6 @@ class PyUICompatAgent:
             visible_sign_out = await self._find_visible_locator(page, sign_out_candidates)
             if visible_sign_out is not None:
                 await self._emit(step_callback, {'type': 'log', 'content': '[planner_v2] Teardown logout via visible Sign Out.\n'})
-                await visible_sign_out.click(timeout=5000)
-                await page.wait_for_url('**/login**', timeout=15000)
-                return
-
-            # Alpha Vision keeps Profile/Usage/Settings/Sign Out in hidden DOM nodes until
-            # the bottom-left settings gear is opened. In the current layout that trigger is
-            # the visible gear icon around the bottom-left corner of the sidebar.
-            await page.mouse.click(48, 790)
-            await page.wait_for_timeout(1200)
-
-            visible_sign_out = await self._find_visible_locator(page, sign_out_candidates)
-            if visible_sign_out is not None:
-                await self._emit(step_callback, {'type': 'log', 'content': '[planner_v2] Teardown logout after opening sidebar settings menu.\n'})
                 await visible_sign_out.click(timeout=5000)
                 await page.wait_for_url('**/login**', timeout=15000)
                 return
@@ -3345,26 +2779,6 @@ class PyUICompatAgent:
             except Exception:
                 continue
         return None
-
-    def _resolve_pyuitest_bootstrap(self):
-        target_url = ''
-        email = ''
-        password = ''
-
-        try:
-            from apps.ui_automation.management.commands.init_alpha_vision_login_case import TARGET_URL, STEP_SEEDS
-
-            target_url = str(TARGET_URL or '').strip()
-            for seed in STEP_SEEDS:
-                description = str(getattr(seed, 'description', '') or '')
-                if '邮箱' in description or 'email' in description.lower():
-                    email = str(getattr(seed, 'input_value', '') or '').strip()
-                if '密码' in description or 'password' in description.lower():
-                    password = str(getattr(seed, 'input_value', '') or '').strip()
-        except Exception as exc:
-            logger.warning('planner_v2 bootstrap fallback import failed: %s', exc)
-
-        return target_url, email, password
 
     async def _wait_login_page_ready(self, page, timeout_ms=20000):
         selector_groups = {
@@ -3407,8 +2821,8 @@ class PyUICompatAgent:
         )
         return False
 
-    async def _wait_dashboard_ready(self, page):
-        await page.wait_for_url('**/dashboard/**', timeout=60000)
+    async def _wait_dashboard_ready(self, page, timeout=60000):
+        await page.wait_for_url('**/dashboard/**', wait_until='commit', timeout=timeout)
         try:
             await page.wait_for_load_state('networkidle', timeout=10000)
         except Exception:

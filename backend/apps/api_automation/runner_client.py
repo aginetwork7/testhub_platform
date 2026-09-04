@@ -5,7 +5,9 @@ from typing import Any
 
 import requests
 
-from .models import ApiAutomationCase, ApiAutomationConfiguration, ApiAutomationRun
+from apps.core.models import EnvironmentConfiguration
+
+from .models import ApiAutomationCase, ApiAutomationRun
 
 
 def is_configured() -> bool:
@@ -17,7 +19,7 @@ def _authorization_headers() -> dict[str, str]:
     return {'Authorization': f'Bearer {token}'} if token else {}
 
 
-def _default_role(configuration: ApiAutomationConfiguration) -> str:
+def _default_role(configuration: EnvironmentConfiguration) -> str:
     profiles = configuration.auth_profiles if isinstance(configuration.auth_profiles, dict) else {}
     configured_role = next(
         (
@@ -33,7 +35,7 @@ def _default_role(configuration: ApiAutomationConfiguration) -> str:
     return str(legacy_role or 'dealer')
 
 
-def execute_case(run: ApiAutomationRun, case: ApiAutomationCase, configuration: ApiAutomationConfiguration) -> dict[str, Any]:
+def execute_case(run: ApiAutomationRun, case: ApiAutomationCase, configuration: EnvironmentConfiguration) -> dict[str, Any]:
     response = requests.post(
         f"{os.environ['API_AUTOMATION_RUNNER_URL'].rstrip('/')}/v1/runs",
         headers=_authorization_headers(),

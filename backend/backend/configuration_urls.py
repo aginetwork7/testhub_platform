@@ -1,14 +1,14 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from apps.api_automation.views import ApiAutomationConfigurationViewSet
 from apps.assistant.views_config import AgentModelConfigViewSet, AgentPromptConfigViewSet
 from apps.app_automation.views.config_views import AppConfigViewSet
+from apps.core.views import EnvironmentConfigurationViewSet
 from apps.ui_automation.views_config import AIIntelligentModeConfigViewSet, AIModePromptConfigViewSet, EnvironmentConfigViewSet
 
 
 router = DefaultRouter()
-router.register(r'env', ApiAutomationConfigurationViewSet, basename='environment-config')
+router.register(r'env', EnvironmentConfigurationViewSet, basename='environment-config')
 router.register(r'ai-test/models', AIIntelligentModeConfigViewSet, basename='ai-test-model-config')
 router.register(r'ai-test/prompts', AIModePromptConfigViewSet, basename='ai-test-prompt-config')
 router.register(r'ai-agent/models', AgentModelConfigViewSet, basename='ai-agent-model-config')

@@ -3,7 +3,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject
+from apps.core.models import EnvironmentConfiguration
 from apps.data_factory.tools.business_tools import BusinessTools
 from apps.data_factory.views import DataFactoryViewSet
 
@@ -12,9 +12,7 @@ class EventEnvironmentCredentialTests(TestCase):
     def setUp(self) -> None:
         user_model = get_user_model()
         self.user = user_model.objects.create_user(username='event-credential-user')
-        project = ApiAutomationProject.objects.create(name='Event Credential Project', owner=self.user)
-        self.configuration = ApiAutomationConfiguration.objects.create(
-            project=project,
+        self.configuration = EnvironmentConfiguration.objects.create(
             name='Event Credential Environment',
             environment='event-credential',
             base_url='https://example.com/api',

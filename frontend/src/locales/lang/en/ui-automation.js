@@ -123,6 +123,7 @@ export default {
     running: 'Running',
     passed: 'Passed',
     failed: 'Failed',
+    inconclusive: 'Inconclusive',
     error: 'Error',
     stopped: 'Stopped',
     aborted: 'Aborted',

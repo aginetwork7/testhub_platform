@@ -151,7 +151,7 @@
         <el-form-item label="运行环境">
           <el-select v-model="executionEnvironmentId" clearable placeholder="使用用例或默认环境" style="width: 100%">
             <el-option
-              v-for="configuration in automationConfigurations"
+              v-for="configuration in environmentConfigurations"
               :key="configuration.id"
               :label="formatEnvironmentLabel(configuration)"
               :value="configuration.id"
@@ -302,7 +302,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, VideoPlay, Edit, Delete, Plus } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { getAICases, createAICase, updateAICase, deleteAICase, batchDeleteAICases, executeAICase, batchExecuteAICases, getAiProjects } from '@/api/ai-testing'
-import { getAutomationConfigurations } from '@/api/api-automation'
+import { getEnvironmentConfigurations } from '@/api/environment-configurations'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -318,7 +318,7 @@ const deleting = ref(false)
 const runTargetCases = ref([])
 const showRunDialog = ref(false)
 const submittingRun = ref(false)
-const automationConfigurations = ref([])
+const environmentConfigurations = ref([])
 const executionEnvironmentId = ref(null)
 const total = ref(0)
 const pagination = reactive({
@@ -609,13 +609,13 @@ const handleSelectionChange = (rows) => {
   selectedCases.value = rows
 }
 
-const loadAutomationConfigurations = async () => {
+const loadEnvironmentConfigurations = async () => {
   try {
-    const response = await getAutomationConfigurations({ page_size: 100 })
-    automationConfigurations.value = response.data.results || response.data || []
+    const response = await getEnvironmentConfigurations({ page_size: 100 })
+    environmentConfigurations.value = response.data.results || response.data || []
   } catch (error) {
     if (error.response?.status === 403) {
-      automationConfigurations.value = []
+      environmentConfigurations.value = []
       return
     }
     console.error('获取运行环境失败:', error)
@@ -642,8 +642,8 @@ const openRunDialog = async (targetCases) => {
   runTargetCases.value = targetCases
   executionEnvironmentId.value = null
   showRunDialog.value = true
-  if (automationConfigurations.value.length === 0) {
-    await loadAutomationConfigurations()
+  if (environmentConfigurations.value.length === 0) {
+    await loadEnvironmentConfigurations()
   }
 }
 
@@ -684,7 +684,7 @@ const confirmRun = async () => {
   const payload = {
     execution_mode: executionMode.value,
     use_cache: !disableCache.value,
-    ...(executionEnvironmentId.value !== null ? { api_automation_configuration_id: executionEnvironmentId.value } : {})
+    ...(executionEnvironmentId.value !== null ? { environment_configuration_id: executionEnvironmentId.value } : {})
   }
 
   try {
@@ -816,7 +816,7 @@ const formatDate = (row, column, cellValue) => {
 
 onMounted(async () => {
   await loadProjects()
-  await loadAutomationConfigurations()
+  await loadEnvironmentConfigurations()
   if (projects.value.length > 0) {
     projectId.value = projects.value[0].id
     loadCases()

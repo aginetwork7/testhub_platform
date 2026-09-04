@@ -282,12 +282,9 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
         if not environment_id or user is None:
             return {'error': '事件构造需要选择可访问的运行环境。'}
 
-        from apps.api_automation.models import ApiAutomationConfiguration
+        from apps.core.models import EnvironmentConfiguration
 
-        environment = ApiAutomationConfiguration.objects.filter(
-            Q(project__owner=user) | Q(project__members=user),
-            id=environment_id,
-        ).distinct().first()
+        environment = EnvironmentConfiguration.objects.filter(id=environment_id).first()
         if environment is None:
             return {'error': '运行环境不存在或无访问权限。'}
         edge_settings = (environment.runtime_settings or {}).get('api', {}).get('edge', {})
@@ -305,10 +302,11 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
         media_groups = BusinessTools.collect_event_media(media_root, media_path) if media_path else []
         if media_groups:
             input_data['count'] = len(media_groups)
-        result = BusinessTools.construct_alert_event(
-            camera_mac=camera_mac,
-            camera_name=camera_name,
-            **input_data,
+        from apps.data_factory.resource_service import create_resource
+
+        result = create_resource(
+            'alert_event',
+            {'camera_mac': camera_mac, 'camera_name': camera_name, **input_data},
         )
         if result.get('success'):
             result['environment'] = {

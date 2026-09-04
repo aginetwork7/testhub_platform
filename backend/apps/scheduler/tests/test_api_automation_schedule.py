@@ -33,7 +33,7 @@ class ApiAutomationScheduleTests(SimpleTestCase):
             patch('apps.api_automation.executor.execute_run'),
             patch('apps.api_automation.models.ApiAutomationProject.objects.get', return_value=project),
             patch(
-                'apps.api_automation.models.ApiAutomationConfiguration.objects.get',
+                'apps.core.models.EnvironmentConfiguration.objects.get',
                 return_value=configuration,
             ) as configuration_get,
             patch('apps.api_automation.models.ApiAutomationRun.objects.create', return_value=run),

@@ -3,7 +3,6 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     ApiAutomationCaseViewSet,
-    ApiAutomationConfigurationViewSet,
     ApiAutomationCoverageViewSet,
     ApiAutomationEndpointViewSet,
     ApiAutomationNotificationLogViewSet,
@@ -20,7 +19,6 @@ router.register(r'cases', ApiAutomationCaseViewSet, basename='api-automation-cas
 router.register(r'endpoints', ApiAutomationEndpointViewSet, basename='api-automation-endpoint')
 router.register(r'notification-logs', ApiAutomationNotificationLogViewSet, basename='api-automation-notification-log')
 router.register(r'coverage', ApiAutomationCoverageViewSet, basename='api-automation-coverage')
-router.register(r'configurations', ApiAutomationConfigurationViewSet, basename='api-automation-configuration')
 router.register(r'runs', ApiAutomationRunViewSet, basename='api-automation-run')
 
 urlpatterns = [

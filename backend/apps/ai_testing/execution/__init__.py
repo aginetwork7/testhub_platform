@@ -1,0 +1,1 @@
+"""Core contracts for the independent AI intelligent testing Agent."""

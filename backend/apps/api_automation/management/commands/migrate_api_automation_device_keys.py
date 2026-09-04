@@ -6,7 +6,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 from dotenv import dotenv_values
 
-from apps.api_automation.models import ApiAutomationConfiguration
+from apps.core.models import EnvironmentConfiguration
 
 
 class Command(BaseCommand):
@@ -22,7 +22,7 @@ class Command(BaseCommand):
         env_directory = Path(options['env_dir']).expanduser().resolve()
         migrated_count = 0
         skipped_count = 0
-        for configuration in ApiAutomationConfiguration.objects.order_by('id'):
+        for configuration in EnvironmentConfiguration.objects.order_by('id'):
             values = dotenv_values(env_directory / f'.env.{configuration.environment}')
             source_keys = {
                 'main': values.get('MAIN_KEY') or '',

@@ -604,6 +604,9 @@ class AIModelService:
             max_tokens: int,
             stream: bool,
             response_format: Optional[Dict[str, Any]] = None,
+            enable_thinking: Optional[bool] = None,
+            tools: Optional[List[Dict[str, Any]]] = None,
+            tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             'model': config.model_name,
@@ -617,10 +620,14 @@ class AIModelService:
         data[token_parameter] = max_tokens
 
         if config.model_type == 'qwen':
-            data['chat_template_kwargs'] = {'enable_thinking': False}
+            data['chat_template_kwargs'] = {'enable_thinking': bool(enable_thinking)}
 
         if response_format is not None and not stream:
             data['response_format'] = response_format
+        if tools and not stream:
+            data['tools'] = tools
+        if tool_choice is not None and tools and not stream:
+            data['tool_choice'] = tool_choice
 
         return data
 
@@ -644,6 +651,9 @@ class AIModelService:
             messages: List[Dict[str, str]],
             max_tokens: int = None,
             response_format: Optional[Dict[str, Any]] = None,
+            enable_thinking: Optional[bool] = None,
+            tools: Optional[List[Dict[str, Any]]] = None,
+            tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         调用OpenAI兼容格式的API
@@ -670,6 +680,9 @@ class AIModelService:
             max_tokens=actual_max_tokens,
             stream=False,
             response_format=response_format,
+            enable_thinking=enable_thinking,
+            tools=tools,
+            tool_choice=tool_choice,
         )
 
         url = AIModelService._build_chat_completions_url(config)

@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from dotenv import dotenv_values
 
-from apps.api_automation.models import ApiAutomationConfiguration
+from apps.core.models import EnvironmentConfiguration
 
 
 class Command(BaseCommand):
@@ -68,10 +68,10 @@ class Command(BaseCommand):
                 'is_default': environment == settings.get('env'),
                 'created_by': owner,
             }
-            config_instance = ApiAutomationConfiguration.objects.filter(environment=environment).order_by('id').first()
+            config_instance = EnvironmentConfiguration.objects.filter(environment=environment).order_by('id').first()
             created = config_instance is None
             if config_instance is None:
-                config_instance = ApiAutomationConfiguration.objects.create(environment=environment, **defaults)
+                config_instance = EnvironmentConfiguration.objects.create(environment=environment, **defaults)
             else:
                 for field, value in defaults.items():
                     setattr(config_instance, field, value)
@@ -80,7 +80,7 @@ class Command(BaseCommand):
             self.stdout.write(f"{'创建' if created else '更新'}环境: {config_instance.environment}")
         default_environment = next((name for name, value in environments.items() if value.get('env') == name), None)
         if default_environment:
-            ApiAutomationConfiguration.objects.exclude(environment=default_environment).update(is_default=False)
+            EnvironmentConfiguration.objects.exclude(environment=default_environment).update(is_default=False)
 
     def _load_env_values(self, env_directory: Path, environment: str) -> dict[str, str | None]:
         env_path = env_directory / f'.env.{environment}'
@@ -154,7 +154,7 @@ class Command(BaseCommand):
 
     def _migrate_device_keys(
         self,
-        configuration: ApiAutomationConfiguration,
+        configuration: EnvironmentConfiguration,
         env_values: dict[str, str | None],
     ) -> None:
         main_device_key = env_values.get('MAIN_KEY') or ''

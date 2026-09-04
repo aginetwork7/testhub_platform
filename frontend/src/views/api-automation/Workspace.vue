@@ -354,30 +354,32 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Delete, Edit, FolderOpened, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import VChart from 'vue-echarts'
 import {
-  createAutomationConfiguration,
-  deleteAutomationConfiguration,
   deleteAutomationRun,
   getAutomationCases,
-  getAutomationConfigurations,
-  getAutomationConfigurationTemplate,
-  initializeAutomationConfiguration,
   getAutomationCoverage,
   getAutomationEndpoints,
-  getAutomationSchemaStatus,
-  getAutomationNotificationLogs,
   getAutomationLogs,
-  getAutomationProjects,
+  getAutomationNotificationLogs,
   getAutomationRun,
-  getAutomationSchedules,
   getAutomationRuns,
+  getAutomationSchedules,
+  getAutomationSchemaStatus,
   getAutomationSuiteTree,
+  getAutomationProjects,
   regenerateAutomationSchemas,
-  setAutomationDefaultConfiguration,
   toggleAutomationSchedule,
   startAutomationRun,
-  createAutomationSchedule,
-  updateAutomationConfiguration
+  createAutomationSchedule
 } from '@/api/api-automation'
+import {
+  createEnvironmentConfiguration as createAutomationConfiguration,
+  deleteEnvironmentConfiguration as deleteAutomationConfiguration,
+  getEnvironmentConfigurationTemplate as getAutomationConfigurationTemplate,
+  getEnvironmentConfigurations as getAutomationConfigurations,
+  initializeEnvironmentConfiguration as initializeAutomationConfiguration,
+  setDefaultEnvironmentConfiguration as setAutomationDefaultConfiguration,
+  updateEnvironmentConfiguration as updateAutomationConfiguration
+} from '@/api/environment-configurations'
 
 const props = defineProps({ mode: { type: String, required: true } })
 const router = useRouter()

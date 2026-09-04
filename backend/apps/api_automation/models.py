@@ -1,8 +1,3 @@
-import json
-from base64 import urlsafe_b64encode
-from hashlib import sha256
-
-from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import models
 
@@ -249,65 +244,6 @@ class ApiAutomationStep(models.Model):
         verbose_name_plural = 'API自动化步骤'
 
 
-class ApiAutomationConfiguration(models.Model):
-    name = models.CharField(max_length=200, verbose_name='配置名称')
-    environment = models.CharField(max_length=50, default='custom', verbose_name='运行环境')
-    base_url = models.URLField(blank=True, verbose_name='HTTP基础地址')
-    web_url = models.URLField(blank=True, verbose_name='Web地址')
-    websocket_url = models.URLField(blank=True, verbose_name='WebSocket地址')
-    variables = models.JSONField(default=dict, verbose_name='环境变量')
-    auth_profiles = models.JSONField(default=dict, verbose_name='认证角色配置')
-    payment_config = models.JSONField(default=dict, verbose_name='支付服务配置')
-    model_profiles = models.JSONField(default=dict, verbose_name='模型服务配置')
-    runtime_settings = models.JSONField(default=dict, verbose_name='测试运行设置')
-    event_device_keys_encrypted = models.TextField(blank=True, default='', verbose_name='事件设备私钥密文')
-    timeout_seconds = models.PositiveIntegerField(default=30, verbose_name='请求超时秒数')
-    max_workers = models.PositiveIntegerField(default=1, verbose_name='并发数')
-    is_default = models.BooleanField(default=False, verbose_name='是否默认配置')
-    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='创建人')
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
-    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
-
-    class Meta:
-        db_table = 'api_automation_configurations'
-        ordering = ['-is_default', 'name']
-        verbose_name = 'API自动化配置'
-        verbose_name_plural = 'API自动化配置'
-
-    @staticmethod
-    def _event_device_key_cipher() -> Fernet:
-        encryption_key = urlsafe_b64encode(sha256(settings.SECRET_KEY.encode('utf-8')).digest())
-        return Fernet(encryption_key)
-
-    def get_event_device_key(self, device: str) -> str:
-        if device not in {'main', 'backup'} or not self.event_device_keys_encrypted:
-            return ''
-        try:
-            payload = self._event_device_key_cipher().decrypt(
-                self.event_device_keys_encrypted.encode('utf-8')
-            )
-            device_keys = json.loads(payload.decode('utf-8'))
-        except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError):
-            return ''
-        return str(device_keys.get(device, '')) if isinstance(device_keys, dict) else ''
-
-    def set_event_device_keys(
-        self,
-        main_device_key: str | None = None,
-        backup_device_key: str | None = None,
-    ) -> None:
-        device_keys = {
-            'main': self.get_event_device_key('main'),
-            'backup': self.get_event_device_key('backup'),
-        }
-        if main_device_key is not None:
-            device_keys['main'] = main_device_key.strip()
-        if backup_device_key is not None:
-            device_keys['backup'] = backup_device_key.strip()
-        serialized = json.dumps(device_keys, ensure_ascii=False).encode('utf-8')
-        self.event_device_keys_encrypted = self._event_device_key_cipher().encrypt(serialized).decode('utf-8')
-
-
 class ApiAutomationRun(models.Model):
     STATUS_CHOICES = [
         ('PENDING', '待执行'),
@@ -319,7 +255,7 @@ class ApiAutomationRun(models.Model):
 
     project = models.ForeignKey(ApiAutomationProject, on_delete=models.CASCADE, related_name='runs', verbose_name='所属项目')
     configuration = models.ForeignKey(
-        ApiAutomationConfiguration,
+        'core.EnvironmentConfiguration',
         on_delete=models.SET_NULL,
         null=True,
         blank=True,

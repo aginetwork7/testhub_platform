@@ -152,6 +152,9 @@
         <el-descriptions-item label="经验命中">
           {{ learningMetrics.learning.experience_hits }}
         </el-descriptions-item>
+        <el-descriptions-item label="本次复验通过">
+          {{ learningMetrics.learning.revalidated }}
+        </el-descriptions-item>
         <el-descriptions-item label="有效经验">
           {{ learningMetrics.learning.experience_confirmed }}
         </el-descriptions-item>
@@ -468,6 +471,7 @@ const getStatusTag = (status) => {
     'running': 'warning',
     'passed': 'success',
     'failed': 'danger',
+    'inconclusive': 'warning',
     'stopped': 'warning'
   }
   return map[status] || 'info'
@@ -479,6 +483,7 @@ const getStatusText = (status) => {
     'running': t('uiAutomation.status.running'),
     'passed': t('uiAutomation.status.success'),
     'failed': t('uiAutomation.status.failed'),
+    'inconclusive': t('uiAutomation.status.inconclusive'),
     'stopped': t('uiAutomation.status.stopped')
   }
   return map[status] || status

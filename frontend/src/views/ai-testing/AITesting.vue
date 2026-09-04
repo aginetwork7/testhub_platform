@@ -87,12 +87,17 @@
                       <el-input v-model="step.value" :placeholder="$t('uiAutomation.ai.stepValuePlaceholder')" />
                     </div>
 
-                    <div v-else-if="step.action === 'assert_url_contains'" class="structured-step-grid single-line">
-                      <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
-                    </div>
-
-                    <div v-else-if="step.action === 'assert_text_contains'" class="structured-step-grid">
+                    <div v-else-if="step.action === 'assert'" class="structured-step-grid">
+                      <el-select v-model="step.assert_kind">
+                        <el-option v-for="assertKind in assertionKindOptions" :key="assertKind" :label="assertKind" :value="assertKind" />
+                      </el-select>
                       <el-input v-model="step.selector" :placeholder="$t('uiAutomation.ai.stepSelectorPlaceholder')" />
+                      <el-select v-model="step.operator">
+                        <el-option label="contains" value="contains" />
+                        <el-option label="equals" value="equals" />
+                        <el-option label="exists" value="exists" />
+                        <el-option label="not_exists" value="not_exists" />
+                      </el-select>
                       <el-input v-model="step.expected" :placeholder="$t('uiAutomation.ai.stepExpectedPlaceholder')" />
                     </div>
                   </template>
@@ -254,6 +259,8 @@ const createStructuredStep = (stepMode = 'direct') => ({
   selector: '',
   value: '',
   expected: '',
+  assert_kind: 'text',
+  operator: 'contains',
   timeout_ms: 10000
 })
 
@@ -285,9 +292,13 @@ const stepActionOptions = computed(() => [
   { label: t('uiAutomation.ai.stepActions.press'), value: 'press' },
   { label: t('uiAutomation.ai.stepActions.select'), value: 'select' },
   { label: t('uiAutomation.ai.stepActions.wait'), value: 'wait' },
-  { label: t('uiAutomation.ai.stepActions.assertUrlContains'), value: 'assert_url_contains' },
-  { label: t('uiAutomation.ai.stepActions.assertTextContains'), value: 'assert_text_contains' }
+  { label: 'Unified assertion', value: 'assert' }
 ])
+
+const assertionKindOptions = ['text', 'field_value', 'popup', 'media', 'video', 'visual_change', 'stream_state', 'playback', 'element_state', 'url', 'network', 'api_resource', 'command_result', 'collection', 'absence']
+const assertionEvidenceRequirements = {
+  text: ['dom_snapshot'], field_value: ['structured_value'], popup: ['dom_snapshot'], media: ['media_state'], video: ['media_state', 'media_event'], visual_change: ['dom_snapshot_before', 'dom_snapshot_after'], stream_state: ['media_state_before', 'media_state_after', 'playback_time_progress'], playback: ['media_state_before', 'media_state_after', 'playback_time_progress'], element_state: ['dom_snapshot'], url: ['url_snapshot'], network: ['network_response'], api_resource: ['api_response'], command_result: ['command_receipt'], collection: ['dom_snapshot'], absence: ['absence_check']
+}
 
 const stepsSectionTitle = computed(() => taskForm.caseMode === 'hybrid'
   ? t('uiAutomation.ai.hybridSteps')
@@ -358,6 +369,8 @@ const normalizeStructuredStep = (step = {}, index = 0) => ({
   selector: step.selector || '',
   value: step.value || '',
   expected: step.expected || '',
+  assert_kind: step.assert_kind || 'text',
+  operator: step.operator || 'contains',
   timeout_ms: Number(step.timeout_ms) || 10000,
   step_no: Number(step.step_no) || index + 1
 })
@@ -385,7 +398,7 @@ const validateStructuredSteps = () => {
       ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepUrlRequired')}`)
       return false
     }
-    if (['click', 'fill', 'press', 'select', 'assert_text_contains'].includes(step.action) && !String(step.selector || '').trim()) {
+    if (['click', 'fill', 'press', 'select', 'assert'].includes(step.action) && !String(step.selector || '').trim()) {
       ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepSelectorRequired')}`)
       return false
     }
@@ -393,7 +406,7 @@ const validateStructuredSteps = () => {
       ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepValueRequired')}`)
       return false
     }
-    if (['assert_url_contains', 'assert_text_contains'].includes(step.action) && !String(step.expected || '').trim()) {
+    if (step.action === 'assert' && !String(step.expected || '').trim()) {
       ElMessage.error(`${label}: ${t('uiAutomation.ai.messages.stepExpectedRequired')}`)
       return false
     }
@@ -402,10 +415,14 @@ const validateStructuredSteps = () => {
   return true
 }
 
-const buildTaskStepsPayload = () => taskForm.taskSteps.map((step, index) => ({
-  ...normalizeStructuredStep(step, index),
-  step_no: index + 1
-}))
+const buildTaskStepsPayload = () => taskForm.taskSteps.map((step, index) => {
+  const normalized = normalizeStructuredStep(step, index)
+  return {
+    ...normalized,
+    assertions: normalized.action === 'assert' ? [{ action: 'assert', assert_kind: normalized.assert_kind, target: { locator: normalized.selector }, operator: normalized.operator, expected: { value: normalized.expected }, evidence_requirements: assertionEvidenceRequirements[normalized.assert_kind] || [] }] : [],
+    step_no: index + 1
+  }
+})
 
 const buildTaskDescriptionFromSteps = (taskSteps) => taskSteps.map((step, index) => {
   const prefix = step.step_mode === 'direct' ? '[DIRECT]' : '[AI]'
@@ -517,7 +534,7 @@ const pollLogs = () => {
         }
       })
       
-      if (record.status === 'passed' || record.status === 'failed' || record.status === 'stopped') {
+      if (record.status === 'passed' || record.status === 'failed' || record.status === 'inconclusive' || record.status === 'stopped') {
         clearInterval(pollInterval)
         running.value = false
         analyzing.value = false // 确保结束时必然取消分析状态
@@ -525,6 +542,8 @@ const pollLogs = () => {
           ElMessage.success(t('uiAutomation.ai.messages.executionSuccess'))
         } else if (record.status === 'stopped') {
           ElMessage.warning(t('uiAutomation.ai.messages.taskStopped'))
+        } else if (record.status === 'inconclusive') {
+          ElMessage.warning(t('uiAutomation.status.inconclusive'))
         } else {
           ElMessage.error(t('uiAutomation.ai.messages.executionFailed'))
         }

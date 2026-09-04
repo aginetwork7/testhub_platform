@@ -51,7 +51,7 @@ export default {
     apiAutomationRuns: '执行记录',
     apiAutomationReports: '报告管理',
     apiAutomationConfigurations: '配置管理',
-    apiAutomationEnvironment: '环境配置',
+    apiAutomationEnvironment: '全局环境配置',
     apiAutomationSchedules: '定时任务',
     apiAutomationNotifications: '通知列表',
     apiAutomationLogs: '日志监控',

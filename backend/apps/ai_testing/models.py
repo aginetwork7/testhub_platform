@@ -108,14 +108,6 @@ class AICase(models.Model):
     case_mode = models.CharField(max_length=20, choices=CASE_MODE_CHOICES, default='freeform', verbose_name='用例模式')
     task_steps = models.JSONField(default=list, blank=True, verbose_name='结构化步骤')
     planned_steps = models.JSONField(default=list, blank=True, verbose_name='Planner执行步骤')
-    api_automation_configuration = models.ForeignKey(
-        'api_automation.ApiAutomationConfiguration',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='ai_testing_cases',
-        verbose_name='设备 CLI 环境',
-    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='创建者', related_name='ai_testing_created_cases')
@@ -142,11 +134,13 @@ class AIExecutionRecord(models.Model):
         ('running', '执行中'),
         ('passed', '成功'),
         ('failed', '失败'),
+        ('inconclusive', '证据不足'),
         ('stopped', '已停止'),
     ]
 
     project = models.ForeignKey(AiProject, on_delete=models.CASCADE, null=True, blank=True, verbose_name='所属项目')
     ai_case = models.ForeignKey(AICase, on_delete=models.SET_NULL, null=True, blank=True, verbose_name='关联AI用例')
+    environment_configuration = models.ForeignKey('core.EnvironmentConfiguration', on_delete=models.SET_NULL, null=True, blank=True, related_name='ai_testing_execution_records', verbose_name='全局环境配置')
     case_name = models.CharField(max_length=200, verbose_name='用例名称快照')
     task_description = models.TextField(blank=True, default='', verbose_name='任务描述', help_text='用户输入的原始任务描述')
     execution_mode = models.CharField(max_length=20, choices=EXECUTION_MODE_CHOICES, default='planner_v2', verbose_name='执行模式')
@@ -174,6 +168,170 @@ class AIExecutionRecord(models.Model):
         return f"{self.case_name} - {self.get_status_display()}"
 
 
+class AIExecutionPlanRevision(models.Model):
+    """Immutable execution-plan snapshot generated for one test run."""
+
+    execution_record = models.ForeignKey(
+        AIExecutionRecord,
+        on_delete=models.CASCADE,
+        related_name='plan_revisions',
+    )
+    revision_number = models.PositiveSmallIntegerField()
+    source_goal = models.TextField()
+    plan = models.JSONField(default=dict)
+    plan_hash = models.CharField(max_length=64, db_index=True)
+    reason = models.CharField(max_length=32, default='initial')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_plan_revisions'
+        ordering = ['execution_record_id', 'revision_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['execution_record', 'revision_number'],
+                name='ai_testing_execution_plan_revision_unique',
+            ),
+        ]
+
+
+class AIExecutionStep(models.Model):
+    """One planned step that may be executed through multiple attempts."""
+
+    STATUS_CHOICES = [
+        ('pending', '等待中'),
+        ('running', '执行中'),
+        ('action_completed', '动作完成'),
+        ('verified', '已验证'),
+        ('failed', '失败'),
+        ('inconclusive', '证据不足'),
+        ('skipped', '已跳过'),
+    ]
+
+    plan_revision = models.ForeignKey(
+        AIExecutionPlanRevision,
+        on_delete=models.CASCADE,
+        related_name='steps',
+    )
+    step_key = models.CharField(max_length=100)
+    display_order = models.PositiveSmallIntegerField()
+    intent = models.TextField()
+    dependencies = models.JSONField(default=list)
+    allowed_capabilities = models.JSONField(default=list)
+    assertions = models.JSONField(default=list)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='pending', db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_steps'
+        ordering = ['plan_revision_id', 'display_order', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan_revision', 'step_key'],
+                name='ai_testing_execution_step_key_unique',
+            ),
+        ]
+
+
+class AIExecutionStepAttempt(models.Model):
+    """One concrete action attempt for a planned execution step."""
+
+    STATUS_CHOICES = [
+        ('running', '执行中'),
+        ('completed', '动作完成'),
+        ('failed', '失败'),
+        ('stopped', '已停止'),
+    ]
+
+    step = models.ForeignKey(AIExecutionStep, on_delete=models.CASCADE, related_name='attempts')
+    attempt_number = models.PositiveSmallIntegerField()
+    action = models.JSONField(default=dict)
+    action_output = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='running', db_index=True)
+    error_message = models.TextField(blank=True, default='')
+    environment_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    permission_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_step_attempts'
+        ordering = ['step_id', 'attempt_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['step', 'attempt_number'],
+                name='ai_testing_execution_step_attempt_unique',
+            ),
+        ]
+
+
+class AIExecutionEvidenceArtifact(models.Model):
+    """Append-only raw evidence captured during a step attempt."""
+
+    attempt = models.ForeignKey(AIExecutionStepAttempt, on_delete=models.CASCADE, related_name='evidence_artifacts')
+    artifact_type = models.CharField(max_length=64, db_index=True)
+    storage_path = models.CharField(max_length=1000, blank=True, default='')
+    content_hash = models.CharField(max_length=64, db_index=True)
+    metadata = models.JSONField(default=dict)
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_evidence_artifacts'
+        ordering = ['attempt_id', 'id']
+
+
+class AIExecutionAssertionResult(models.Model):
+    """Deterministic evaluation result for one required or optional assertion."""
+
+    STATUS_CHOICES = [
+        ('passed', '通过'),
+        ('failed', '失败'),
+        ('inconclusive', '证据不足'),
+        ('invalid_evidence', '证据无效'),
+    ]
+
+    step = models.ForeignKey(AIExecutionStep, on_delete=models.CASCADE, related_name='assertion_results')
+    assertion = models.JSONField(default=dict)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, db_index=True)
+    actual = models.JSONField(default=dict)
+    evidence_artifacts = models.ManyToManyField(AIExecutionEvidenceArtifact, related_name='assertion_results')
+    evaluated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_assertion_results'
+        ordering = ['step_id', 'id']
+
+
+class AIExecutionQualityGateResult(models.Model):
+    """Append-only final quality-gate decision for a plan revision."""
+
+    STATUS_CHOICES = [
+        ('passed', '通过'),
+        ('failed', '失败'),
+        ('inconclusive', '证据不足'),
+    ]
+
+    plan_revision = models.ForeignKey(
+        AIExecutionPlanRevision,
+        on_delete=models.CASCADE,
+        related_name='quality_gate_results',
+    )
+    evaluation_number = models.PositiveSmallIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, db_index=True)
+    details = models.JSONField(default=dict)
+    evaluated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'ai_testing_execution_quality_gate_results'
+        ordering = ['plan_revision_id', 'evaluation_number']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan_revision', 'evaluation_number'],
+                name='ai_testing_execution_quality_gate_unique',
+            ),
+        ]
+
+
 class AIExecutionExperience(models.Model):
     """A verified, reusable action sequence for one AI-planned step."""
 
@@ -197,6 +355,8 @@ class AIExecutionExperience(models.Model):
     page_url = models.CharField(max_length=1000, blank=True, default='', verbose_name='页面地址')
     page_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='页面指纹')
     environment_key = models.CharField(max_length=200, blank=True, default='', verbose_name='环境标识')
+    permission_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='权限指纹')
+    assertion_contract_hash = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='断言契约哈希')
     action_sequence = models.JSONField(default=list, verbose_name='已验证动作序列')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', db_index=True, verbose_name='状态')
     review_status = models.CharField(max_length=20, choices=REVIEW_STATUS_CHOICES, default='pending', verbose_name='审核状态')
@@ -204,6 +364,9 @@ class AIExecutionExperience(models.Model):
     success_count = models.PositiveIntegerField(default=1, verbose_name='成功次数')
     failure_count = models.PositiveIntegerField(default=0, verbose_name='失败次数')
     confidence = models.FloatField(default=0.7, verbose_name='置信度')
+    last_verified_plan_revision = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name='最近验证计划版本')
+    last_verified_attempt = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name='最近验证步骤尝试')
+    last_verified_evidence_hashes = models.JSONField(default=list, blank=True, verbose_name='最近验证证据哈希')
     last_verified_at = models.DateTimeField(auto_now=True, verbose_name='最近验证时间')
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')

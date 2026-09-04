@@ -2,6 +2,7 @@ import logging
 import threading
 import os
 import re
+import json
 from pathlib import Path
 from django.conf import settings
 from asgiref.sync import sync_to_async
@@ -18,7 +19,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
 from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionExperienceSerializer, AIExecutionRecordSerializer
 from .ai_testing import run_full_process_sync
+from .global_planner import GlobalPlanError, GlobalTestPlanner
 from .alpha.access import accessible_ai_project_queryset
+from .execution.plan_persistence import persist_execution_plan
+from .execution.quality_gate_persistence import evaluate_execution_quality_gate
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,20 @@ def parse_request_bool(value, default=True):
         if normalized in {'true', '1', 'on', 'yes'}:
             return True
     return bool(value)
+
+
+def has_canonical_freeform_plan(planned_steps, environment_configuration_id, task_description):
+    if not isinstance(planned_steps, list) or not planned_steps:
+        return False
+    try:
+        GlobalTestPlanner.normalize_response(
+            {'choices': [{'message': {'content': json.dumps({'steps': planned_steps})}}]},
+            environment_configuration_id,
+            task_description,
+        )
+    except (GlobalPlanError, TypeError, ValueError):
+        return False
+    return True
 
 
 def extract_screenshot_sequence(artifacts):
@@ -177,17 +195,17 @@ def build_accessible_ai_project_queryset(user):
     return accessible_ai_project_queryset(user)
 
 
-def build_accessible_api_automation_configuration_queryset(user):
-    from apps.api_automation.models import ApiAutomationConfiguration
+def build_accessible_environment_configuration_queryset(user):
+    from apps.core.models import EnvironmentConfiguration
 
     if user is None or not getattr(user, 'is_authenticated', False):
-        return ApiAutomationConfiguration.objects.none()
-    return ApiAutomationConfiguration.objects.all()
+        return EnvironmentConfiguration.objects.none()
+    return EnvironmentConfiguration.objects.all()
 
 
-def resolve_api_automation_configuration_from_task(task_description, user):
+def resolve_environment_configuration_from_task(task_description, user):
     text = str(task_description or '').strip().lower()
-    configurations = build_accessible_api_automation_configuration_queryset(user)
+    configurations = build_accessible_environment_configuration_queryset(user)
     if not text:
         return configurations.filter(is_default=True).order_by('id').first()
 
@@ -269,25 +287,25 @@ class AICaseViewSet(viewsets.ModelViewSet):
         ai_case = ai_case or self.get_object()
         execution_mode = request.data.get('execution_mode', 'planner_v2')
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
-        configuration_id = request.data.get('api_automation_configuration_id')
+        configuration_id = request.data.get('environment_configuration_id')
         if configuration_id is not None:
             try:
                 configuration_id = int(configuration_id)
             except (TypeError, ValueError):
                 return Response({'error': '设备 CLI 环境参数无效'}, status=status.HTTP_400_BAD_REQUEST)
-            api_automation_configuration = build_accessible_api_automation_configuration_queryset(
+            environment_configuration = build_accessible_environment_configuration_queryset(
                 request.user,
             ).filter(id=configuration_id).first()
-            if api_automation_configuration is None:
+            if environment_configuration is None:
                 return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
         else:
-            api_automation_configuration = (
-                ai_case.api_automation_configuration
-                or resolve_api_automation_configuration_from_task(ai_case.task_description, request.user)
+            environment_configuration = resolve_environment_configuration_from_task(
+                ai_case.task_description,
+                request.user,
             )
-        if api_automation_configuration is not None:
-            has_configuration_access = build_accessible_api_automation_configuration_queryset(request.user).filter(
-                id=api_automation_configuration.id,
+        if environment_configuration is not None:
+            has_configuration_access = build_accessible_environment_configuration_queryset(request.user).filter(
+                id=environment_configuration.id,
             ).exists()
             if not has_configuration_access:
                 return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
@@ -296,6 +314,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
         execution_record = AIExecutionRecord.objects.create(
             project=ai_case.project,
             ai_case=ai_case,
+            environment_configuration=environment_configuration,
             case_name=ai_case.name,
             task_description=ai_case.task_description,
             execution_mode=execution_mode,
@@ -359,6 +378,11 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
                 async def on_analysis_complete(planned_tasks):
                     execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
+                    await sync_to_async(persist_execution_plan)(
+                        execution_record.id,
+                        ai_case.task_description,
+                        execution_record.planned_tasks,
+                    )
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
 
@@ -377,28 +401,27 @@ class AICaseViewSet(viewsets.ModelViewSet):
                         status = step_info.get('status')
                         if task_id and status:
                             execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                            if str(status).strip().lower() == 'completed':
-                                backfilled_ids = backfill_prior_pending_tasks(
-                                    execution_record.planned_tasks,
-                                    task_id
-                                )
-                                if backfilled_ids:
-                                    execution_record.logs += (
-                                        f"\n[System] 已补齐遗漏标记的前序子任务: "
-                                        f"{', '.join(map(str, backfilled_ids))}"
-                                    )
                             updated = update_planned_task_status(
                                 execution_record.planned_tasks,
                                 task_id,
                                 status
                             )
                             if updated:
-                                update_fields = ['planned_tasks']
-                                if str(status).strip().lower() == 'completed' and 'backfilled_ids' in locals() and backfilled_ids:
-                                    update_fields.append('logs')
-                                await sync_to_async(safe_save)(execution_record, update_fields=update_fields)
+                                await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks'])
                     except Exception as e:
                         logger.error(f"更新步骤状态失败: {e}")
+
+                use_persisted_freeform_plan = (
+                    ai_case.case_mode == 'freeform'
+                    and has_canonical_freeform_plan(
+                        ai_case.planned_steps,
+                        environment_configuration.id if environment_configuration else None,
+                        ai_case.task_description,
+                    )
+                )
+                if ai_case.case_mode == 'freeform' and ai_case.planned_steps and not use_persisted_freeform_plan:
+                    execution_record.logs += '[planner_v2] Ignored legacy persisted plan that does not meet the current assertion and capability contract.\n'
+                    safe_save(execution_record, update_fields=['logs'])
 
                 history = run_full_process_sync(
                     ai_case.task_description,
@@ -408,11 +431,11 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_mode=execution_mode,
                     enable_gif=(execution_mode == 'text'),
                     case_name=ai_case.name,
-                    case_mode='hybrid' if ai_case.case_mode == 'freeform' and ai_case.planned_steps else ai_case.case_mode,
-                    task_steps=ai_case.planned_steps if ai_case.case_mode == 'freeform' and ai_case.planned_steps else ai_case.task_steps,
+                    case_mode='hybrid' if use_persisted_freeform_plan else ai_case.case_mode,
+                    task_steps=ai_case.planned_steps if use_persisted_freeform_plan else ai_case.task_steps,
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
-                    api_automation_configuration=api_automation_configuration,
+                    environment_configuration=environment_configuration,
                     ai_project_id=ai_case.project_id,
                     execution_record_id=execution_record.id,
                     ai_case_id=ai_case.id,
@@ -424,19 +447,16 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     execution_record.logs += "\n[System] 任务已由用户停止。"
                 else:
                     execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    done_backfilled_ids = backfill_pending_tasks_if_done_success(
-                        execution_record.planned_tasks,
-                        history,
-                        execution_record.logs
-                    )
-                    if done_backfilled_ids:
-                        execution_record.logs += (
-                            f"\n[System] 检测到 done(success=true)，自动补齐完成子任务: "
-                            f"{', '.join(map(str, done_backfilled_ids))}。"
-                        )
-                    execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
+                    quality_gate_result = evaluate_execution_quality_gate(execution_record.id)
+                    if quality_gate_result is None:
+                        execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
+                    else:
+                        execution_record.status = quality_gate_result.status
+                        task_summary = summarize_planned_tasks(execution_record.planned_tasks)
                     if execution_record.status == 'passed':
                         execution_record.logs += "\n执行完成。"
+                    elif execution_record.status == 'inconclusive':
+                        execution_record.logs += "\n执行结束，但计划为空或仍有未完成子任务，无法证明通过。"
                     else:
                         execution_record.logs += "\n执行结束，但存在未完成或失败的子任务。"
                     logger.info(
@@ -464,10 +484,8 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
                 execution_record.steps_completed = steps
 
-                # 自动标记已完成的任务
                 if execution_record.planned_tasks:
                     execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    self._auto_mark_completed_tasks(execution_record)
                     execution_record.logs = append_execution_summary(
                         execution_record.logs,
                         summarize_planned_tasks(execution_record.planned_tasks)
@@ -484,28 +502,14 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 logger.error(f"AI 执行线程异常: {error_message}", exc_info=True)
                 execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
                 current_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                all_tasks_terminal_and_success = (
-                    current_summary['total'] > 0
-                    and current_summary['failed'] == 0
-                    and (current_summary['pending'] + current_summary['in_progress']) == 0
-                )
-
-                failed_task_id = None
-                if all_tasks_terminal_and_success:
-                    execution_record.status = 'passed'
-                    execution_record.logs += (
-                        f"\n[System] 捕获到执行期异常，但子任务已全部完成，按通过处理。"
-                        f"异常信息: {error_message}"
-                    )
+                failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
+                execution_record.status = 'failed'
+                if 'Execution LLM unavailable' in error_message:
+                    execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
                 else:
-                    failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
-                    execution_record.status = 'failed'
-                    if 'Execution LLM unavailable' in error_message:
-                        execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
-                    else:
-                        execution_record.logs += f"\n执行出错: {error_message}"
-                    if failed_task_id is not None:
-                        execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
+                    execution_record.logs += f"\n执行出错: {error_message}"
+                if failed_task_id is not None:
+                    execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
@@ -552,13 +556,13 @@ class AICaseViewSet(viewsets.ModelViewSet):
         if len(ai_cases) != len(normalized_case_ids):
             return Response({'error': '部分用例不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
 
-        configuration_id = request.data.get('api_automation_configuration_id')
+        configuration_id = request.data.get('environment_configuration_id')
         if configuration_id is not None:
             try:
                 configuration_id = int(configuration_id)
             except (TypeError, ValueError):
                 return Response({'error': '设备 CLI 环境参数无效'}, status=status.HTTP_400_BAD_REQUEST)
-            if not build_accessible_api_automation_configuration_queryset(
+            if not build_accessible_environment_configuration_queryset(
                 request.user,
             ).filter(id=configuration_id).exists():
                 return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
@@ -741,65 +745,6 @@ def update_planned_task_status(planned_tasks, task_id, task_status):
     return False
 
 
-def backfill_prior_pending_tasks(planned_tasks, current_task_id):
-    """受限补齐：仅在强依赖场景下补齐紧邻前一步遗漏标记。"""
-    if not planned_tasks or current_task_id is None:
-        return []
-
-    normalized_tasks = sanitize_planned_tasks(planned_tasks)
-    if isinstance(planned_tasks, list):
-        planned_tasks[:] = normalized_tasks
-
-    try:
-        current_task_id_int = int(current_task_id)
-    except (TypeError, ValueError):
-        return []
-
-    task_by_id = {}
-    for task in normalized_tasks:
-        try:
-            task_by_id[int(task.get('id'))] = task
-        except (TypeError, ValueError):
-            continue
-
-    current_task = task_by_id.get(current_task_id_int)
-    previous_task = task_by_id.get(current_task_id_int - 1)
-    if not current_task or not previous_task:
-        return []
-
-    if previous_task.get('status', 'pending') not in ACTIVE_TASK_STATUSES:
-        return []
-
-    previous_desc = str(previous_task.get('description', '')).strip()
-    current_desc = str(current_task.get('description', '')).strip()
-
-    # 验证/检查类任务必须显式标记，禁止自动补齐
-    verification_keywords = ['校验', '确认', '检查', '验证', '断言']
-    if any(keyword in previous_desc for keyword in verification_keywords):
-        return []
-
-    dependency_pairs = [
-        (['访问', '打开', '进入'], ['搜索', '输入', '点击', '查看']),
-        (['搜索'], ['点击第', '点击第2条', '点击第二条', '查看详情']),
-        (['点击第', '点击第2条', '点击第二条', '查看详情'], ['关闭', '关闭该标签页', '关闭标签页']),
-        (['打开详情', '查看详情'], ['关闭', '返回']),
-    ]
-
-    def matches_any(text, keywords):
-        return any(keyword in text for keyword in keywords)
-
-    allowed = any(
-        matches_any(previous_desc, prev_keywords) and matches_any(current_desc, curr_keywords)
-        for prev_keywords, curr_keywords in dependency_pairs
-    )
-
-    if not allowed:
-        return []
-
-    previous_task['status'] = 'completed'
-    return [current_task_id_int - 1]
-
-
 def mark_first_active_task(planned_tasks, task_status):
     """在执行异常时为第一个未终态任务补一个状态。"""
     if not planned_tasks:
@@ -849,11 +794,11 @@ def resolve_execution_status(planned_tasks):
     summary = summarize_planned_tasks(planned_tasks)
 
     if summary['total'] == 0:
-        return 'passed', summary
+        return 'inconclusive', summary
     if summary['failed'] > 0:
         return 'failed', summary
     if summary['pending'] > 0 or summary['in_progress'] > 0:
-        return 'failed', summary
+        return 'inconclusive', summary
     return 'passed', summary
 
 
@@ -867,88 +812,6 @@ def append_execution_summary(logs, summary):
         f"跳过 {summary['skipped']}，待处理 {summary['pending'] + summary['in_progress']}。"
     )
 
-
-def backfill_pending_tasks_if_done_success(planned_tasks, history, logs_text=None):
-    """若历史中已出现 done(success=True)，则将剩余 pending/in_progress 任务补标为 completed。"""
-    normalized_tasks = sanitize_planned_tasks(planned_tasks)
-    if isinstance(planned_tasks, list):
-        planned_tasks[:] = normalized_tasks
-
-    if not normalized_tasks:
-        return []
-
-    def _normalize_action_dict(action):
-        action_dict = None
-        if isinstance(action, dict):
-            action_dict = action
-        elif hasattr(action, 'model_dump'):
-            try:
-                action_dict = action.model_dump()
-            except Exception:
-                action_dict = None
-        elif hasattr(action, '_action_dict'):
-            action_dict = getattr(action, '_action_dict', None)
-
-        if isinstance(action_dict, list):
-            for item in action_dict:
-                if isinstance(item, dict):
-                    return item
-            return {}
-        return action_dict if isinstance(action_dict, dict) else {}
-
-    def _is_done_success(done_params):
-        if isinstance(done_params, dict):
-            success_value = done_params.get('success')
-            if isinstance(success_value, bool):
-                return success_value
-            if isinstance(success_value, str):
-                return success_value.strip().lower() == 'true'
-            return False
-        if isinstance(done_params, list):
-            return any(_is_done_success(item) for item in done_params)
-        if hasattr(done_params, 'success'):
-            success_value = getattr(done_params, 'success', False)
-            if isinstance(success_value, bool):
-                return success_value
-            if isinstance(success_value, str):
-                return success_value.strip().lower() == 'true'
-        return False
-
-    has_done_success = False
-    if history and hasattr(history, 'steps'):
-        for step in getattr(history, 'steps', []):
-            actions = getattr(step, 'actions', [])
-            for action in actions:
-                action_dict = _normalize_action_dict(action)
-                if not action_dict:
-                    continue
-
-                done_params = action_dict.get('done')
-                if _is_done_success(done_params):
-                    has_done_success = True
-                    break
-            if has_done_success:
-                break
-
-    if not has_done_success and logs_text:
-        logs_lower = str(logs_text).lower()
-        has_done_success = (
-            "done: success: true" in logs_lower
-            or "所有9个任务已成功完成" in str(logs_text)
-            or "successfully completed all 9 tasks" in logs_lower
-        )
-
-    if not has_done_success:
-        return []
-
-    backfilled = []
-    for task in normalized_tasks:
-        status = str(task.get('status', 'pending')).lower()
-        if status in ACTIVE_TASK_STATUSES:
-            task['status'] = 'completed'
-            if task.get('id') is not None:
-                backfilled.append(task.get('id'))
-    return backfilled
 
 def is_infrastructure_failure(error_message: str) -> bool:
     """判断是否为模型/网络/初始化类故障，这类问题不应直接把首个子任务标失败。"""
@@ -1053,6 +916,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         cache_hits = 0
         experience_hits = 0
         experience_writes = 0
+        revalidated = 0
         for record in records:
             if record.ai_case_id and record.ai_case_id not in first_records:
                 first_records[record.ai_case_id] = record.status
@@ -1060,6 +924,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             cache_hits += int(stats.get('hit') or 0)
             experience_hits += int(stats.get('experience_hit') or 0)
             experience_writes += int(stats.get('experience_write') or 0)
+            revalidated += int(stats.get('revalidated') or 0)
 
         first_run_total = len(first_records)
         first_run_passed = sum(status == 'passed' for status in first_records.values())
@@ -1082,6 +947,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 'cache_hits': cache_hits,
                 'experience_hits': experience_hits,
                 'experience_writes': experience_writes,
+                'revalidated': revalidated,
             },
         })
 
@@ -1194,7 +1060,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         case_mode = request.data.get('case_mode', 'freeform')
         task_steps = request.data.get('task_steps') or []
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
-        api_automation_configuration_id = request.data.get('api_automation_configuration_id')
+        environment_configuration_id = request.data.get('environment_configuration_id')
 
         if not task_description:
             return Response({'error': '缺少任务描述参数'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1207,15 +1073,15 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             except AiProject.DoesNotExist:
                 return Response({'error': '项目不存在'}, status=status.HTTP_404_NOT_FOUND)
 
-        api_automation_configuration = None
-        if api_automation_configuration_id is not None:
-            api_automation_configuration = build_accessible_api_automation_configuration_queryset(request.user).filter(
-                id=api_automation_configuration_id,
+        environment_configuration = None
+        if environment_configuration_id is not None:
+            environment_configuration = build_accessible_environment_configuration_queryset(request.user).filter(
+                id=environment_configuration_id,
             ).first()
-            if api_automation_configuration is None:
+            if environment_configuration is None:
                 return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
         else:
-            api_automation_configuration = resolve_api_automation_configuration_from_task(
+            environment_configuration = resolve_environment_configuration_from_task(
                 task_description,
                 request.user,
             )
@@ -1223,6 +1089,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         # 创建执行记录
         execution_record = AIExecutionRecord.objects.create(
             project=project,
+            environment_configuration=environment_configuration,
             case_name="Adhoc Task",
             task_description=task_description,
             execution_mode=execution_mode,
@@ -1302,6 +1169,11 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
                 async def on_analysis_complete(planned_tasks):
                     execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
+                    await sync_to_async(persist_execution_plan)(
+                        execution_record.id,
+                        task_description,
+                        execution_record.planned_tasks,
+                    )
                     execution_record.logs += "任务分析完成，开始执行...\n"
                     await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
 
@@ -1330,17 +1202,6 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                                     if str(task.get('id')) == str(task_id):
                                         old_status = task.get('status', 'pending')
                                         break
-                                backfilled_ids = []
-                                if str(status).strip().lower() == 'completed':
-                                    backfilled_ids = backfill_prior_pending_tasks(
-                                        execution_record.planned_tasks,
-                                        task_id
-                                    )
-                                    if backfilled_ids:
-                                        execution_record.logs += (
-                                            f"\n[System] 已补齐遗漏标记的前序子任务: "
-                                            f"{', '.join(map(str, backfilled_ids))}"
-                                        )
                                 updated = update_planned_task_status(
                                     execution_record.planned_tasks,
                                     task_id,
@@ -1350,10 +1211,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                                     logger.info(f"DEBUG: Updated task {task_id} from {old_status} to {status}")
                             if updated:
                                 # 立即保存到数据库，确保前端轮询能看到最新状态
-                                update_fields = ['planned_tasks']
-                                if 'backfilled_ids' in locals() and backfilled_ids:
-                                    update_fields.append('logs')
-                                await sync_to_async(safe_save)(execution_record, update_fields=update_fields)
+                                await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks'])
                             else:
                                 logger.warning(
                                     f"DEBUG: Task ID {task_id} not found in planned_tasks: {execution_record.planned_tasks}")
@@ -1372,7 +1230,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     task_steps=task_steps,
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
-                    api_automation_configuration=api_automation_configuration,
+                    environment_configuration=environment_configuration,
+                    execution_record_id=execution_record.id,
                 )
 
                 # 检查是否是手动停止 (使用同步版本)
@@ -1381,22 +1240,17 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                     execution_record.logs += "\n[System] 任务已由用户停止。"
                 else:
                     execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    done_backfilled_ids = backfill_pending_tasks_if_done_success(
-                        execution_record.planned_tasks,
-                        history,
-                        execution_record.logs
-                    )
-                    if done_backfilled_ids:
-                        execution_record.logs += (
-                            f"\n[System] 检测到 done(success=true)，自动补齐完成子任务: "
-                            f"{', '.join(map(str, done_backfilled_ids))}。"
-                        )
                     # 关键修复：移除可能导致数据回滚的 refresh_from_db 调用
                     # 内存中的 execution_record.planned_tasks 已经由 on_step_update 实时更新并在内存中是最新的
                     # 信任内存中的状态，而不是去数据库拉取（可能存在异步写入延迟）
                     # execution_record.refresh_from_db(fields=['planned_tasks'])
                     
-                    execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
+                    quality_gate_result = evaluate_execution_quality_gate(execution_record.id)
+                    if quality_gate_result is None:
+                        execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
+                    else:
+                        execution_record.status = quality_gate_result.status
+                        task_summary = summarize_planned_tasks(execution_record.planned_tasks)
                     
                     # 添加详细调试日志，以便排查问题
                     logger.info(f"🔍 Final task status check before save: {task_summary}")
@@ -1405,6 +1259,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
                     if execution_record.status == 'passed':
                         execution_record.logs += "\n执行完成。"
+                    elif execution_record.status == 'inconclusive':
+                        execution_record.logs += "\n执行结束，但计划为空或仍有未完成子任务，无法证明通过。"
                     else:
                         execution_record.logs += "\n执行结束，但存在未完成或失败的子任务。"
                     logger.info(
@@ -1432,10 +1288,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
                 execution_record.steps_completed = steps
 
-                # 自动标记已完成的任务
                 if execution_record.planned_tasks:
                     execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    self._auto_mark_completed_tasks(execution_record)
                     execution_record.logs = append_execution_summary(
                         execution_record.logs,
                         summarize_planned_tasks(execution_record.planned_tasks)
@@ -1452,28 +1306,14 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 logger.error(f"AI adhoc 执行线程异常: {error_message}", exc_info=True)
                 execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
                 current_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                all_tasks_terminal_and_success = (
-                    current_summary['total'] > 0
-                    and current_summary['failed'] == 0
-                    and (current_summary['pending'] + current_summary['in_progress']) == 0
-                )
-
-                failed_task_id = None
-                if all_tasks_terminal_and_success:
-                    execution_record.status = 'passed'
-                    execution_record.logs += (
-                        f"\n[System] 捕获到执行期异常，但子任务已全部完成，按通过处理。"
-                        f"异常信息: {error_message}"
-                    )
+                failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
+                execution_record.status = 'failed'
+                if 'Execution LLM unavailable' in error_message:
+                    execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
                 else:
-                    failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
-                    execution_record.status = 'failed'
-                    if 'Execution LLM unavailable' in error_message:
-                        execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
-                    else:
-                        execution_record.logs += f"\n执行出错: {error_message}"
-                    if failed_task_id is not None:
-                        execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
+                    execution_record.logs += f"\n执行出错: {error_message}"
+                if failed_task_id is not None:
+                    execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
 
                 execution_record.end_time = timezone.now()
                 execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
@@ -1558,6 +1398,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         status_map = {
             'passed': '成功',
             'failed': '失败',
+            'inconclusive': '证据不足',
             'running': '执行中',
             'pending': '等待中',
             'stopped': '已停止'
@@ -1568,6 +1409,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         color_map = {
             'passed': 'success',
             'failed': 'danger',
+            'inconclusive': 'warning',
             'running': 'warning',
             'pending': 'info',
             'stopped': 'info'
@@ -1700,6 +1542,76 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             }, step))
         return normalized_steps
 
+    def _execution_audit_summary(self, execution_record):
+        plan_revisions = getattr(execution_record, 'plan_revisions', None)
+        if plan_revisions is None:
+            return None
+        revisions = list(plan_revisions.prefetch_related(
+            'steps__attempts__evidence_artifacts',
+            'steps__assertion_results__evidence_artifacts',
+            'quality_gate_results',
+        ).order_by('revision_number'))
+        if not revisions:
+            return None
+        revision = revisions[-1]
+
+        quality_gate = revision.quality_gate_results.order_by('-evaluation_number').first()
+        return {
+            'plan_revision': revision.revision_number,
+            'plan_hash': revision.plan_hash,
+            'quality_gate': {
+                'status': quality_gate.status,
+                'details': quality_gate.details,
+                'evaluated_at': quality_gate.evaluated_at.isoformat(),
+            } if quality_gate is not None else None,
+            'revision_history': [
+                {
+                    'revision_number': item.revision_number,
+                    'reason': item.reason,
+                    'plan_hash': item.plan_hash,
+                    'created_at': item.created_at.isoformat(),
+                    'quality_gate_status': (
+                        item.quality_gate_results.order_by('-evaluation_number').first().status
+                        if item.quality_gate_results.exists() else None
+                    ),
+                }
+                for item in revisions
+            ],
+            'steps': [
+                {
+                    'step_key': step.step_key,
+                    'intent': step.intent,
+                    'status': step.status,
+                    'attempts': [
+                        {
+                            'attempt_number': attempt.attempt_number,
+                            'action': attempt.action,
+                            'status': attempt.status,
+                            'evidence': [
+                                {
+                                    'artifact_type': artifact.artifact_type,
+                                    'content_hash': artifact.content_hash,
+                                    'captured_at': artifact.captured_at.isoformat(),
+                                }
+                                for artifact in attempt.evidence_artifacts.all()
+                            ],
+                        }
+                        for attempt in step.attempts.all()
+                    ],
+                    'assertions': [
+                        {
+                            'status': assertion.status,
+                            'assertion': assertion.assertion,
+                            'actual': assertion.actual,
+                            'evidence_hashes': [artifact.content_hash for artifact in assertion.evidence_artifacts.all()],
+                        }
+                        for assertion in step.assertion_results.all()
+                    ],
+                }
+                for step in revision.steps.all()
+            ],
+        }
+
     def _build_execution_report(self, execution_record, report_type='summary'):
         stats = self._get_task_statistics(execution_record)
         report_steps = self._report_step_records(execution_record)
@@ -1794,6 +1706,19 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             'planner_trace': normalize_planner_payload(execution_record.planner_trace or {}),
             'artifacts': normalize_planner_payload(execution_record.artifacts or []),
             'cache_stats': execution_record.cache_stats or {},
+            'execution_audit': self._execution_audit_summary(execution_record),
+            'experience_revalidations': [
+                {
+                    'step_description': experience.step_description,
+                    'status': experience.status,
+                    'confidence': experience.confidence,
+                    'plan_revision': experience.last_verified_plan_revision,
+                    'attempt': experience.last_verified_attempt,
+                    'evidence_hashes': experience.last_verified_evidence_hashes,
+                    'verified_at': experience.last_verified_at.isoformat() if experience.last_verified_at else None,
+                }
+                for experience in execution_record.experiences.all()
+            ] if getattr(execution_record, 'experiences', None) is not None else [],
         }
 
         if report_type == 'summary':

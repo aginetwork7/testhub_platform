@@ -1,12 +1,12 @@
 from django.test import TestCase
 
-from apps.api_automation.models import ApiAutomationConfiguration
+from apps.core.models import EnvironmentConfiguration
 from apps.api_automation.runner_client import _default_role
 
 
 class DefaultRoleResolutionTests(TestCase):
     def setUp(self) -> None:
-        self.configuration = ApiAutomationConfiguration.objects.create(
+        self.configuration = EnvironmentConfiguration.objects.create(
             name='Default Role Environment',
             environment='default-role',
         )

@@ -17,9 +17,9 @@ from django_q.exceptions import TimeoutException
 from apps.api_automation.models import (
     ApiAutomationCase,
     ApiAutomationCaseResult,
-    ApiAutomationConfiguration,
     ApiAutomationRun,
 )
+from apps.core.models import EnvironmentConfiguration
 from apps.api_automation.runner_client import execute_case as execute_case_in_runner
 from apps.api_automation.runner_client import generate_run_report
 from apps.api_automation.runner_client import is_configured as runner_is_configured
@@ -39,7 +39,7 @@ def _log_run(run: ApiAutomationRun, level: int, message: str, *args: object) -> 
 
 @dataclass
 class ExecutionContext:
-    configuration: ApiAutomationConfiguration
+    configuration: EnvironmentConfiguration
     resolver: VariableResolver
     variables: dict[str, Any]
     session: requests.Session = field(default_factory=requests.Session)
@@ -208,7 +208,7 @@ def _selected_cases(run: ApiAutomationRun) -> QuerySet[ApiAutomationCase]:
 def _execute_case(
     run: ApiAutomationRun,
     case: ApiAutomationCase,
-    configuration: ApiAutomationConfiguration | None,
+    configuration: EnvironmentConfiguration | None,
 ) -> dict[str, Any]:
     if case.is_skipped:
         return {
@@ -267,7 +267,7 @@ def _execute_case(
 def _execute_case_in_runner(
     run: ApiAutomationRun,
     case: ApiAutomationCase,
-    configuration: ApiAutomationConfiguration,
+    configuration: EnvironmentConfiguration,
 ) -> dict[str, Any]:
     try:
         result = execute_case_in_runner(run, case, configuration)

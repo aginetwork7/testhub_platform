@@ -10,9 +10,14 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 from django.core.cache import cache
 from django.db import DatabaseError, connection
+from pathlib import Path
 
-from .models import UnifiedNotificationConfig, NotificationTemplate
-from .serializers import UnifiedNotificationConfigSerializer, NotificationTemplateSerializer
+import yaml
+
+from .models import EnvironmentConfiguration, UnifiedNotificationConfig, NotificationTemplate
+from .serializers import EnvironmentConfigurationSerializer, UnifiedNotificationConfigSerializer, NotificationTemplateSerializer
+from .device_cli_capability import DeviceCliCapability, DeviceCliCapabilityError
+from .device_cli_serializers import DeviceCliExecuteSerializer
 
 import logging
 import requests
@@ -32,6 +37,80 @@ import psutil
 from redis.exceptions import RedisError
 
 logger = logging.getLogger(__name__)
+
+
+class EnvironmentConfigurationViewSet(viewsets.ModelViewSet):
+    """Global environment configurations shared by testing modules."""
+
+    queryset = EnvironmentConfiguration.objects.all()
+    serializer_class = EnvironmentConfigurationSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['environment', 'is_default']
+    search_fields = ['name', 'environment', 'base_url', 'web_url']
+    ordering_fields = ['name', 'created_at', 'updated_at']
+    ordering = ['-is_default', 'name']
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @staticmethod
+    def _load_template():
+        template_path = Path(__file__).resolve().parent.parent / 'api_automation' / 'test_assets' / 'config' / 'config.template.yaml'
+        return yaml.safe_load(template_path.read_text(encoding='utf-8')) or {}
+
+    @action(detail=False, methods=['get'])
+    def template(self, request):
+        try:
+            return Response(self._load_template())
+        except (OSError, yaml.YAMLError) as error:
+            return Response({'error': f'读取测试配置模板失败: {error}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['post'])
+    def initialize(self, request):
+        try:
+            template = self._load_template()
+        except (OSError, yaml.YAMLError) as error:
+            return Response({'error': f'读取测试配置模板失败: {error}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        EnvironmentConfiguration.objects.update(is_default=False)
+        configuration, created = EnvironmentConfiguration.objects.update_or_create(
+            name='默认测试环境',
+            defaults={
+                'environment': 'custom',
+                'base_url': template.get('api', {}).get('base_url', ''),
+                'websocket_url': template.get('websocket', {}).get('url', ''),
+                'variables': {'data_endpoints': {}, 'model_images': {}, 'default_role': 'dealer'},
+                'auth_profiles': template.get('auth', {}).get('users', {}),
+                'payment_config': template.get('payment', {}),
+                'model_profiles': template.get('models', {}),
+                'runtime_settings': template,
+                'timeout_seconds': template.get('api', {}).get('timeout', 30),
+                'max_workers': template.get('test', {}).get('max_workers', 1),
+                'is_default': True,
+                'created_by': request.user,
+            },
+        )
+        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(self.get_serializer(configuration).data, status=response_status)
+
+    @action(detail=True, methods=['post'])
+    def set_default(self, request, pk=None):
+        configuration = self.get_object()
+        EnvironmentConfiguration.objects.exclude(id=configuration.id).update(is_default=False)
+        configuration.is_default = True
+        configuration.save(update_fields=['is_default'])
+        return Response(self.get_serializer(configuration).data)
+
+    @action(detail=True, methods=['post'], url_path='device-cli')
+    def execute_device_cli(self, request, pk=None):
+        configuration = self.get_object()
+        serializer = DeviceCliExecuteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = DeviceCliCapability().execute(configuration, **serializer.validated_data)
+        except DeviceCliCapabilityError as error:
+            return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(result)
 
 
 class SystemHealthAPIView(APIView):

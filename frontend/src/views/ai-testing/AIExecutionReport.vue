@@ -228,6 +228,78 @@
               </div>
             </div>
           </el-collapse-item>
+
+          <el-collapse-item
+            v-if="reportData.execution_audit"
+            title="质量门与证据"
+            name="executionAudit"
+          >
+            <div class="report-section collapse-section-body">
+              <el-descriptions :column="2" border size="small">
+                <el-descriptions-item label="计划版本">
+                  {{ reportData.execution_audit.plan_revision }}
+                </el-descriptions-item>
+                <el-descriptions-item label="计划哈希">
+                  {{ reportData.execution_audit.plan_hash }}
+                </el-descriptions-item>
+                <el-descriptions-item label="质量门结论">
+                  <el-tag v-if="reportData.execution_audit.quality_gate" :type="getAuditStatusType(reportData.execution_audit.quality_gate.status)">
+                    {{ reportData.execution_audit.quality_gate.status }}
+                  </el-tag>
+                  <span v-else>-</span>
+                </el-descriptions-item>
+                <el-descriptions-item label="评估时间">
+                  {{ reportData.execution_audit.quality_gate?.evaluated_at || '-' }}
+                </el-descriptions-item>
+              </el-descriptions>
+
+              <el-timeline v-if="reportData.execution_audit.revision_history?.length" style="margin-top: 16px">
+                <el-timeline-item
+                  v-for="revision in reportData.execution_audit.revision_history"
+                  :key="revision.revision_number"
+                  :timestamp="revision.created_at"
+                  :type="getAuditStatusType(revision.quality_gate_status)"
+                >
+                  <span>Revision {{ revision.revision_number }}: {{ revision.reason }}</span>
+                  <el-tag v-if="revision.quality_gate_status" :type="getAuditStatusType(revision.quality_gate_status)" size="small" style="margin-left: 8px">
+                    {{ revision.quality_gate_status }}
+                  </el-tag>
+                </el-timeline-item>
+              </el-timeline>
+
+              <el-table :data="reportData.execution_audit.steps" size="small" style="margin-top: 16px">
+                <el-table-column prop="step_key" label="步骤" width="120" />
+                <el-table-column prop="intent" label="意图" min-width="220" show-overflow-tooltip />
+                <el-table-column label="步骤状态" width="120">
+                  <template #default="{ row }">
+                    <el-tag :type="getAuditStatusType(row.status)" size="small">{{ row.status }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="尝试" width="90">
+                  <template #default="{ row }">{{ row.attempts.length }}</template>
+                </el-table-column>
+                <el-table-column label="断言" width="90">
+                  <template #default="{ row }">{{ row.assertions.length }}</template>
+                </el-table-column>
+              </el-table>
+
+              <el-table v-if="reportData.experience_revalidations?.length" :data="reportData.experience_revalidations" size="small" style="margin-top: 16px">
+                <el-table-column prop="step_description" label="复验步骤" min-width="200" show-overflow-tooltip />
+                <el-table-column prop="status" label="经验状态" width="110">
+                  <template #default="{ row }"><el-tag :type="getAuditStatusType(row.status)" size="small">{{ row.status }}</el-tag></template>
+                </el-table-column>
+                <el-table-column prop="confidence" label="可信度" width="100" />
+                <el-table-column prop="plan_revision" label="Revision" width="90" />
+                <el-table-column prop="attempt" label="Attempt" width="90" />
+                <el-table-column prop="verified_at" label="复验时间" min-width="180" />
+              </el-table>
+
+              <div class="raw-artifact-block" style="margin-top: 16px">
+                <div class="raw-artifact-title">审计原始数据</div>
+                <div class="json-block">{{ formatJson(reportData.execution_audit) }}</div>
+              </div>
+            </div>
+          </el-collapse-item>
         </el-collapse>
 
         <!-- 错误信息 -->
@@ -711,6 +783,20 @@ const getStepStatusType = (status) => {
     'completed': 'success',
     'pending': 'info',
     'failed': 'danger'
+  }
+  return typeMap[status] || 'info'
+}
+
+const getAuditStatusType = (status) => {
+  const typeMap = {
+    'passed': 'success',
+    'verified': 'success',
+    'completed': 'success',
+    'failed': 'danger',
+    'inconclusive': 'warning',
+    'invalid_evidence': 'warning',
+    'pending': 'info',
+    'running': 'info'
   }
   return typeMap[status] || 'info'
 }

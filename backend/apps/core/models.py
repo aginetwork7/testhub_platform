@@ -3,9 +3,71 @@ Core 应用模型
 """
 from django.db import models
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.utils import timezone
+from base64 import urlsafe_b64encode
+from hashlib import sha256
+import json
+
+from cryptography.fernet import Fernet, InvalidToken
 
 User = get_user_model()
+
+
+class EnvironmentConfiguration(models.Model):
+    """Global environment configuration shared by all testing modules."""
+
+    name = models.CharField(max_length=200, verbose_name='配置名称')
+    environment = models.CharField(max_length=50, default='custom', verbose_name='运行环境')
+    base_url = models.URLField(blank=True, verbose_name='HTTP基础地址')
+    web_url = models.URLField(blank=True, verbose_name='Web地址')
+    websocket_url = models.URLField(blank=True, verbose_name='WebSocket地址')
+    variables = models.JSONField(default=dict, verbose_name='环境变量')
+    auth_profiles = models.JSONField(default=dict, verbose_name='认证角色配置')
+    payment_config = models.JSONField(default=dict, verbose_name='支付服务配置')
+    model_profiles = models.JSONField(default=dict, verbose_name='模型服务配置')
+    runtime_settings = models.JSONField(default=dict, verbose_name='测试运行设置')
+    event_device_keys_encrypted = models.TextField(blank=True, default='', verbose_name='事件设备私钥密文')
+    timeout_seconds = models.PositiveIntegerField(default=30, verbose_name='请求超时秒数')
+    max_workers = models.PositiveIntegerField(default=1, verbose_name='并发数')
+    is_default = models.BooleanField(default=False, verbose_name='是否默认配置')
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, verbose_name='创建人')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'environment_configurations'
+        ordering = ['-is_default', 'name']
+        verbose_name = '全局环境配置'
+        verbose_name_plural = '全局环境配置'
+
+    @staticmethod
+    def _event_device_key_cipher():
+        encryption_key = urlsafe_b64encode(sha256(settings.SECRET_KEY.encode('utf-8')).digest())
+        return Fernet(encryption_key)
+
+    def get_event_device_key(self, device):
+        if device not in {'main', 'backup'} or not self.event_device_keys_encrypted:
+            return ''
+        try:
+            payload = self._event_device_key_cipher().decrypt(self.event_device_keys_encrypted.encode('utf-8'))
+            device_keys = json.loads(payload.decode('utf-8'))
+        except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError):
+            return ''
+        return str(device_keys.get(device, '')) if isinstance(device_keys, dict) else ''
+
+    def set_event_device_keys(self, main_device_key=None, backup_device_key=None):
+        device_keys = {
+            'main': self.get_event_device_key('main'),
+            'backup': self.get_event_device_key('backup'),
+        }
+        if main_device_key is not None:
+            device_keys['main'] = main_device_key.strip()
+        if backup_device_key is not None:
+            device_keys['backup'] = backup_device_key.strip()
+        self.event_device_keys_encrypted = self._event_device_key_cipher().encrypt(
+            json.dumps(device_keys, ensure_ascii=False).encode('utf-8')
+        ).decode('utf-8')
 
 
 class UnifiedNotificationConfig(models.Model):

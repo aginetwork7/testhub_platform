@@ -51,7 +51,7 @@ export default {
     apiAutomationRuns: 'Execution Records',
     apiAutomationReports: 'Report Management',
     apiAutomationConfigurations: 'Configuration Management',
-    apiAutomationEnvironment: 'Environment Configuration',
+    apiAutomationEnvironment: 'Global Environment Configuration',
     apiAutomationSchedules: 'Scheduled Tasks',
     apiAutomationNotifications: 'Notification List',
     apiAutomationLogs: 'Log Monitor',
