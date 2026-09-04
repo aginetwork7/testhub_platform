@@ -1796,6 +1796,9 @@ class PyUICompatAgent:
                     const title = element.getAttribute('title');
                     const href = element.getAttribute('href');
                     const semanticChild = element.querySelector('[aria-label], [title], [alt], [data-icon], [data-lucide], svg title, svg, use');
+                    const semanticClass = semanticChild && typeof semanticChild.getAttribute('class') === 'string'
+                        ? semanticChild.getAttribute('class').split(/\\s+/).find(token => /icon$/i.test(token)) || ''
+                        : '';
                     const semanticName = semanticChild ? (
                         semanticChild.getAttribute('aria-label')
                         || semanticChild.getAttribute('title')
@@ -1805,7 +1808,7 @@ class PyUICompatAgent:
                         || semanticChild.textContent
                         || semanticChild.getAttribute('href')
                         || semanticChild.getAttribute('xlink:href')
-                        || semanticChild.getAttribute('class')
+                        || semanticClass
                         || ''
                     ) : '';
                     const name = (element.getAttribute('aria-label') || title || element.innerText || element.value || href || semanticName || '').trim().slice(0, 120);

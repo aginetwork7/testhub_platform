@@ -160,8 +160,13 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('Prior actions:', source)
         self.assertIn('do not repeat the same action and selector', source)
         self.assertIn('return action="assert" with that locator binding immediately', source)
+        self.assertIn('expected numeric values are count thresholds rather than visible text', source)
+        self.assertIn('bind that group or container locator immediately', source)
         self.assertIn('query or filter control whose name contains only the field label', source)
         self.assertIn('detail-context control whose own name or container_text contains that current value', source)
+        self.assertIn('if not assertion_check:', source)
+        self.assertIn('bindings = []', source)
+        self.assertIn("action.pop('assertion_bindings', None)", source)
 
     def test_visual_planner_rejects_repeating_failed_state_change(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -247,6 +252,8 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('result_correlation.match_values', source)
         self.assertIn('select the unique highest-scoring record', source)
         self.assertIn('never fall back to first_visible', source)
+        self.assertIn('do not assert or click a partial match', source)
+        self.assertIn('scrolling a discovered record-list container', source)
 
     def test_visual_planner_requires_unique_runtime_correlated_visible_record(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -277,6 +284,43 @@ class GlobalTestPlannerTests(SimpleTestCase):
             resources,
             'Navigate to records\nChoose a different action sequence.',
         )
+
+    def test_visual_planner_scrolls_until_all_record_correlation_values_are_visible(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions = [{'action': 'assert'}]
+
+        VisualStepReplanner._validate_visible_record_correlation(
+            actions,
+            [{'selector': '#partial-record', 'container_text': 'person'}],
+            [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+            'Select the created record',
+            {'scroll_containers': [{'selector': '#record-list', 'remaining': 500}]},
+        )
+
+        self.assertEqual(actions, [{'action': 'scroll', 'selector': '#record-list', 'value': 'down'}])
+
+    def test_visual_planner_rejects_partial_record_match_without_search_path(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'uncorrelated or partially correlated record'):
+            VisualStepReplanner._validate_visible_record_correlation(
+                [{'action': 'assert'}],
+                [{'selector': '#partial-record', 'container_text': 'person'}],
+                [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+                'Select the created record',
+            )
+
+    def test_visual_planner_rejects_unrelated_action_when_no_record_matches(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'uncorrelated or partially correlated record'):
+            VisualStepReplanner._validate_visible_record_correlation(
+                [{'action': 'click', 'selector': '#date-filter'}],
+                [{'selector': '#date-filter', 'container_text': 'Select date'}],
+                [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+                'Select the created record',
+            )
 
     def test_visual_planner_uses_platform_ai_request_timeout(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner

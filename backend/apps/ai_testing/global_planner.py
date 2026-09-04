@@ -97,6 +97,7 @@ class VisualStepReplanner:
                     'Choose actions that can produce the supplied assertion evidence; do not treat an action as proof. '
                     'When prior_actions shows a completed state-changing action but the required assertion remains unverified, do not repeat the same action and selector. Choose a distinct next control from the current evidence; when the current layer exposes an explicit commit or confirm control, use it to commit the pending selection before asserting the final state. '
                     'If a current actionable control or observable element objectively contains the assertion expected value and represents its semantic target, return action="assert" with that locator binding immediately; do not continue unrelated interactions after the required state is already visible. '
+                    'For collection assertions, expected numeric values are count thresholds rather than visible text. When a visible option group or container semantically matches the assertion target intent, return action="assert" and bind that group or container locator immediately. '
                     'Use page_metrics to detect off-screen content. When the required field or control is absent from current evidence and scroll_y + viewport_height is less than scroll_height, scroll to reveal more content before operating any unrelated control. '
                     'When page_metrics.scroll_containers contains a container with remaining scroll range, return action="scroll" with that discovered selector and value="down" to reveal controls inside the panel. '
                     'When prior_actions already contains a scroll for a container that still has remaining scroll range, continue scrolling that container instead of guessing an unnamed icon control. Stop scrolling only when a blocking layer must be handled or a named current control or observable element directly represents the required target or expected value. '
@@ -104,6 +105,7 @@ class VisualStepReplanner:
                     'If actionable controls include blocking_layer=true, operate one of those blocking controls before interacting with background controls. '
                     'When an execution-scoped resource provides result_correlation, use it only for the transition that selects the visible result record; otherwise do not infer record ordering. '
                     'During record selection, score repeated record controls by how many non-empty result_correlation.match_values occur in each control container_text and select the unique highest-scoring record. When match_values are present, never fall back to first_visible. Only when match_values are absent and correlation explicitly permits first_visible may you select group_ordinal=0. After a detail view is visible, operate controls in that detail context and never reselect the result record for a later step. '
+                    'During record selection, do not assert or click a partial match when no current control contains every result_correlation.match_values entry. Continue searching by scrolling a discovered record-list container with remaining range; assert only after the selected-record state is visible. '
                     'Every click, double_click, right_click, hover, fill, press, and select action must include a non-empty selector string. '
                     'Every fill, press, and select action must include a non-empty value. '
                     'Use fill only when the selected actionable control has editable=true; use click, press, or select for readonly controls. '
@@ -172,6 +174,11 @@ class VisualStepReplanner:
             }
             for binding in bindings
         ]
+        assertion_check = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
+        if not assertion_check:
+            bindings = []
+            for action in actions:
+                action.pop('assertion_bindings', None)
         bindable_indexes = {
             index
             for index, assertion in enumerate(assertions, start=1)
@@ -207,6 +214,7 @@ class VisualStepReplanner:
             actionable_controls,
             evidence.get('execution_resources') or [],
             step_description,
+            evidence.get('page_metrics') or {},
         )
         self._validate_non_repeating_action(
             actions,
@@ -214,9 +222,6 @@ class VisualStepReplanner:
             actionable_controls,
         )
         self._validate_blocking_layer_action(actions, actionable_controls, bindings)
-        assertion_check = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
-        if bindings and not assertion_check:
-            raise GlobalPlanError('Planner Vision state-changing actions must not bind final assertions.')
         if assertion_check and {binding['assertion_index'] for binding in bindings} != bindable_indexes:
             raise GlobalPlanError(
                 'Planner Vision returned assert without complete locator bindings. If the required state is not currently visible, return one state-changing action using a current actionable selector instead of assert. If it is visible, return assert with every required DOM binding. '
@@ -338,6 +343,7 @@ class VisualStepReplanner:
         actionable_controls: list[dict[str, Any]],
         execution_resources: list[dict[str, Any]],
         step_description: str,
+        page_metrics: dict[str, Any] | None = None,
     ) -> None:
         original_intent = str(step_description or '').splitlines()[0].strip()
         if re.search(r'\bnavigat(?:e|ion)\b', original_intent, flags=re.IGNORECASE):
@@ -366,9 +372,24 @@ class VisualStepReplanner:
             score = sum(value in text for value in match_values)
             if selector and score > 0:
                 scored_controls.append((score, selector))
-        if not scored_controls:
-            return
-        max_score = max(score for score, _ in scored_controls)
+        max_score = max((score for score, _ in scored_controls), default=0)
+        required_score = len(set(match_values))
+        if max_score < required_score:
+            scroll_containers = (page_metrics or {}).get('scroll_containers') or []
+            searchable_containers = [
+                container
+                for container in scroll_containers
+                if isinstance(container, dict)
+                and str(container.get('selector') or '').strip()
+                and float(container.get('remaining') or 0) > 1
+            ]
+            if searchable_containers:
+                target = max(searchable_containers, key=lambda container: float(container.get('remaining') or 0))
+                actions[0] = {'action': 'scroll', 'selector': str(target['selector']), 'value': 'down'}
+                return
+            raise GlobalPlanError(
+                'Planner Vision cannot select or assert an uncorrelated or partially correlated record; no current control contains every result correlation value.'
+            )
         best_selectors = {selector for score, selector in scored_controls if score == max_score}
         if len(best_selectors) != 1:
             return
