@@ -102,6 +102,10 @@ frontend/.DS_Store
 frontend/*.log
 frontend/dist/
 
+# Local Chromium HEVC build artifacts are distributed outside Git.
+deploy/chromium-hevc/artifacts/*
+!deploy/chromium-hevc/artifacts/.gitkeep
+
 # reference:
 pyapitest/
 pyuitest/
