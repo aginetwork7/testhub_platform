@@ -25,6 +25,7 @@ class ObserverDefinition:
 class BrowserObservationContext:
     native_media_before: object = None
     visual_frames_before: tuple[dict[str, object], ...] = ()
+    canvas_frames_before: tuple[dict[str, object], ...] = ()
     download_events: tuple[dict[str, object], ...] = ()
 
 
@@ -109,6 +110,16 @@ class VisualFrameObserver:
         return artifacts
 
 
+class CanvasStreamObserver:
+    """Capture visible media-sized canvases used by WebRTC/WebGL players."""
+
+    async def collect(self, page: Any, assertions: Sequence[Mapping[str, object]], context: BrowserObservationContext) -> list[dict[str, object]]:
+        after = await capture_canvas_frames(page, assertions)
+        artifacts = [{'type': 'canvas_frame_before', **frame} for frame in context.canvas_frames_before]
+        artifacts.extend({'type': 'canvas_frame_after', **frame} for frame in after)
+        return artifacts
+
+
 class DownloadObserver:
     async def collect(self, page: Any, assertions: Sequence[Mapping[str, object]], context: BrowserObservationContext) -> list[dict[str, object]]:
         return [{'type': 'download_task_state', **event} for event in context.download_events]
@@ -117,6 +128,7 @@ class DownloadObserver:
 NATIVE_MEDIA_OBSERVER = NativeMediaObserver()
 DOM_STATE_OBSERVER = DOMStateObserver()
 VISUAL_FRAME_OBSERVER = VisualFrameObserver()
+CANVAS_STREAM_OBSERVER = CanvasStreamObserver()
 DOWNLOAD_OBSERVER = DownloadObserver()
 OBSERVERS: dict[str, tuple[ObserverDefinition, BrowserEvidenceObserver]] = {
     'native_media': (
@@ -134,6 +146,10 @@ OBSERVERS: dict[str, tuple[ObserverDefinition, BrowserEvidenceObserver]] = {
     'visual_frame': (
         ObserverDefinition('visual_frame', ('visual_frame_before', 'visual_frame_after'), ('visual_change',)),
         VISUAL_FRAME_OBSERVER,
+    ),
+    'canvas_stream': (
+        ObserverDefinition('canvas_stream', ('canvas_frame_before', 'canvas_frame_after'), ('stream_state',)),
+        CANVAS_STREAM_OBSERVER,
     ),
     'download': (
         ObserverDefinition('download', ('download_task_state',), ('download_task',)),
@@ -160,6 +176,31 @@ async def capture_visual_frames(page: Any, assertions: Sequence[Mapping[str, obj
         return []
     frame = await page.screenshot(type='png', full_page=False, timeout=10000)
     return [{'content_hash': hashlib.sha256(frame).hexdigest()}]
+
+
+async def capture_canvas_frames(page: Any, assertions: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    if not any(str(assertion.get('assert_kind') or '') == 'stream_state' for assertion in assertions):
+        return []
+    canvases = page.locator('canvas')
+    frames: list[dict[str, object]] = []
+    for index in range(await canvases.count()):
+        canvas = canvases.nth(index)
+        try:
+            if not await canvas.is_visible():
+                continue
+            box = await canvas.bounding_box()
+            if not box or box['width'] < 160 or box['height'] < 90:
+                continue
+            frame = await canvas.screenshot(type='png', timeout=5000)
+            frames.append({
+                'index': index,
+                'width': box['width'],
+                'height': box['height'],
+                'content_hash': hashlib.sha256(frame).hexdigest(),
+            })
+        except Exception:
+            continue
+    return frames
 
 
 def media_progress_seconds(before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]]) -> float | None:

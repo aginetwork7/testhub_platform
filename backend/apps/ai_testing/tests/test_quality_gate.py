@@ -55,6 +55,44 @@ class QualityGateTests(unittest.TestCase):
 
 
 class ResourceEvidenceQualityGateTests(TestCase):
+    def test_stream_state_uses_persisted_canvas_evidence(self) -> None:
+        record = AIExecutionRecord.objects.create(case_name='Canvas stream evidence')
+        persist_execution_plan(record.id, 'Verify live stream', [{
+            'id': 'verify-stream',
+            'description': 'Verify live stream',
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'stream_state',
+                'target': {'intent': 'live camera stream'},
+                'operator': 'equals',
+                'expected': {'minimum_advanced_seconds': 1},
+                'evidence_requirements': [
+                    'media_state_before',
+                    'media_state_after',
+                    'playback_time_progress',
+                ],
+            }],
+        }])
+        persist_step_attempt(
+            record.id,
+            1,
+            {'action': 'click'},
+            {},
+            'completed',
+            '',
+            'environment',
+            'permission',
+            [
+                {'type': 'media_state_before', 'elements': []},
+                {'type': 'media_state_after', 'elements': []},
+                {'type': 'playback_time_progress', 'advanced_seconds': 0},
+                {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'},
+                {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after'},
+            ],
+        )
+
+        self.assertEqual(evaluate_step_assertions(record.id, 1), ['passed'])
+
     def test_resource_evidence_assertions_pass_quality_gate(self) -> None:
         cases = (
             ('api_resource', {'resource_type': 'alert_event'}, {'value': 'event-123'}, ['api_response'], {'type': 'api_response', 'resource_id': 'event-123'}),

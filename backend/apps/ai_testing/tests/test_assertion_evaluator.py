@@ -295,3 +295,52 @@ class AssertionEvaluatorTests(unittest.TestCase):
         result = evaluate_assertion(assertion, [{'type': 'media_state_before', 'elements': []}, {'type': 'media_state_after', 'elements': []}])
 
         self.assertEqual(result.status, 'inconclusive')
+
+    def test_stream_state_accepts_changed_media_canvas_when_native_video_does_not_advance(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'stream_state', 'target': {'intent': 'live camera stream'}, 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 1}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'type': 'media_state_before', 'elements': [{'tag': 'video', 'paused': True, 'currentTime': 0}]},
+            {'type': 'media_state_after', 'elements': [{'tag': 'video', 'paused': True, 'currentTime': 0}]},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0},
+            {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'},
+            {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after'},
+        ])
+
+        self.assertEqual(result.status, 'passed')
+
+    def test_stream_state_rejects_static_media_canvas_without_native_progress(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'stream_state', 'target': {'intent': 'live camera stream'}, 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 1}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'type': 'media_state_before', 'elements': []},
+            {'type': 'media_state_after', 'elements': []},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0},
+            {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'same'},
+            {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'same'},
+        ])
+
+        self.assertEqual(result.status, 'failed')
+
+    def test_stream_state_accepts_changed_persisted_canvas_artifacts(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'stream_state', 'target': {'intent': 'live camera stream'}, 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 1}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'artifact_type': 'media_state_before', 'metadata': {'elements': []}},
+            {'artifact_type': 'media_state_after', 'metadata': {'elements': []}},
+            {'artifact_type': 'playback_time_progress', 'metadata': {'advanced_seconds': 0}},
+            {'artifact_type': 'canvas_frame_before', 'metadata': {'index': 0, 'content_hash': 'before'}},
+            {'artifact_type': 'canvas_frame_after', 'metadata': {'index': 0, 'content_hash': 'after'}},
+        ])
+
+        self.assertEqual(result.status, 'passed')
+        self.assertEqual(result.actual['changed_canvas_indexes'], [0])
+
+    def test_playback_does_not_accept_canvas_change_without_time_progress(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'playback', 'target': {'intent': 'recorded playback'}, 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 10}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'type': 'media_state_before', 'elements': []},
+            {'type': 'media_state_after', 'elements': []},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0},
+            {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'},
+            {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after'},
+        ])
+
+        self.assertEqual(result.status, 'failed')

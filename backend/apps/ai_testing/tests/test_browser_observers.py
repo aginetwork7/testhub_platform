@@ -22,6 +22,41 @@ class _MediaPage:
         return b'visual-frame'
 
 
+class _CanvasElement:
+    def __init__(self, frame: bytes) -> None:
+        self._frame = frame
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def bounding_box(self) -> dict[str, float]:
+        return {'x': 10, 'y': 20, 'width': 640, 'height': 360}
+
+    async def screenshot(self, **_kwargs) -> bytes:
+        return self._frame
+
+
+class _CanvasLocator:
+    def __init__(self, frames: list[bytes]) -> None:
+        self._frames = frames
+
+    async def count(self) -> int:
+        return len(self._frames)
+
+    def nth(self, index: int) -> _CanvasElement:
+        return _CanvasElement(self._frames[index])
+
+
+class _CanvasPage(_MediaPage):
+    def __init__(self, frames: list[bytes]) -> None:
+        self._frames = frames
+
+    def locator(self, selector: str):
+        if selector == 'canvas':
+            return _CanvasLocator(self._frames)
+        return _MediaLocator()
+
+
 class _FieldLocator:
     async def count(self):
         return 1
@@ -59,6 +94,16 @@ class BrowserObserverTests(unittest.TestCase):
 
         self.assertIn({'type': 'media_event', 'name': 'playing'}, artifacts)
         self.assertIn({'type': 'playback_time_progress', 'advanced_seconds': 3.0}, artifacts)
+
+    def test_stream_observer_records_visible_canvas_frames(self) -> None:
+        artifacts = asyncio.run(collect_browser_observations(
+            _CanvasPage([b'live-frame']),
+            [{'assert_kind': 'stream_state'}],
+            BrowserObservationContext(canvas_frames_before=({'index': 0, 'content_hash': 'before'},)),
+        ))
+
+        self.assertIn({'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'}, artifacts)
+        self.assertIn('canvas_frame_after', {artifact['type'] for artifact in artifacts})
 
     def test_visual_frame_capture_returns_content_hash_only_for_visual_assertions(self) -> None:
         frames = asyncio.run(capture_visual_frames(_MediaPage(), [{'assert_kind': 'visual_change'}]))

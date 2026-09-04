@@ -211,8 +211,9 @@ class PyUICompatAgent:
 
                     started_at = time.perf_counter()
                     media_state_before = await self._capture_media_state(page)
-                    from apps.ai_testing.execution.browser_observers import capture_visual_frames
+                    from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
                     visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
+                    canvas_frames_before = await capture_canvas_frames(page, step.get('assertions') or [])
                     status = 'completed'
                     error_message = None
                     last_executed_action = step.get('action')
@@ -364,6 +365,7 @@ class PyUICompatAgent:
                         page,
                         media_state_before,
                         visual_frames_before,
+                        canvas_frames_before,
                     )
                     assertion_statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
                     required_statuses = self._required_assertion_statuses(step, assertion_statuses)
@@ -1231,6 +1233,7 @@ class PyUICompatAgent:
         page,
         media_state_before,
         visual_frames_before=None,
+        canvas_frames_before=None,
     ):
         if self.execution_record_id is None:
             return []
@@ -1266,6 +1269,7 @@ class PyUICompatAgent:
                 BrowserObservationContext(
                     native_media_before=media_state_before,
                     visual_frames_before=tuple(visual_frames_before or []),
+                    canvas_frames_before=tuple(canvas_frames_before or []),
                     download_events=tuple(self._recent_download_events),
                 ),
             ))
@@ -1427,8 +1431,9 @@ class PyUICompatAgent:
                 {'type': 'log', 'content': f'[planner_v2] Step {step_index}: replanning after assertion failure ({attempt}/{replan_limit}).\n'},
             )
             media_state_before = await self._capture_media_state(page)
-            from apps.ai_testing.execution.browser_observers import capture_visual_frames
+            from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
             visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
+            canvas_frames_before = await capture_canvas_frames(page, step.get('assertions') or [])
             try:
                 await self._execute_ai_actions(
                     page, step, replan_actions, step_index, step_callback, timeout_error, history=history,
@@ -1444,6 +1449,7 @@ class PyUICompatAgent:
             persisted_attempt = await self._persist_step_attempt(
                 step_index, step, replan_actions[-1] if replan_actions else {}, action_status,
                 error_message, None, screenshot_path, page, media_state_before, visual_frames_before,
+                canvas_frames_before,
             )
             statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
             required_statuses = self._required_assertion_statuses(step, statuses)

@@ -74,10 +74,13 @@ def _evaluate_assertion(
     except AssertionContractError as error:
         return 'invalid_evidence', {'reason': str(error)}, set()
 
+    evidence_types = set(assertion.evidence_requirements)
+    if assertion.assert_kind == 'stream_state':
+        evidence_types.update({'canvas_frame_before', 'canvas_frame_after'})
     matching_evidence = [
         artifact
         for artifact in evidence
-        if artifact.artifact_type in assertion.evidence_requirements
+        if artifact.artifact_type in evidence_types
     ]
     if assertion.evidence_max_age_ms is not None:
         now = timezone.now()

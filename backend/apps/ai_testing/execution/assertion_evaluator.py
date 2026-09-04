@@ -217,9 +217,42 @@ def _evaluate_playback_progress(
     except (TypeError, ValueError):
         return AssertionEvaluation('inconclusive', {}, 'Playback progress evidence is not numeric.')
     after_is_playing = any(isinstance(item, Mapping) and not item.get('paused', True) for item in after)
-    passed = advanced_seconds >= minimum and after_is_playing
+    native_playback_passed = advanced_seconds >= minimum and after_is_playing
+    changed_canvas_indexes = _changed_canvas_indexes(artifacts_by_type) if assertion.assert_kind == 'stream_state' else []
+    passed = native_playback_passed or bool(changed_canvas_indexes)
     return AssertionEvaluation(
         'passed' if passed else 'failed',
-        {'advanced_seconds': advanced_seconds, 'after_is_playing': after_is_playing},
-        'Playback state advanced.' if passed else 'Playback did not advance in an active media element.',
+        {
+            'advanced_seconds': advanced_seconds,
+            'after_is_playing': after_is_playing,
+            'changed_canvas_indexes': changed_canvas_indexes,
+        },
+        'Playback state advanced.' if native_playback_passed else
+        'Visible media canvas frames changed.' if changed_canvas_indexes else
+        'Playback did not advance in an active media element.',
     )
+
+
+def _changed_canvas_indexes(
+    artifacts_by_type: Mapping[str, list[Mapping[str, Any]]],
+) -> list[int]:
+    before_frames = {
+        _artifact_metadata(frame).get('index'): _artifact_metadata(frame).get('content_hash')
+        for frame in artifacts_by_type.get('canvas_frame_before', [])
+        if _artifact_metadata(frame).get('index') is not None
+        and _artifact_metadata(frame).get('content_hash')
+    }
+    changed: list[int] = []
+    for frame in artifacts_by_type.get('canvas_frame_after', []):
+        metadata = _artifact_metadata(frame)
+        index = metadata.get('index')
+        before_hash = before_frames.get(index)
+        after_hash = metadata.get('content_hash')
+        if isinstance(index, int) and before_hash and after_hash and before_hash != after_hash:
+            changed.append(index)
+    return changed
+
+
+def _artifact_metadata(artifact: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = artifact.get('metadata')
+    return metadata if isinstance(metadata, Mapping) else artifact
