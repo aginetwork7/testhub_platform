@@ -2,17 +2,36 @@ FROM python:3.12-slim
 
 ARG TORCH_INDEX_URL=""
 ARG TORCH_PACKAGES=""
+ARG TARGETARCH
+ARG HEVC_CHROMIUM_VERSION="151.0.7922.173-1~deb13u1+hevc1"
+
+ENV PLAYWRIGHT_CHROMIUM_PATH=/usr/lib/chromium/chromium
 
 WORKDIR /app
 
+COPY deploy/chromium-hevc/artifacts/ /tmp/chromium-hevc/
+
 # 安装系统级依赖 (MySQL驱动编译依赖 + Playwright依赖)
-# chromium：Debian 系统版自带 H.264/H.265 编解码器（经 system ffmpeg），
-# 用于解码摄像头实时视频流；Playwright 自带的开源 Chromium 不含专有编解码器，
-# 直播流会一直卡在 Loading 无法播放。
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential default-libmysqlclient-dev git curl netcat-openbsd \
-    android-tools-adb chromium \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    test "$TARGETARCH" = "arm64"; \
+    cd /tmp/chromium-hevc; \
+    sha256sum -c SHA256SUMS; \
+    for package_name in chromium chromium-common chromium-sandbox; do \
+        package_path="${package_name}_${HEVC_CHROMIUM_VERSION}_arm64.deb"; \
+        test "$(dpkg-deb -f "$package_path" Package)" = "$package_name"; \
+        test "$(dpkg-deb -f "$package_path" Version)" = "$HEVC_CHROMIUM_VERSION"; \
+        test "$(dpkg-deb -f "$package_path" Architecture)" = "arm64"; \
+    done; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential default-libmysqlclient-dev git curl netcat-openbsd \
+        android-tools-adb ffmpeg \
+        "./chromium-common_${HEVC_CHROMIUM_VERSION}_arm64.deb" \
+        "./chromium-sandbox_${HEVC_CHROMIUM_VERSION}_arm64.deb" \
+        "./chromium_${HEVC_CHROMIUM_VERSION}_arm64.deb"; \
+    test -x /usr/lib/chromium/chromium; \
+    /usr/lib/chromium/chromium --version | grep -F "Chromium 151.0.7922.173"; \
+    rm -rf /tmp/chromium-hevc /var/lib/apt/lists/*
 
 # 安装 Python 依赖（清华镜像加速，官方 PyPI 兜底）
 # cache mount 让 pip 缓存跨构建持久化，网络断连重试时已下载的包直接从缓存读取
