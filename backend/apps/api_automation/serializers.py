@@ -1,17 +1,11 @@
 from rest_framework import serializers
-from urllib.parse import urlparse
-import base64
 import json
 from pathlib import Path
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
 
 from .models import (
     ApiAutomationCase,
     ApiAutomationCoverageSnapshot,
     ApiAutomationCaseResult,
-    ApiAutomationConfiguration,
     ApiAutomationEndpoint,
     ApiAutomationNotificationLog,
     ApiAutomationProject,
@@ -130,73 +124,6 @@ class ApiAutomationNotificationLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = ApiAutomationNotificationLog
         fields = '__all__'
-
-
-class ApiAutomationConfigurationSerializer(serializers.ModelSerializer):
-    websocket_url = serializers.CharField(allow_blank=True, required=False)
-    main_device_key = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=True)
-    backup_device_key = serializers.CharField(write_only=True, required=False, allow_blank=True, trim_whitespace=True)
-    has_main_device_key = serializers.SerializerMethodField(read_only=True)
-    has_backup_device_key = serializers.SerializerMethodField(read_only=True)
-
-    def validate_websocket_url(self, value):
-        if not value:
-            return value
-        parsed = urlparse(value)
-        if parsed.scheme not in {'ws', 'wss', 'http', 'https'} or not parsed.netloc:
-            raise serializers.ValidationError('请输入合法的 HTTP、HTTPS、WebSocket 或 Secure WebSocket 地址。')
-        return value
-
-    def validate_main_device_key(self, value):
-        return self._validate_device_key(value)
-
-    def validate_backup_device_key(self, value):
-        return self._validate_device_key(value)
-
-    @staticmethod
-    def _validate_device_key(value):
-        if not value:
-            return value
-        try:
-            key_bytes = base64.b64decode(value, validate=True)
-            serialization.load_pem_private_key(key_bytes, password=None, backend=default_backend())
-        except (TypeError, ValueError) as error:
-            raise serializers.ValidationError('设备私钥必须是有效的 Base64 编码 PEM 私钥。') from error
-        return value
-
-    def get_has_main_device_key(self, instance):
-        return bool(instance.get_event_device_key('main'))
-
-    def get_has_backup_device_key(self, instance):
-        return bool(instance.get_event_device_key('backup'))
-
-    def validate(self, attrs):
-        if 'project' in self.initial_data:
-            raise serializers.ValidationError({'project': '环境配置全局生效，不能关联项目。'})
-        return attrs
-
-    def create(self, validated_data):
-        main_device_key = validated_data.pop('main_device_key', None)
-        backup_device_key = validated_data.pop('backup_device_key', None)
-        instance = super().create(validated_data)
-        if main_device_key or backup_device_key:
-            instance.set_event_device_keys(main_device_key, backup_device_key)
-            instance.save(update_fields=['event_device_keys_encrypted'])
-        return instance
-
-    def update(self, instance, validated_data):
-        main_device_key = validated_data.pop('main_device_key', None)
-        backup_device_key = validated_data.pop('backup_device_key', None)
-        instance = super().update(instance, validated_data)
-        if main_device_key or backup_device_key:
-            instance.set_event_device_keys(main_device_key, backup_device_key)
-            instance.save(update_fields=['event_device_keys_encrypted'])
-        return instance
-
-    class Meta:
-        model = ApiAutomationConfiguration
-        exclude = ['event_device_keys_encrypted']
-        read_only_fields = ['created_by', 'project']
 
 
 class ApiAutomationCaseResultSerializer(serializers.ModelSerializer):

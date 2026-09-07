@@ -1,3 +1,4 @@
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -5,7 +6,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
 from apps.ai_testing.models import AIExecutionRecord, AiProject
-from apps.api_automation.models import ApiAutomationConfiguration
+from apps.core.models import EnvironmentConfiguration
 from apps.ai_testing.ai_testing import BrowserAgent, HermesAgent, PyUICompatAgent, get_agent_class
 from apps.unified_projects.models import MetaProject
 from apps.users.models import User
@@ -14,7 +15,7 @@ from apps.ai_testing.views import (
     build_step_thinking,
     normalize_planner_artifact_path,
     normalize_step_thinking,
-    resolve_api_automation_configuration_from_task,
+    resolve_environment_configuration_from_task,
 )
 
 
@@ -175,18 +176,23 @@ class AIAgentRoutingTests(SimpleTestCase):
 
 
 class AIExecutionRecordViewSetQuerysetTests(TestCase):
+    def test_run_adhoc_passes_execution_record_to_runtime(self) -> None:
+        source = inspect.getsource(AIExecutionRecordViewSet.run_adhoc)
+
+        self.assertIn('execution_record_id=execution_record.id', source)
+
     def test_resolve_environment_uses_longest_natural_language_alias(self) -> None:
         user = User.objects.create_user(username='planner_owner', password='pass123')
-        test_configuration = ApiAutomationConfiguration.objects.create(
+        test_configuration = EnvironmentConfiguration.objects.create(
             name='test 环境',
             environment='test',
         )
-        test_two_configuration = ApiAutomationConfiguration.objects.create(
+        test_two_configuration = EnvironmentConfiguration.objects.create(
             name='test-2 环境',
             environment='test-2',
         )
 
-        resolved = resolve_api_automation_configuration_from_task(
+        resolved = resolve_environment_configuration_from_task(
             '在 test-2 环境连接设备 nvr_5003 并检查 manager 进程',
             user,
         )
@@ -196,13 +202,13 @@ class AIExecutionRecordViewSetQuerysetTests(TestCase):
 
     def test_resolve_environment_uses_default_when_task_has_no_environment(self) -> None:
         user = User.objects.create_user(username='default_env_owner', password='pass123')
-        default_configuration = ApiAutomationConfiguration.objects.create(
+        default_configuration = EnvironmentConfiguration.objects.create(
             name='test-2 环境',
             environment='test-2',
             is_default=True,
         )
 
-        resolved = resolve_api_automation_configuration_from_task(
+        resolved = resolve_environment_configuration_from_task(
             '连接 nvr_5003 并确认 manager 进程存在',
             user,
         )

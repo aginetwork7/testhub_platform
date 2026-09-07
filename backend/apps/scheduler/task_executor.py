@@ -354,7 +354,8 @@ def execute_api_test_suite(*args, **kwargs):
 def execute_api_automation_suite(*args, **kwargs):
     """执行 TestHub 已迁移的 API 自动化测试用例。"""
     from apps.api_automation.executor import execute_run
-    from apps.api_automation.models import ApiAutomationConfiguration, ApiAutomationProject, ApiAutomationRun
+    from apps.api_automation.models import ApiAutomationProject, ApiAutomationRun
+    from apps.core.models import EnvironmentConfiguration
     from apps.scheduler.models import ScheduleConfig
 
     schedule_id = kwargs.get('schedule_id') or (args[0] if args else None)
@@ -369,7 +370,7 @@ def execute_api_automation_suite(*args, **kwargs):
     configuration = None
     configuration_id = task_config.get('configuration_id')
     if configuration_id:
-        configuration = ApiAutomationConfiguration.objects.get(id=configuration_id)
+        configuration = EnvironmentConfiguration.objects.get(id=configuration_id)
 
     run = ApiAutomationRun.objects.create(
         project=project,

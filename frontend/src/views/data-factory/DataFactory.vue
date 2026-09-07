@@ -1041,7 +1041,7 @@ import {
   Phone, Message, Location, Ticket, OfficeBuilding, CreditCard, CircleCheck, DocumentCopy, Search, Delete, Edit, Unlock, DataLine as DataLineIcon, Sort, Share, View, Upload
 } from '@element-plus/icons-vue'
 import api from '@/utils/api'
-import { getAutomationConfigurations } from '@/api/api-automation'
+import { getEnvironmentConfigurations } from '@/api/environment-configurations'
 import { debounce } from 'lodash-es'
 
 // 缓存工具
@@ -1266,7 +1266,7 @@ const fetchCategories = async () => {
 
 const loadEventEnvironments = async () => {
   try {
-    const response = await getAutomationConfigurations()
+    const response = await getEnvironmentConfigurations()
     eventEnvironments.value = response.data.results || response.data
   } catch (error) {
     ElMessage.error('加载事件运行环境失败')

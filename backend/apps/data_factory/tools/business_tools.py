@@ -312,7 +312,6 @@ class BusinessTools:
         if response.status_code != 204:
             raise ValueError(f'素材上传失败: {media_path.name}，状态码 {response.status_code}。')
 
-
     @staticmethod
     def _template(alert_type: AlertType) -> dict[str, Any]:
         object_info: dict[str, Any] = {

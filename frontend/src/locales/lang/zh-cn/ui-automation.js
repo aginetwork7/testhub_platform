@@ -123,6 +123,7 @@ export default {
     running: '执行中',
     passed: '通过',
     failed: '失败',
+    inconclusive: '证据不足',
     error: '错误',
     stopped: '已停止',
     aborted: '已中止',

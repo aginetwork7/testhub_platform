@@ -259,7 +259,7 @@ const routes = [
       },
       {
         path: 'configurations',
-        redirect: '/configuration/env-setting'
+        redirect: '/configuration/environments'
       },
       {
         path: 'scheduled-tasks',
@@ -499,10 +499,9 @@ const routes = [
             component: () => import('@/views/configuration/UIEnvironmentConfig.vue')
           },
           {
-            path: 'env-setting',
-            name: 'ConfigEnvironmentSetting',
-            component: ApiAutomationWorkspace,
-            props: { mode: 'configurations' }
+            path: 'environments',
+            name: 'ConfigGlobalEnvironment',
+            component: () => import('@/views/configuration/EnvironmentConfiguration.vue')
           },
           {
             path: 'app-setting',

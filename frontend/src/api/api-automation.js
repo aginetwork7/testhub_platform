@@ -55,31 +55,31 @@ export function startAutomationRun(data) {
 }
 
 export function getAutomationConfigurations(params) {
-  return request({ url: `${baseUrl}/configurations/`, method: 'get', params })
+  return request({ url: '/core/environment-configurations/', method: 'get', params })
 }
 
 export function getAutomationConfigurationTemplate() {
-  return request({ url: `${baseUrl}/configurations/template/`, method: 'get' })
+  return Promise.resolve({ data: {} })
 }
 
 export function initializeAutomationConfiguration(data) {
-  return request({ url: `${baseUrl}/configurations/initialize/`, method: 'post', data })
+  return request({ url: '/core/environment-configurations/initialize/', method: 'post', data })
 }
 
 export function createAutomationConfiguration(data) {
-  return request({ url: `${baseUrl}/configurations/`, method: 'post', data })
+  return request({ url: '/core/environment-configurations/', method: 'post', data })
 }
 
 export function updateAutomationConfiguration(id, data) {
-  return request({ url: `${baseUrl}/configurations/${id}/`, method: 'patch', data })
+  return request({ url: `/core/environment-configurations/${id}/`, method: 'patch', data })
 }
 
 export function deleteAutomationConfiguration(id) {
-  return request({ url: `${baseUrl}/configurations/${id}/`, method: 'delete' })
+  return request({ url: `/core/environment-configurations/${id}/`, method: 'delete' })
 }
 
 export function setAutomationDefaultConfiguration(id) {
-  return request({ url: `${baseUrl}/configurations/${id}/set_default/`, method: 'post' })
+  return request({ url: `/core/environment-configurations/${id}/set_default/`, method: 'post' })
 }
 
 export function getAutomationSchedules(params) {

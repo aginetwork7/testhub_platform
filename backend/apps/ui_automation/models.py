@@ -751,9 +751,9 @@ class RecordingSession(models.Model):
         verbose_name_plural = 'UI录制会话'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['project', '-created_at']),
-            models.Index(fields=['started_by', '-created_at']),
-            models.Index(fields=['status']),
+            models.Index(fields=['project', '-created_at'], name='ui_automat_project_367689_idx'),
+            models.Index(fields=['started_by', '-created_at'], name='ui_automat_started_6f4031_idx'),
+            models.Index(fields=['status'], name='ui_automat_status_8d84ca_idx'),
         ]
 
     def __str__(self):

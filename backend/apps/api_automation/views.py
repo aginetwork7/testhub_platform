@@ -10,19 +10,17 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db.models import Q
 from django.utils import timezone
-import yaml
 from django_q.tasks import async_task
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import (
     ApiAutomationCase,
     ApiAutomationCoverageSnapshot,
-    ApiAutomationConfiguration,
     ApiAutomationEndpoint,
     ApiAutomationNotificationLog,
     ApiAutomationProject,
@@ -49,7 +47,6 @@ from .swagger_sync import (
 from .serializers import (
     ApiAutomationCaseSerializer,
     ApiAutomationCaseListSerializer,
-    ApiAutomationConfigurationSerializer,
     ApiAutomationCoverageSnapshotSerializer,
     ApiAutomationEndpointSerializer,
     ApiAutomationNotificationLogSerializer,
@@ -57,8 +54,7 @@ from .serializers import (
     ApiAutomationRunSerializer,
     ApiAutomationSuiteSerializer,
 )
-from .device_cli_serializers import DeviceCliExecuteSerializer
-from .device_cli_skill import DeviceCliSkill, DeviceCliSkillError
+from apps.core.models import EnvironmentConfiguration
 
 
 class ProjectAccessMixin:
@@ -265,79 +261,6 @@ class ApiAutomationCoverageViewSet(ProjectAccessMixin, viewsets.ViewSet):
         })
 
 
-class ApiAutomationConfigurationViewSet(viewsets.ModelViewSet):
-    serializer_class = ApiAutomationConfigurationSerializer
-    permission_classes = [IsAdminUser]
-    filterset_fields = ['is_default']
-
-    def get_queryset(self):
-        return ApiAutomationConfiguration.objects.all()
-
-    def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
-
-    @action(detail=True, methods=['post'])
-    def set_default(self, request, pk=None):
-        configuration = self.get_object()
-        ApiAutomationConfiguration.objects.exclude(id=configuration.id).update(is_default=False)
-        configuration.is_default = True
-        configuration.save(update_fields=['is_default'])
-        return Response(ApiAutomationConfigurationSerializer(configuration).data)
-
-    @action(detail=True, methods=['post'], url_path='device-cli')
-    def execute_device_cli(self, request, pk=None):
-        configuration = self.get_object()
-        serializer = DeviceCliExecuteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            result = DeviceCliSkill().execute(configuration, **serializer.validated_data)
-        except DeviceCliSkillError as error:
-            return Response({'error': str(error)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(result)
-
-    def _load_template(self):
-        template_path = Path(__file__).resolve().parent / 'test_assets' / 'config' / 'config.template.yaml'
-        return yaml.safe_load(template_path.read_text(encoding='utf-8')) or {}
-
-    @action(detail=False, methods=['get'])
-    def template(self, request):
-        try:
-            template = self._load_template()
-        except (OSError, yaml.YAMLError) as error:
-            return Response({'error': f'读取测试配置模板失败: {error}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(template)
-
-    @action(detail=False, methods=['post'])
-    def initialize(self, request):
-        try:
-            template = self._load_template()
-        except (OSError, yaml.YAMLError) as error:
-            return Response({'error': f'读取测试配置模板失败: {error}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        ApiAutomationConfiguration.objects.update(is_default=False)
-        configuration, created = ApiAutomationConfiguration.objects.update_or_create(
-            name='默认测试环境',
-            defaults={
-                'base_url': template.get('api', {}).get('base_url', ''),
-                'websocket_url': template.get('websocket', {}).get('url', ''),
-                'variables': {
-                    'data_endpoints': {},
-                    'model_images': {},
-                    'default_role': 'dealer',
-                },
-                'auth_profiles': template.get('auth', {}).get('users', {}),
-                'payment_config': template.get('payment', {}),
-                'model_profiles': template.get('models', {}),
-                'runtime_settings': template,
-                'timeout_seconds': template.get('api', {}).get('timeout', 30),
-                'max_workers': template.get('test', {}).get('max_workers', 1),
-                'is_default': True,
-                'created_by': request.user,
-            },
-        )
-        response_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
-        return Response(ApiAutomationConfigurationSerializer(configuration).data, status=response_status)
-
-
 class ApiAutomationRunViewSet(ProjectAccessMixin, viewsets.ModelViewSet):
     serializer_class = ApiAutomationRunSerializer
     permission_classes = [IsAuthenticated]
@@ -405,7 +328,7 @@ class ApiAutomationRunViewSet(ProjectAccessMixin, viewsets.ModelViewSet):
 
         configuration = None
         if configuration_id:
-            configuration = ApiAutomationConfiguration.objects.filter(
+            configuration = EnvironmentConfiguration.objects.filter(
                 id=configuration_id,
             ).first()
             if configuration is None:

@@ -4,11 +4,20 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 from django.conf import settings
 from django.test import SimpleTestCase, override_settings
 
+from apps.ai_testing.execution.browser_observers import collect_browser_observations
+from apps.ai_testing.execution.mcp_tools import (
+    BrowserMCPToolAdapter,
+    MCPInProcessClient,
+    MCPInProcessTransport,
+    MCPJsonRpcDispatcher,
+)
+from apps.ai_testing.execution.page_observation import capture_accessibility_snapshot
 from apps.ai_testing.runtime.pyui_compat import PyUICompatAgent
 from apps.ai_testing.runtime.pyui_compat.runner import PyUICompatHistory
 from apps.requirement_analysis.models import AIModelService
@@ -19,6 +28,127 @@ class HistoryStub:
     cache_stats: dict = field(default_factory=lambda: {'hit': 0, 'miss': 1, 'model_retries': 0, 'model_attempts': 0})
     planner_trace: dict = field(default_factory=lambda: {'step_retry_map': {}})
     artifacts: list = field(default_factory=list)
+
+
+class BrowserMCPToolAdapterTests(SimpleTestCase):
+    def test_list_tools_scopes_actions_to_capabilities(self) -> None:
+        adapter = BrowserMCPToolAdapter(['browser.inspect'], AsyncMock())
+
+        tools = adapter.list_tools()
+
+        action_schema = tools[0]['inputSchema']['properties']['instruction']['properties']['action']
+        self.assertEqual(tools[0]['name'], 'browser.act')
+        self.assertEqual(action_schema['enum'], ['assert'])
+
+    def test_call_tool_routes_validated_instruction_to_handler(self) -> None:
+        handler = AsyncMock(return_value={'clicked': True})
+        adapter = BrowserMCPToolAdapter(['browser.act'], handler)
+
+        result = asyncio.run(adapter.call_tool(
+            'browser.act',
+            {'instruction': {'action': 'click', 'selector': '#submit'}},
+        ))
+
+        handler.assert_awaited_once_with({'action': 'click', 'selector': '#submit'})
+        self.assertEqual(result['structuredContent'], {'clicked': True})
+        self.assertFalse(result['isError'])
+
+    def test_call_tool_rejects_action_outside_capabilities(self) -> None:
+        adapter = BrowserMCPToolAdapter(['browser.inspect'], AsyncMock())
+
+        with self.assertRaises(ValueError):
+            asyncio.run(adapter.call_tool(
+                'browser.act',
+                {'instruction': {'action': 'click', 'selector': '#submit'}},
+            ))
+
+    def test_call_tool_captures_observation_without_arguments(self) -> None:
+        handler = AsyncMock(return_value={'url': 'https://example.test', 'blocking_state': {'is_blocked': False}})
+        adapter = BrowserMCPToolAdapter([], observation_handler=handler)
+
+        tools = adapter.list_tools()
+        result = asyncio.run(adapter.call_tool('browser.observe', {}))
+
+        self.assertEqual([tool['name'] for tool in tools], ['browser.observe'])
+        handler.assert_awaited_once_with()
+        self.assertEqual(result['structuredContent']['url'], 'https://example.test')
+
+    def test_resolves_capabilities_from_current_session_step(self) -> None:
+        current_capabilities = ['browser.inspect']
+        adapter = BrowserMCPToolAdapter(lambda: current_capabilities, AsyncMock())
+
+        inspect_actions = adapter.list_tools()[0]['inputSchema']['properties']['instruction']['properties']['action']['enum']
+        current_capabilities = ['browser.act']
+        act_actions = adapter.list_tools()[0]['inputSchema']['properties']['instruction']['properties']['action']['enum']
+
+        self.assertEqual(inspect_actions, ['assert'])
+        self.assertIn('click', act_actions)
+
+
+class MCPJsonRpcDispatcherTests(SimpleTestCase):
+    def test_dispatches_initialize_and_tool_requests(self) -> None:
+        handler = AsyncMock(return_value={'url': 'https://example.test'})
+        dispatcher = MCPJsonRpcDispatcher(
+            BrowserMCPToolAdapter([], observation_handler=handler),
+        )
+
+        initialize_result = asyncio.run(dispatcher.dispatch({
+            'jsonrpc': '2.0',
+            'id': 1,
+            'method': 'initialize',
+            'params': {'protocolVersion': '2025-06-18'},
+        }))
+        asyncio.run(dispatcher.dispatch({
+            'jsonrpc': '2.0',
+            'method': 'notifications/initialized',
+        }))
+        list_result = asyncio.run(dispatcher.dispatch({
+            'jsonrpc': '2.0',
+            'id': 2,
+            'method': 'tools/list',
+        }))
+        call_result = asyncio.run(dispatcher.dispatch({
+            'jsonrpc': '2.0',
+            'id': 3,
+            'method': 'tools/call',
+            'params': {'name': 'browser.observe', 'arguments': {}},
+        }))
+
+        self.assertEqual(initialize_result['result']['protocolVersion'], '2025-06-18')
+        self.assertEqual(list_result['result']['tools'][0]['name'], 'browser.observe')
+        self.assertEqual(call_result['result']['structuredContent']['url'], 'https://example.test')
+        handler.assert_awaited_once_with()
+
+    def test_returns_json_rpc_errors_for_invalid_requests(self) -> None:
+        dispatcher = MCPJsonRpcDispatcher(BrowserMCPToolAdapter([]))
+
+        invalid_request = asyncio.run(dispatcher.dispatch({'jsonrpc': '1.0', 'id': 1, 'method': 'tools/list'}))
+        unknown_method = asyncio.run(dispatcher.dispatch({'jsonrpc': '2.0', 'id': 2, 'method': 'missing'}))
+
+        self.assertEqual(invalid_request['error']['code'], -32600)
+        self.assertEqual(unknown_method['error']['code'], -32601)
+
+    def test_rejects_tool_requests_before_initialization(self) -> None:
+        dispatcher = MCPJsonRpcDispatcher(BrowserMCPToolAdapter([]))
+
+        response = asyncio.run(dispatcher.dispatch({
+            'jsonrpc': '2.0',
+            'id': 1,
+            'method': 'tools/list',
+        }))
+
+        self.assertEqual(response['error']['code'], -32002)
+
+    def test_in_process_client_initializes_before_calling_tool(self) -> None:
+        handler = AsyncMock(return_value={'url': 'https://example.test'})
+        client = MCPInProcessClient(MCPInProcessTransport(MCPJsonRpcDispatcher(
+            BrowserMCPToolAdapter([], observation_handler=handler),
+        )))
+
+        result = asyncio.run(client.call_tool('browser.observe', {}))
+
+        self.assertEqual(result['structuredContent']['url'], 'https://example.test')
+        handler.assert_awaited_once_with()
 
 
 class _LocatorCountStub:
@@ -62,6 +192,16 @@ class _LocatorVisibilityStub:
         return self._items[index]
 
 
+class _RoleLocatorPageStub:
+    def __init__(self, visibility: list[bool]) -> None:
+        self.locator_result = _LocatorVisibilityStub(visibility)
+        self.call = None
+
+    def get_by_role(self, role: str, name: str, exact: bool):
+        self.call = (role, name, exact)
+        return self.locator_result
+
+
 class _VisibleResolveLocatorPageStub:
     def __init__(self):
         self.css_locator = _LocatorVisibilityStub([False, True])
@@ -83,6 +223,30 @@ class _TextLocatorStub:
         return self._text
 
 
+class _AssertionEvidenceLocatorStub:
+    def __init__(self, text: str, count: int = 1):
+        self._text = text
+        self._count = count
+        self.first = self
+
+    async def count(self) -> int:
+        return self._count
+
+    async def is_visible(self) -> bool:
+        return self._count > 0
+
+    async def text_content(self, timeout: int = 0) -> str:
+        return self._text
+
+
+class _AssertionEvidencePageStub:
+    def __init__(self, locator: _AssertionEvidenceLocatorStub):
+        self._locator = locator
+
+    def locator(self, _selector: str) -> _AssertionEvidenceLocatorStub:
+        return self._locator
+
+
 class _TextPageStub:
     def __init__(self, text: str):
         self._locator = _TextLocatorStub(text)
@@ -93,6 +257,117 @@ class _TextPageStub:
 
     async def wait_for_timeout(self, timeout: int) -> None:
         self.waited_ms = timeout
+
+
+class _DownloadWaitPageStub:
+    def __init__(self, agent: PyUICompatAgent) -> None:
+        self._agent = agent
+        self.wait_count = 0
+
+    async def wait_for_timeout(self, _timeout: int) -> None:
+        self.wait_count += 1
+        self._agent._recent_download_events.append({'status': 'completed', 'filename': 'new.zip'})
+
+
+class _CollectionWaitPageStub:
+    def __init__(self) -> None:
+        self.load_state_call: tuple[str, int] | None = None
+        self.waited_ms: int | None = None
+
+    async def wait_for_load_state(self, state: str, timeout: int) -> None:
+        self.load_state_call = (state, timeout)
+        raise TimeoutError('network did not become idle')
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        self.waited_ms = timeout
+
+
+class _PlaybackWaitPageStub:
+    def __init__(self) -> None:
+        self.waited_ms: list[int] = []
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        self.waited_ms.append(timeout)
+
+
+class _NoHoverLocatorStub:
+    async def evaluate_all(self, _script):
+        return [{
+            'selector': '#download',
+            'name': '',
+            'described_by': 'download-tooltip',
+        }]
+
+    async def hover(self, timeout: int) -> None:
+        raise AssertionError(f'unexpected hover with timeout={timeout}')
+
+
+class _ExistingTooltipPageStub:
+    async def evaluate(self, _script, *_args):
+        return 'Download'
+
+    def locator(self, _selector: str) -> _NoHoverLocatorStub:
+        return _NoHoverLocatorStub()
+
+
+class _AccessibilitySessionStub:
+    def __init__(self) -> None:
+        self.detached = False
+
+    async def send(self, method: str) -> dict:
+        if method == 'Page.getFrameTree':
+            return {'frameTree': {'frame': {'loaderId': 'page-v1'}}}
+        return {'nodes': [
+            {
+                'nodeId': 'root',
+                'role': {'value': 'RootWebArea'},
+                'name': {'value': 'Dashboard'},
+                'childIds': ['button-ax'],
+            },
+            {
+                'nodeId': 'ignored',
+                'ignored': True,
+                'role': {'value': 'generic'},
+            },
+            {
+                'nodeId': 'button-ax',
+                'backendDOMNodeId': 42,
+                'role': {'value': 'button'},
+                'name': {'value': 'Settings'},
+                'description': {'value': 'Open application settings'},
+                'properties': [
+                    {'name': 'expanded', 'value': {'value': False}},
+                    {'name': 'disabled', 'value': {'value': False}},
+                ],
+            },
+        ]}
+
+    async def detach(self) -> None:
+        self.detached = True
+
+
+class _AccessibilityPageStub:
+    def __init__(self) -> None:
+        self.session = _AccessibilitySessionStub()
+        self.context = self
+
+    async def new_cdp_session(self, _page) -> _AccessibilitySessionStub:
+        return self.session
+
+
+class _AccessibilityUnsupportedPageStub:
+    context = None
+
+
+class _DashboardPageStub:
+    def __init__(self) -> None:
+        self.wait_for_url_call: tuple[str, str, int] | None = None
+
+    async def wait_for_url(self, url: str, wait_until: str, timeout: int) -> None:
+        self.wait_for_url_call = (url, wait_until, timeout)
+
+    async def wait_for_load_state(self, state: str, timeout: int) -> None:
+        raise TimeoutError(f'{state} timed out after {timeout}')
 
 
 class _VisibilityItemStub:
@@ -190,6 +465,379 @@ class _StreamPageStub:
 
 
 class PyUICompatRuntimeTests(SimpleTestCase):
+    def test_media_before_state_uses_authoritative_native_observer(self) -> None:
+        agent = PyUICompatAgent(case_name='Native_Media_State')
+        page = object()
+        state = [{'currentTime': 4, 'playedEnd': 4}]
+
+        with patch(
+            'apps.ai_testing.execution.browser_observers.NATIVE_MEDIA_OBSERVER.capture_state',
+            new=AsyncMock(return_value=state),
+        ) as capture_state:
+            result = asyncio.run(agent._capture_media_state(page))
+
+        self.assertEqual(result, state)
+        capture_state.assert_awaited_once_with(page)
+
+    @patch.dict('os.environ', {}, clear=True)
+    @patch('apps.ai_testing.runtime.pyui_compat.runner.os.path.exists')
+    def test_browser_resolution_prefers_packaged_hevc_build(self, path_exists) -> None:
+        path_exists.side_effect = lambda path: path in {
+            '/usr/lib/chromium/chromium',
+            '/usr/bin/chromium',
+        }
+        agent = PyUICompatAgent(case_name='HEVC_Browser')
+
+        executable = agent._resolve_browser_executable()
+
+        self.assertEqual(executable, '/usr/lib/chromium/chromium')
+
+    def test_alert_resource_correlation_uses_runtime_camera_and_event_type(self) -> None:
+        import inspect
+        from apps.ai_testing.execution.data_factory_resources import _create_alert_event
+
+        source = inspect.getsource(_create_alert_event)
+
+        self.assertIn("camera.get('camera_name')", source)
+        self.assertIn("event_arguments.get('alert_type')", source)
+        self.assertIn("'match_values'", source)
+
+    def test_dashboard_ready_uses_navigation_commit_before_optional_network_idle(self) -> None:
+        page = _DashboardPageStub()
+        agent = PyUICompatAgent(case_name='Dashboard_Ready')
+
+        asyncio.run(agent._wait_dashboard_ready(page))
+
+        self.assertEqual(page.wait_for_url_call, ('**/dashboard/**', 'commit', 60000))
+
+    def test_bootstrap_allows_async_terms_dialog_to_render(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._bootstrap_pyuitest_session)
+
+        self.assertIn('await page.wait_for_timeout(1000)', source)
+        self.assertIn('I have read and agree to the Terms of Use.', source)
+        self.assertIn('for login_attempt in range(1, 4)', source)
+        self.assertIn('await self._wait_dashboard_ready(page, timeout=20000)', source)
+
+    def test_actionable_discovery_includes_framework_listener_metadata(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._build_actionable_controls)
+
+        self.assertIn("includes('_vei')", source)
+        self.assertIn("element._vei && typeof element._vei === 'object'", source)
+        self.assertIn("child._vei && typeof child._vei === 'object'", source)
+        self.assertIn('const compactIconControl = directSvg && rect.width >= 16', source)
+        self.assertIn("style.cursor === 'pointer' || compactIconControl", source)
+        self.assertIn("startsWith('__reactProps')", source)
+        self.assertIn('current.parentElement === document.body', source)
+        self.assertIn("['fixed', 'sticky'].includes(style.position) || zIndex > 0", source)
+        self.assertIn("'[aria-label], [title], [alt], [data-icon], [data-lucide], svg title, svg, use'", source)
+        self.assertIn("semanticChild.getAttribute('data-icon')", source)
+        self.assertIn("semanticChild.getAttribute('data-lucide')", source)
+        self.assertIn("element.querySelector('svg use, use')", source)
+        self.assertIn("semanticUse.getAttribute('href')", source)
+        self.assertIn('|| semanticReference', source)
+        self.assertIn("split(/\\\\s+/).find(token => /icon$/i.test(token))", source)
+        self.assertIn('|| semanticClass', source)
+        self.assertNotIn("|| semanticChild.getAttribute('class')", source)
+        self.assertNotIn('use[xlink', source)
+        self.assertIn('new URL(href, document.baseURI).href', source)
+        self.assertIn('native_control: nativeControl', source)
+        self.assertIn('blockingLayerRank || namedRank || nativeRank || topLayerRank', source)
+        self.assertIn('left.depth - right.depth', source)
+        self.assertIn('}).slice(0, 300)', source)
+        self.assertIn("element.getAttribute('aria-describedby')", source)
+        self.assertIn('document.getElementById(tooltipId)?.innerText', source)
+
+    def test_actionable_discovery_propagates_normalized_blocking_state(self) -> None:
+        import inspect
+
+        discovery_source = inspect.getsource(PyUICompatAgent._build_actionable_controls)
+        observation_source = inspect.getsource(PyUICompatAgent._collect_planner_observation)
+        planning_source = inspect.getsource(PyUICompatAgent._plan_ai_step)
+
+        self.assertIn('blocking_layer_id: blockingLayerId', discovery_source)
+        self.assertIn("'blocking_layer_id'", observation_source)
+        self.assertIn("'blocking_state': build_blocking_state(actionable_controls)", observation_source)
+        self.assertIn("mcp_client.call_tool('browser.observe', {})", planning_source)
+
+    def test_actionable_discovery_reads_existing_tooltip_without_hover(self) -> None:
+        controls = asyncio.run(
+            PyUICompatAgent()._build_actionable_controls(_ExistingTooltipPageStub())
+        )
+
+        self.assertEqual(controls, [{'selector': '#download', 'name': 'Download'}])
+
+    def test_runtime_observers_register_download_listener(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._attach_runtime_observers)
+
+        self.assertIn("page.on('download', on_download)", source)
+        self.assertIn("'status': 'failed' if failure else 'completed'", source)
+
+    def test_download_observation_uses_assertion_timeout(self) -> None:
+        agent = PyUICompatAgent()
+        agent._recent_download_events = [{'status': 'completed', 'filename': 'old.zip'}]
+        agent._download_event_baseline = len(agent._recent_download_events)
+        page = _DownloadWaitPageStub(agent)
+
+        asyncio.run(agent._wait_for_assertion_observation(page, {
+            'assertions': [{'assert_kind': 'download_task', 'timeout_ms': 1000}],
+        }))
+
+        self.assertEqual(page.wait_count, 1)
+        self.assertEqual(
+            agent._current_step_download_events(),
+            [{'status': 'completed', 'filename': 'new.zip'}],
+        )
+
+    def test_collection_observation_waits_for_bounded_network_idle(self) -> None:
+        page = _CollectionWaitPageStub()
+
+        asyncio.run(PyUICompatAgent()._wait_for_assertion_observation(page, {
+            'timeout_ms': 12000,
+            'assertions': [{'assert_kind': 'collection', 'required': True}],
+        }))
+
+        self.assertEqual(page.load_state_call, ('networkidle', 10000))
+        self.assertIsNone(page.waited_ms)
+
+    def test_playback_observation_waits_for_ready_media_progress(self) -> None:
+        page = _PlaybackWaitPageStub()
+        media_states = [
+            [],
+            [{'paused': True, 'readyState': 0, 'currentTime': 0, 'currentSrc': ''}],
+            [{'paused': False, 'readyState': 3, 'currentTime': 4, 'currentSrc': 'stream.m3u8'}],
+            [{'paused': False, 'readyState': 4, 'currentTime': 5.1, 'currentSrc': 'stream.m3u8'}],
+        ]
+
+        with patch(
+            'apps.ai_testing.execution.browser_observers.NATIVE_MEDIA_OBSERVER.capture_state',
+            new=AsyncMock(side_effect=media_states),
+        ) as capture_state:
+            asyncio.run(PyUICompatAgent()._wait_for_assertion_observation(page, {
+                'timeout_ms': 10000,
+                'assertions': [{
+                    'assert_kind': 'playback',
+                    'expected': {'minimum_advanced_seconds': 1},
+                    'required': True,
+                }],
+            }))
+
+        self.assertEqual(capture_state.await_count, 4)
+        self.assertEqual(page.waited_ms, [500, 500, 500])
+
+    def test_non_collection_observation_keeps_fast_wait(self) -> None:
+        page = _CollectionWaitPageStub()
+
+        asyncio.run(PyUICompatAgent()._wait_for_assertion_observation(page, {
+            'assertions': [{'assert_kind': 'element_state', 'required': True}],
+        }))
+
+        self.assertIsNone(page.load_state_call)
+        self.assertEqual(page.waited_ms, 300)
+
+    def test_observable_discovery_builds_complete_body_path(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._build_observable_elements)
+
+        self.assertIn('current.parentElement === document.body', source)
+
+    def test_accessibility_snapshot_preserves_computed_semantics_and_page_version(self) -> None:
+        page = _AccessibilityPageStub()
+
+        snapshot = asyncio.run(capture_accessibility_snapshot(page))
+
+        self.assertEqual(snapshot['page_version'], 'page-v1')
+        self.assertEqual(len(snapshot['snapshot_id']), 64)
+        self.assertEqual(snapshot['nodes'], [
+            {
+                'node_id': 'ax:root',
+                'backend_dom_node_id': None,
+                'role': 'RootWebArea',
+                'name': 'Dashboard',
+                'description': '',
+                'value': '',
+                'states': {},
+                'child_ids': ['ax:button-ax'],
+            },
+            {
+                'node_id': 'ax:button-ax',
+                'backend_dom_node_id': 42,
+                'role': 'button',
+                'name': 'Settings',
+                'description': 'Open application settings',
+                'value': '',
+                'states': {'expanded': False, 'disabled': False},
+                'child_ids': [],
+            },
+        ])
+        self.assertTrue(page.session.detached)
+
+    def test_accessibility_snapshot_fails_closed_when_cdp_is_unavailable(self) -> None:
+        snapshot = asyncio.run(capture_accessibility_snapshot(_AccessibilityUnsupportedPageStub()))
+
+        self.assertEqual(snapshot, {'snapshot_id': '', 'page_version': '', 'nodes': []})
+
+    def test_runtime_initializes_sanitized_planner_control_snapshot(self) -> None:
+        agent = PyUICompatAgent(case_name='Planner_Control_Evidence')
+
+        self.assertEqual(agent._last_actionable_controls, [])
+        self.assertEqual(
+            agent._last_accessibility_snapshot,
+            {'snapshot_id': '', 'page_version': '', 'nodes': []},
+        )
+
+    def test_rebinding_replaces_stale_locator_without_nesting_intent(self) -> None:
+        step = {'assertions': [{'target': {'locator': '#stale', 'intent': {'intent': 'status menu'}}}]}
+
+        rebound = PyUICompatAgent._bind_step_assertions(
+            step,
+            [{'assertion_index': 1, 'locator': '#current'}],
+        )
+
+        self.assertEqual(rebound['assertions'][0]['target'], {
+            'locator': '#current',
+            'intent': 'status menu',
+        })
+
+    def test_assertion_retry_accumulates_prior_action_history(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._retry_assertion_failure)
+
+        self.assertIn('_persisted_step_action_history', source)
+        self.assertIn("'_prior_actions': prior_actions[-16:]", source)
+        self.assertIn("'_verified_predecessors'", source)
+
+    def test_visual_planning_collects_page_scroll_metrics(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._collect_planner_observation)
+
+        self.assertIn('scroll_height', source)
+        self.assertIn('scroll_containers', source)
+        self.assertIn('element.scrollHeight > element.clientHeight + 1', source)
+        self.assertIn('item.client_height * 0.8 >= 2', source)
+        self.assertIn('right.remaining - left.remaining', source)
+        self.assertIn("'page_metrics': page_metrics", source)
+
+    def test_scroll_action_targets_discovered_container(self) -> None:
+        import inspect
+
+        source = inspect.getsource(PyUICompatAgent._execute_step)
+
+        self.assertIn('element.scrollBy', source)
+        self.assertIn('element.clientHeight * ratio', source)
+
+    def test_build_planned_tasks_preserves_intermediate_step_contract(self) -> None:
+        agent = PyUICompatAgent(case_name='Intermediate_Contract')
+
+        planned_tasks = agent._build_planned_tasks('goal', case_mode='hybrid', task_steps=[{
+            'executor': 'browser',
+            'step_mode': 'ai',
+            'description': 'Open a menu',
+            'allowed_capabilities': ['browser.act'],
+            'assertions': [],
+            'verification_required': False,
+        }])
+
+        self.assertEqual(planned_tasks[0]['executor'], 'browser')
+        self.assertEqual(planned_tasks[0]['step_mode'], 'ai')
+        self.assertFalse(planned_tasks[0]['verification_required'])
+        self.assertEqual(planned_tasks[0]['assertions'], [])
+
+    def test_non_verifying_intermediate_step_does_not_retry_assertions(self) -> None:
+        should_retry = PyUICompatAgent._should_retry_assertions(
+            {'verification_required': False},
+            action_completed=True,
+            assertions_verified=False,
+            action_source='model',
+        )
+
+        self.assertFalse(should_retry)
+
+    def test_verifying_model_step_retries_unverified_assertions(self) -> None:
+        should_retry = PyUICompatAgent._should_retry_assertions(
+            {'verification_required': True},
+            action_completed=True,
+            assertions_verified=False,
+            action_source='model',
+            assertion_statuses=['inconclusive'],
+        )
+
+        self.assertTrue(should_retry)
+
+    def test_verifying_model_step_does_not_retry_failed_assertion(self) -> None:
+        should_retry = PyUICompatAgent._should_retry_assertions(
+            {'verification_required': True},
+            action_completed=True,
+            assertions_verified=False,
+            action_source='model',
+            assertion_statuses=['failed'],
+        )
+
+        self.assertFalse(should_retry)
+
+    def test_optional_assertion_status_does_not_block_required_success(self) -> None:
+        step = {
+            'assertions': [
+                {'required': False},
+                {'required': True},
+            ],
+        }
+
+        required_statuses = PyUICompatAgent._required_assertion_statuses(
+            step,
+            ['inconclusive', 'passed'],
+        )
+
+        self.assertEqual(required_statuses, ['passed'])
+        self.assertTrue(PyUICompatAgent._assertions_are_verified(required_statuses))
+        self.assertEqual(PyUICompatAgent._status_after_assertions('completed', required_statuses), 'completed')
+
+    def test_optional_only_assertions_do_not_trigger_required_retry(self) -> None:
+        step = {'assertions': [{'required': False}]}
+        required_statuses = PyUICompatAgent._required_assertion_statuses(step, ['inconclusive'])
+
+        self.assertEqual(required_statuses, [])
+        self.assertTrue(PyUICompatAgent._step_assertions_are_verified(step, required_statuses))
+
+    def test_capture_assertion_target_evidence_binds_locator_state(self) -> None:
+        page = _AssertionEvidencePageStub(_AssertionEvidenceLocatorStub('Camera A', count=2))
+
+        artifacts = asyncio.run(collect_browser_observations(page, [
+            {'assert_kind': 'element_state', 'target': {'locator': '[data-testid="camera"]'}},
+            {'assert_kind': 'collection', 'target': {'locator': '[data-testid="camera"]'}},
+        ], None))
+
+        self.assertEqual(artifacts[0], {
+            'type': 'element_state', 'locator': '[data-testid="camera"]',
+            'count': 2, 'visible': True, 'text': 'Camera A',
+        })
+        self.assertEqual(artifacts[1]['type'], 'collection_state')
+        self.assertEqual(artifacts[1]['count'], 2)
+
+    def test_action_audit_payload_preserves_target_and_redacts_value(self) -> None:
+        payload = PyUICompatAgent._audit_action_payload(
+            {'action': 'fill', 'selector': '#email', 'value': 'secret@example.test'},
+            {'step_mode': 'ai', 'executor': 'browser'},
+        )
+
+        self.assertEqual(payload['selector'], '#email')
+        self.assertTrue(payload['value_present'])
+        self.assertNotIn('value', payload)
+
+    def test_plan_ai_step_includes_execution_resources(self) -> None:
+        agent = PyUICompatAgent(case_name='Resource_Context')
+        agent._execution_resources = [{'resource_type': 'alert_event', 'resource_id': 'event-123'}]
+
+        self.assertEqual(agent._execution_resources[0]['resource_id'], 'event-123')
+
     def test_resolve_locator_skips_hidden_matches(self) -> None:
         agent = PyUICompatAgent(case_name='Locator_Visibility')
         page = _VisibleResolveLocatorPageStub()
@@ -197,6 +845,33 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         locator = asyncio.run(agent._resolve_locator(page, 'text=Cameras'))
 
         self.assertIs(locator, page.css_locator.nth(1))
+
+    def test_resolve_step_locator_prefers_unique_accessible_role_and_name(self) -> None:
+        page = _RoleLocatorPageStub([False, True])
+
+        locator = asyncio.run(PyUICompatAgent()._resolve_step_locator(page, {
+            'role': 'button',
+            'accessible_name': 'Settings',
+            'selector': '#fallback',
+        }))
+
+        self.assertIs(locator, page.locator_result.nth(1))
+        self.assertEqual(page.call, ('button', 'Settings', True))
+
+    def test_resolve_step_locator_rejects_ambiguous_accessible_match(self) -> None:
+        page = _RoleLocatorPageStub([True, True])
+
+        with self.assertRaisesRegex(ValueError, 'matched 2 visible elements'):
+            asyncio.run(PyUICompatAgent()._resolve_step_locator(page, {
+                'role': 'button',
+                'accessible_name': 'Save',
+            }))
+
+    def test_planned_action_accepts_accessible_locator_without_css(self) -> None:
+        PyUICompatAgent._validate_planned_actions(
+            [{'action': 'click', 'role': 'button', 'accessible_name': 'Settings'}],
+            allowed_capabilities=['browser.act'],
+        )
 
     def test_normalize_step_preserves_device_cli_fields(self) -> None:
         agent = PyUICompatAgent(case_name='Device_Check')
@@ -216,9 +891,68 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertEqual(step['device_id'], 'ainvr_5000')
         self.assertEqual(step['command'], 'systemctl is-active camera-agent')
 
+    def test_normalize_step_preserves_data_factory_fields(self) -> None:
+        agent = PyUICompatAgent(case_name='Data_Factory')
+
+        step = agent._normalize_step({
+            'executor': 'data_factory', 'action': 'create', 'description': 'Create event',
+            'resource_type': 'alert_event', 'arguments': {'alert_type': 'person'},
+        }, 1)
+
+        self.assertEqual(step['resource_type'], 'alert_event')
+        self.assertEqual(step['arguments'], {'alert_type': 'person'})
+
+    def test_normalize_step_preserves_assertion_contract(self) -> None:
+        agent = PyUICompatAgent(case_name='Assertion_Contract')
+        assertions = [{'action': 'assert', 'assert_kind': 'element_state'}]
+
+        step = agent._normalize_step({
+            'executor': 'browser',
+            'description': 'Verify state',
+            'assertions': assertions,
+            'correlates_resource': 'alert_event',
+        }, 1)
+
+        self.assertEqual(step['assertions'], assertions)
+        self.assertEqual(step['correlates_resource'], 'alert_event')
+
+    def test_normalize_step_preserves_assertion_bindings(self) -> None:
+        agent = PyUICompatAgent(case_name='Assertion_Bindings')
+        bindings = [{'assertion_index': 1, 'locator': '[data-testid="alert"]'}]
+
+        step = agent._normalize_step({'action': 'click', 'assertion_bindings': bindings}, 1)
+
+        self.assertEqual(step['assertion_bindings'], bindings)
+
+    def test_normalize_step_routes_undeclared_direct_action_to_ai_planning(self) -> None:
+        agent = PyUICompatAgent(case_name='Generic_Plan')
+
+        step = agent._normalize_step(
+            {'step_mode': 'direct', 'description': 'Wait until the requested state is visible'},
+            1,
+        )
+
+        self.assertEqual(step['step_mode'], 'ai')
+        self.assertEqual(step['action'], '')
+
+    def test_normalized_steps_reject_specialized_action_and_fixed_coordinates(self) -> None:
+        agent = PyUICompatAgent(case_name='Generic_Plan')
+
+        with self.assertRaisesRegex(ValueError, 'unsupported browser action'):
+            agent._validate_normalized_steps([{'executor': 'browser', 'step_mode': 'direct', 'action': 'open_camera_list'}])
+        with self.assertRaisesRegex(ValueError, 'must not use fixed coordinates'):
+            agent._validate_normalized_steps([{'executor': 'browser', 'step_mode': 'direct', 'action': 'click', 'loc': '(1,2)'}])
+
     def test_freeform_device_plan_skips_playwright(self) -> None:
         configuration = SimpleNamespace(id=7, name='Device Test', environment='test')
-        agent = PyUICompatAgent(case_name='Device_Check', api_automation_configuration=configuration)
+        agent = PyUICompatAgent(case_name='Device_Check', environment_configuration=configuration)
+        create_plan = AsyncMock(return_value=[
+            {
+                'executor': 'device_cli',
+                'description': '连接设备',
+                'device_id': 'ainvr_5000',
+            },
+        ])
         agent._execute_device_cli_step = AsyncMock(return_value={
             'status': 'PASSED',
             'operation': 'connection_check',
@@ -231,90 +965,54 @@ class PyUICompatRuntimeTests(SimpleTestCase):
 
         with patch(
             'apps.ai_testing.global_planner.GlobalTestPlanner.create_plan',
-            new=AsyncMock(return_value=[
-                {
-                    'executor': 'device_cli',
-                    'description': '连接设备',
-                    'device_id': 'ainvr_5000',
-                },
-            ]),
+            new=create_plan,
         ):
             history = asyncio.run(
                 agent.run_full_process(
                     '连接设备并验证可用性',
                     case_mode='freeform',
-                    task_steps=None,
+                    task_steps=[{
+                        'description': "在搜索框中输入 'black hair'",
+                        'selector': '#legacy-search',
+                    }],
                 )
             )
 
+        planning_goal = create_plan.await_args.args[0]
+        self.assertIn('连接设备并验证可用性', planning_goal)
+        self.assertIn("在搜索框中输入 'black hair'", planning_goal)
+        self.assertNotIn('#legacy-search', planning_goal)
         self.assertEqual(history.steps[0]['status'], 'completed')
         self.assertEqual(history.steps[0]['executor'], 'device_cli')
         self.assertEqual(history.planner_trace['source'], 'global_planner')
-        self.assertEqual(history.planner_trace['api_automation_configuration']['id'], 7)
+        self.assertEqual(history.planner_trace['environment_configuration']['id'], 7)
         agent._execute_device_cli_step.assert_awaited_once()
 
-    def test_report_vehicle_event_requires_environment_id(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis', execution_user_id=1)
+    def test_execute_data_factory_step_uses_generic_resource_contract(self) -> None:
+        configuration = SimpleNamespace(id=7)
+        agent = PyUICompatAgent(environment_configuration=configuration)
+        resource = {
+            'success': True,
+            'resource_type': 'alert_event',
+            'resource_id': 'event-123',
+            'resource': {},
+        }
 
-        with self.assertRaisesRegex(ValueError, 'environment_id'):
-            asyncio.run(agent._report_vehicle_event({'action': 'report_vehicle_event'}))
+        with patch(
+            'apps.ai_testing.runtime.pyui_compat.runner.asyncio.to_thread',
+            new=AsyncMock(return_value=resource),
+        ) as to_thread:
+            result = asyncio.run(agent._execute_data_factory_step({
+                'resource_type': 'alert_event',
+                'arguments': {'alert_type': 'vehicle'},
+            }))
 
-    def test_report_vehicle_event_reads_nested_report_ids(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis', execution_user_id=1)
-        report = {'success': True, 'report': {'success': True, 'event_ids': ['event-123']}}
-
-        with patch('apps.ai_testing.runtime.pyui_compat.runner.asyncio.to_thread', new=AsyncMock(return_value=report)):
-            result = asyncio.run(agent._report_vehicle_event({'environment_id': 5}))
-
-        self.assertEqual(result, {'event_ids': ['event-123']})
-
-    def test_execute_data_factory_step_uses_single_vehicle_media_group(self) -> None:
-        configuration = SimpleNamespace(
-            id=5,
-            runtime_settings={
-                'api': {
-                    'edge': {
-                        'main_device': {
-                            'cameras': [{'camera_name': '5003_D13'}],
-                        },
-                    },
-                },
-            },
+        self.assertEqual(result['resource_id'], 'event-123')
+        self.assertEqual(result['resource_type'], 'alert_event')
+        self.assertEqual(
+            to_thread.await_args.args[1:],
+            (configuration, 'alert_event', {'alert_type': 'vehicle'}),
         )
-        agent = PyUICompatAgent(execution_user_id=1, api_automation_configuration=configuration)
-        agent._report_vehicle_event = AsyncMock(return_value={'event_ids': ['event-123']})
-
-        result = asyncio.run(agent._execute_data_factory_step({'camera_name': '5003_D13'}))
-
-        self.assertEqual(result, {'event_ids': ['event-123']})
-        agent._report_vehicle_event.assert_awaited_once_with({
-            'environment_id': 5,
-            'device': 'main',
-            'camera_index': 0,
-            'media_path': 'vehicle/normal_snap_image_0.jpeg',
-            'vehicle_color': 1,
-        })
-
-    def test_alert_note_assertion_matches_reported_gpt_description(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis')
-        agent._reported_alert_gpt_description = 'A black truck is parked near a fence.'
-        page = _TextPageStub('Alert Note: A black truck is parked near a fence.')
-
-        asyncio.run(agent._assert_reported_alert_note_matches_gpt(page, timeout_ms=1000))
-
-    def test_wait_for_reported_alert_gpt_analysis_action_uses_readiness_check(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis')
-        agent._wait_for_reported_alert_gpt_analysis = AsyncMock()
-
-        asyncio.run(
-            agent._execute_step(
-                None,
-                {'action': 'wait_for_reported_alert_gpt_analysis', 'timeout_ms': 120000},
-                timeout_error=Exception,
-            )
-        )
-
-        agent._wait_for_reported_alert_gpt_analysis.assert_awaited_once_with(None, 120000)
 
     def test_store_and_load_cached_ai_actions(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
@@ -382,6 +1080,45 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertNotEqual(project_key, other_project_key)
         self.assertNotEqual(project_key, other_page_key)
 
+    def test_cache_key_is_scoped_to_permission_and_assertion_contract(self) -> None:
+        step = {
+            'index': 2,
+            'description': 'Verify the dashboard',
+            'assertions': [{'action': 'assert', 'assert_kind': 'text'}],
+        }
+        page_context = {'fingerprint': 'page-a'}
+        first_user = PyUICompatAgent(case_name='TC_004', ai_project_id=1, execution_user_id=1)
+        other_user = PyUICompatAgent(case_name='TC_004', ai_project_id=1, execution_user_id=2)
+        other_assertion = {
+            **step,
+            'assertions': [{'action': 'assert', 'assert_kind': 'url'}],
+        }
+
+        self.assertNotEqual(first_user._cache_key_for_step(step, page_context), other_user._cache_key_for_step(step, page_context))
+        self.assertNotEqual(first_user._cache_key_for_step(step, page_context), first_user._cache_key_for_step(other_assertion, page_context))
+
+    def test_cache_key_changes_with_application_version(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_004', ai_project_id=1)
+        step = {'index': 2, 'description': 'Verify dashboard'}
+
+        self.assertNotEqual(
+            agent._cache_key_for_step(step, {'fingerprint': 'page-a', 'application_version': '1.0.0'}),
+            agent._cache_key_for_step(step, {'fingerprint': 'page-a', 'application_version': '1.0.1'}),
+        )
+
+    def test_experience_scope_hashes_permission_and_assertion_contract(self) -> None:
+        step = {'assertions': [{'action': 'assert', 'assert_kind': 'text'}]}
+        other_step = {'assertions': [{'action': 'assert', 'assert_kind': 'url'}]}
+
+        self.assertNotEqual(
+            PyUICompatAgent(execution_user_id=1)._permission_fingerprint(),
+            PyUICompatAgent(execution_user_id=2)._permission_fingerprint(),
+        )
+        self.assertNotEqual(
+            PyUICompatAgent._assertion_contract_hash(step),
+            PyUICompatAgent._assertion_contract_hash(other_step),
+        )
+
     def test_get_ai_actions_prefers_verified_experience(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004', ai_project_id=1)
         step = {'index': 2, 'description': '输入邮箱'}
@@ -428,26 +1165,62 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 self.assertEqual(history.planner_trace['step_retry_map']['3'], 2)
                 self.assertEqual(len(history.artifacts), 2)
 
-    def test_plan_retry_dismisses_blocking_video_error(self) -> None:
+    def test_cache_verification_requires_current_passing_assertions(self) -> None:
+        self.assertTrue(PyUICompatAgent._assertions_are_verified(['passed']))
+        self.assertFalse(PyUICompatAgent._assertions_are_verified([]))
+        self.assertFalse(PyUICompatAgent._assertions_are_verified(['inconclusive']))
+        self.assertFalse(PyUICompatAgent._assertions_are_verified(['passed', 'failed']))
+
+    def test_assertion_outcomes_update_runtime_step_status(self) -> None:
+        self.assertEqual(
+            PyUICompatAgent._status_after_assertions('completed', ['passed']),
+            'completed',
+        )
+        self.assertEqual(
+            PyUICompatAgent._status_after_assertions('completed', ['failed']),
+            'failed',
+        )
+        self.assertEqual(
+            PyUICompatAgent._status_after_assertions('completed', ['inconclusive']),
+            'inconclusive',
+        )
+
+    def test_visual_replan_rejects_coordinates_and_specialized_actions(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'must not use fixed coordinates'):
+            PyUICompatAgent._validate_planned_actions(
+                [{'action': 'click', 'loc': '(10,20)'}],
+                'Inspect the current state',
+            )
+
+        with self.assertRaisesRegex(ValueError, 'uses unsupported action'):
+            PyUICompatAgent._validate_planned_actions(
+                [{'action': 'open_camera_list'}],
+                'Inspect the current state',
+            )
+        with self.assertRaisesRegex(ValueError, 'requires selector'):
+            PyUICompatAgent._validate_planned_actions(
+                [{'action': 'click', 'selector': '   '}],
+                'Inspect the current state',
+            )
+
+    def test_visual_replan_rejects_actions_outside_step_capabilities(self) -> None:
+        with self.assertRaisesRegex(ValueError, 'requires capability browser.navigate'):
+            PyUICompatAgent._validate_planned_actions(
+                [{'action': 'navigate', 'url': 'https://example.test'}],
+                'Inspect the current state',
+                ['browser.act', 'browser.inspect'],
+            )
+
+    def test_plan_retry_records_generic_planner_failure(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')
         history = HistoryStub()
-        step = {'index': 3, 'description': '打开 AGI Analysis'}
-        page = _VideoLoadErrorPageStub(error_visible=True)
-        agent._plan_ai_step = AsyncMock(side_effect=[ValueError('empty response'), [{'action': 'click', 'selector': 'text=AGI Analysis'}]])
+        step = {'index': 3, 'description': 'Inspect the current application state'}
+        agent._plan_ai_step = AsyncMock(side_effect=[ValueError('invalid action contract'), [{'action': 'assert'}]])
 
-        actions = asyncio.run(agent._plan_ai_step_with_retries(page, step, history, step_index=3, max_attempts=2))
+        actions = asyncio.run(agent._plan_ai_step_with_retries(object(), step, history, step_index=3, max_attempts=2))
 
-        self.assertEqual(actions, [{'action': 'click', 'selector': 'text=AGI Analysis'}])
-        self.assertTrue(page.close_button.clicked)
-        self.assertIn(
-            {
-                'type': 'planner_recovery',
-                'step': 3,
-                'attempt': 2,
-                'action': 'dismiss_video_load_error',
-            },
-            history.artifacts,
-        )
+        self.assertEqual(actions, [{'action': 'assert'}])
+        self.assertEqual(history.artifacts[0]['error'], 'ValueError: invalid action contract')
 
     def test_write_case_report_artifacts_outputs_jsonl_and_html(self) -> None:
         with tempfile.TemporaryDirectory() as media_root:
@@ -487,276 +1260,26 @@ class PyUICompatRuntimeTests(SimpleTestCase):
 
         self.assertIs(locator, page.text_locator)
 
-    def test_fallback_actions_for_team_option(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = agent._fallback_actions_for_step({'description': '点击组织管理子选项中的Team选项'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'hover',
-                    'param': 'Team sidebar fallback',
-                    'reason': 'fallback expand organization sidebar before Team click',
-                },
-                {
-                    'action': 'click',
-                    'selector': 'Team',
-                    'param': 'Team',
-                    'reason': 'fallback click Team option',
-                },
-            ],
-        )
-
-    def test_fallback_actions_for_team_option_assertion(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = agent._fallback_actions_for_step({'description': '断言组织管理子选项中包含"Team"选项'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'hover',
-                    'param': 'Team sidebar fallback',
-                    'reason': 'fallback expand organization sidebar before Team assertion',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'text_visible',
-                    'param': 'Team',
-                    'reason': 'fallback assert Team option is visible',
-                },
-            ],
-        )
-
-    def test_fallback_actions_for_add_user_button(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = agent._fallback_actions_for_step({'description': '点击页面上方的蓝色加号, 创建新的角色'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'click',
-                    'selector': 'button[aria-label="Add New User"]',
-                    'reason': 'fallback click add-user button on organization page',
-                }
-            ],
-        )
-
-    def test_fallback_actions_for_organization_hover(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = agent._fallback_actions_for_step({'description': '鼠标悬停在组织管理按钮上,该按钮是三个人图标'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'hover',
-                    'selector': 'text=Organization',
-                    'reason': 'fallback deterministic organization sidebar hover',
-                }
-            ],
-        )
-
-    def test_long_alert_verification_step_does_not_use_navigation_fallback(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis')
-
-        actions = agent._fallback_actions_for_step(
-            {
-                'description': (
-                    '打开 Alerts 页面，定位刚刚由摄像头 5003_D03 创建的最新车辆告警，'
-                    '并确认 alert note 中出现非空的 GPT 图像分析结果。'
-                )
-            }
-        )
-
-        self.assertEqual(actions, [])
-
-    def test_normalize_step_preserves_switch_label(self) -> None:
-        agent = PyUICompatAgent(case_name='AGI_Analysis')
-
-        step = agent._normalize_step(
-            {
-                'action': 'ensure_switch_enabled',
-                'value': 'Process Vehicle Alerts',
-            },
-            1,
-        )
-
-        self.assertEqual(step['action'], 'ensure_switch_enabled')
-        self.assertEqual(step['value'], 'Process Vehicle Alerts')
-
-    def test_has_gpt_analysis_accepts_description_or_note(self) -> None:
-        self.assertTrue(
-            PyUICompatAgent._has_gpt_analysis(
-                {'gptRaw': {'natural_language_description': 'Vehicle detected'}}
-            )
-        )
-        self.assertTrue(
-            PyUICompatAgent._has_gpt_analysis(
-                {'statuses': [{'noteRecord': {'new': {'note': 'GPT vehicle analysis'}}}]}
-            )
-        )
-        self.assertFalse(PyUICompatAgent._has_gpt_analysis({'gptRaw': {}}))
-
-    def test_fallback_actions_for_site_manager_role_flow(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击页面下方的角色下拉框, 当前值为Org Admin'}),
-            [
-                {
-                    'action': 'click',
-                    'selector': 'text=Org Admin (Can manage and view all sites)',
-                    'reason': 'fallback deterministic role dropdown open',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言下拉框列表中包含"Site Manager"选项'}),
-            [
-                {
-                    'action': 'assert_text_contains',
-                    'selector': 'body',
-                    'expected': 'Site Manager (Can manage and view specified sites)',
-                    'reason': 'fallback deterministic role option assertion',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '从下拉框中选择并点击Site Manager选项'}),
-            [
-                {
-                    'action': 'click',
-                    'selector': 'text=Site Manager (Can manage and view specified sites)',
-                    'reason': 'fallback deterministic role option click',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言下拉框列表中当前值为Site Manager'}),
-            [
-                {
-                    'action': 'assert_text_contains',
-                    'selector': 'body',
-                    'expected': 'Site Manager (Can manage and view specified sites)',
-                    'reason': 'fallback deterministic selected role assertion',
-                }
-            ],
-        )
-
-    def test_fallback_actions_for_magic_search_option_flow(self) -> None:
+    def test_action_failure_requests_generic_replan(self) -> None:
         agent = PyUICompatAgent(case_name='TC_002')
+        history = HistoryStub()
+        step = {'description': 'Inspect the page and verify the requested state'}
+        agent._execute_step = AsyncMock(side_effect=[ValueError('target unavailable'), None])
+        agent._plan_ai_step_with_retries = AsyncMock(return_value=[{'action': 'assert'}])
 
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击搜索框中的放大镜图标，展开高级搜索面板'}),
-            [
-                {
-                    'action': 'click',
-                    'selector': 'div.colorBorder.rounded-xl.flex.bg-white > button.ant-dropdown-trigger',
-                    'reason': 'fallback deterministic advanced-search leading magnifier click',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "断言高级搜索面板已展开，且列表中包含'Magic Search V2'选项"}),
-            [
-                {
-                    'action': 'assert',
-                    'assert_kind': 'text_visible',
-                    'param': 'Magic Search V2',
-                    'reason': 'fallback deterministic advanced-search option assertion',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "点击高级搜索列表中的'Magic Search V2'选项"}),
-            [
-                {
-                    'action': 'click',
-                    'selector': 'Magic Search V2',
-                    'reason': 'fallback deterministic advanced-search option click',
-                }
-            ],
-        )
+        asyncio.run(agent._execute_ai_actions(object(), step, [{'action': 'click'}], 2, None, TimeoutError, history=history))
 
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "断言搜索框中placeholder已填充为'Magic Search V2'"}),
-            [
-                {
-                    'action': 'assert',
-                    'assert_kind': 'placeholder_equals',
-                    'selector': "input[placeholder*='Magic Search' i]",
-                    'param': 'Magic Search V2',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic Magic Search V2 placeholder assertion',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击第一条结果的预览缩略图'}),
-            [
-                {
-                    'action': 'click',
-                    'selector': "div[id^='alert_'].cursor-pointer > div.relative.rounded-lg",
-                    'param': 'first preview',
-                    'reason': 'fallback deterministic first result preview thumbnail click',
-                }
-            ],
-        )
+        agent._plan_ai_step_with_retries.assert_awaited_once()
+        replan_artifact = next(artifact for artifact in history.artifacts if artifact['type'] == 'ai_replan')
+        self.assertEqual(replan_artifact['actions'], [{'action': 'assert'}])
 
-    def test_fallback_actions_for_alert_status_dropdown_flow(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_003')
+    def test_visual_assert_marker_defers_to_persisted_assertions(self) -> None:
+        agent = PyUICompatAgent(case_name='Unified_Assertion')
+        agent._execute_step = AsyncMock()
 
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "点击监控画面下方的'To Do'下拉框, 先展开状态选项列表"}),
-            [
-                {
-                    'action': 'click',
-                    'selector': '.alert-select-root .ant-select-selector',
-                    'reason': 'fallback deterministic alert-status dropdown open',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "在已展开的状态选项列表中点击'Close'标签（点击列表项本身，不要再次点击'To Do'下拉框按钮）"}),
-            [
-                {
-                    'action': 'change_alert_status',
-                    'selector': '.alert-select-root',
-                    'value': 'Close',
-                    'reason': 'fallback deterministic alert-status option change',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击显示列表中的第一个结果'}),
-            [
-                {
-                    'action': 'click',
-                    'loc': '(180,245)',
-                    'param': 'first alert result',
-                    'reason': 'fallback deterministic first alert result click',
-                }
-            ],
-        )
+        asyncio.run(agent._execute_ai_actions(object(), {'description': 'Verify state'}, [{'action': 'assert'}], 1, None, TimeoutError))
 
-    def test_resolve_alert_status_target_prefers_runtime_options(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_003')
-
-        self.assertEqual(
-            agent._resolve_alert_status_target('Close', 'To Do', ['To Do', 'False Alarm']),
-            'False Alarm',
-        )
-        self.assertEqual(
-            agent._resolve_alert_status_target('False Alarm', 'To Do', ['To Do', 'False Alarm']),
-            'False Alarm',
-        )
+        agent._execute_step.assert_not_awaited()
 
     def test_parse_ai_actions_reports_non_json_preview(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')
@@ -772,18 +1295,6 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         )
 
         self.assertEqual(actions, [{'action': 'assert_text_contains', 'selector': 'body', 'expected': '滨江区7/0'}])
-
-    def test_execute_step_assert_text_contains_ignores_whitespace_gaps(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_005')
-        page = _TextPageStub('滨江区7/0 萧山区8/0')
-        step = {
-            'action': 'assert_text_contains',
-            'selector': 'body',
-            'expected': '滨江区 7 / 0',
-            'timeout_ms': 1000,
-        }
-
-        asyncio.run(agent._execute_step(page, step, TimeoutError))
 
     def test_execute_step_wait_uses_explicit_value(self) -> None:
         agent = PyUICompatAgent(case_name='TC_005')
@@ -807,311 +1318,310 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertEqual(data['response_format'], {'type': 'json_object'})
         self.assertEqual(data['chat_template_kwargs'], {'enable_thinking': False})
 
-    def test_fallback_actions_for_icon_shape_steps(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_003')
-
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "点击'Alerts'功能按钮, 该按钮是一个铃铛形状"}),
-            [{'action': 'click', 'loc': '(48,196)', 'param': ':left:top:25:25'}],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "点击'Cameras'按钮, 该按钮是一个摄像头的形状"}),
-            [
-                {
-                    'action': 'click',
-                    'loc': '(48,142)',
-                    'param': ':left:top:25:25',
-                    'reason': 'fallback open cameras sidebar entry',
-                },
-                {
-                    'action': 'click',
-                    'selector': 'text=Cameras',
-                    'param': 'Cameras',
-                    'reason': 'fallback click cameras submenu item',
-                },
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "点击'Dark Mode'功能按钮, 该按钮位于左侧导航栏最上方, 形状为包含三角形和菱形的对称几何形状"}),
-            [{'action': 'click', 'loc': '(48,32)', 'param': ':left:top:25:25'}],
-        )
-
-    def test_fallback_actions_for_popup_assertion(self) -> None:
+    def test_cache_miss_uses_generic_model_plan(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')
+        history = HistoryStub()
+        history.steps = [{
+            'step_num': 1,
+            'step_description': 'Locate the requested item',
+            'action': 'assert',
+            'executor': 'browser',
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'requested item', 'locator': '#item-7 img'},
+            }],
+            'result': True,
+        }]
+        agent._build_page_context = AsyncMock(return_value={'url': 'https://example.test'})
+        agent._load_cached_ai_actions = lambda *_args: None
+        agent._load_verified_experience = AsyncMock(return_value=None)
+        agent._plan_ai_step_for_cacheable_step = AsyncMock(return_value=[{'action': 'assert'}])
 
-        actions = agent._fallback_actions_for_step({'description': '断言页面出现提示弹窗，且包含“User created successfully!”'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'assert_popup_contains',
-                    'expected': 'User created successfully!',
-                    'reason': 'fallback deterministic popup assertion',
-                }
-            ],
-        )
-
-    def test_plan_ai_step_prefers_popup_fallback_before_model(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = asyncio.run(
-            agent._plan_ai_step(
-                page=None,
-                step={'description': '断言页面出现提示弹窗，且包含“User created successfully!”'},
+        actions, source = asyncio.run(
+            agent._get_ai_actions_for_step(
+                object(),
+                {'index': 1, 'description': 'Verify current state'},
+                history,
             )
         )
 
-        self.assertEqual(actions[0]['action'], 'assert_popup_contains')
-        self.assertEqual(actions[0]['expected'], 'User created successfully!')
+        self.assertEqual(source, 'model')
+        self.assertEqual(actions, [{'action': 'assert'}])
+        planning_step = agent._plan_ai_step_for_cacheable_step.await_args.args[1]
+        self.assertEqual(
+            planning_step['_verified_predecessors'][0]['assertions'][0]['target']['locator'],
+            '#item-7 img',
+        )
 
-    def test_popup_success_compatible_with_recent_create_mutation(self) -> None:
+    def test_replan_replaces_failed_action_with_new_action(self) -> None:
         agent = PyUICompatAgent(case_name='TC_004')
-        agent._recent_network_events = [
-            {
-                'ts': time.time(),
-                'method': 'POST',
-                'url': 'https://test-api-2.agi7.ai/agi7/api/org/users',
-                'status': 200,
-                'ok': True,
-            }
-        ]
+        history = HistoryStub()
+        step = {
+            'description': 'Perform the requested operation',
+            'allowed_capabilities': ['browser.act'],
+        }
+        agent._execute_step = AsyncMock(side_effect=[ValueError('stale target'), None])
+        agent._plan_ai_step_with_retries = AsyncMock(return_value=[{'action': 'assert'}])
 
-        self.assertTrue(agent._popup_success_compatible_with_recent_mutation('User created successfully!'))
+        asyncio.run(agent._execute_ai_actions(object(), step, [{'action': 'click'}], 1, None, TimeoutError, history=history))
 
-    def test_popup_success_compatible_with_recent_delete_mutation(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-        agent._recent_network_events = [
-            {
-                'ts': time.time(),
-                'method': 'PATCH',
-                'url': 'https://test-api-2.agi7.ai/agi7/api/org/users/2366/deactivate',
-                'status': 200,
-                'ok': True,
-            }
-        ]
+        self.assertEqual(agent._execute_step.await_count, 1)
+        replan_artifact = next(artifact for artifact in history.artifacts if artifact['type'] == 'ai_replan')
+        self.assertEqual(replan_artifact['failed_action'], {'action': 'click'})
 
-        self.assertTrue(agent._popup_success_compatible_with_recent_mutation('User deleted successfully!'))
+    def test_assertion_failure_replans_and_rechecks_evidence(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_004', execution_record_id=7)
+        history = HistoryStub()
+        history.steps = [{
+            'step_num': 1,
+            'step_description': 'Open the record',
+            'action': 'click',
+            'executor': 'browser',
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'selected record', 'locator': '#record-7'},
+            }],
+            'result': True,
+        }]
+        step = {'description': 'Verify requested state', 'assertions': [{'action': 'assert'}]}
+        agent._plan_ai_step_with_retries = AsyncMock(return_value=[{'action': 'click', 'selector': '#retry'}])
+        agent._persisted_step_action_history = Mock(return_value=[])
+        agent._execute_ai_actions = AsyncMock()
+        agent._capture_media_state = AsyncMock(return_value=[])
+        agent._capture_screenshot = AsyncMock(return_value='retry.png')
+        agent._persist_step_attempt = AsyncMock(return_value={'assertion_statuses': ['passed']})
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
 
-    def test_fallback_actions_for_negative_user_list_assertion(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
+        with patch('apps.ai_testing.execution.plan_persistence.persist_replanned_step') as persist_replanned_step:
+            result = asyncio.run(agent._retry_assertion_failure(
+                page, step, 1, [{'action': 'click', 'selector': '#initial'}], ['failed'],
+                None, TimeoutError, history, None,
+            ))
 
-        actions = agent._fallback_actions_for_step({'description': '断言页面中左侧展示的用户列表中不包含ai@test.com用户'})
+        self.assertEqual(result[0], 'completed')
+        persist_replanned_step.assert_called_once()
+        agent._execute_ai_actions.assert_awaited_once()
+        self.assertEqual(agent._persist_step_attempt.await_args.args[3], 'completed')
+        replanning_step = agent._plan_ai_step_with_retries.await_args.args[1]
+        self.assertEqual(replanning_step['description'].splitlines()[0], 'Verify requested state')
+        self.assertEqual(replanning_step['_verified_predecessors'], [{
+            'step_num': 1,
+            'description': 'Open the record',
+            'action': 'click',
+            'executor': 'browser',
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'selected record', 'locator': '#record-7'},
+            }],
+        }])
 
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'assert',
-                    'assert_kind': 'text_visible',
-                    'param': 'ai@test.com',
-                    'expected': 'False',
-                    'reason': 'fallback deterministic negative list assertion',
-                }
-            ],
+    def test_initial_ai_action_persists_assertion_bindings(self) -> None:
+        agent = PyUICompatAgent(case_name='Initial_Binding', execution_record_id=7)
+        step = {
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'home page content'},
+            }],
+        }
+        actions = [{
+            'action': 'assert',
+            'assertion_bindings': [{'assertion_index': 1, 'locator': '#home'}],
+        }]
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_bound_step') as persist_bound_step:
+            asyncio.run(agent._apply_assertion_bindings(1, step, actions))
+
+        persist_bound_step.assert_called_once_with(
+            7,
+            1,
+            [{'assertion_index': 1, 'locator': '#home'}],
+        )
+        self.assertEqual(step['assertions'][0]['target']['locator'], '#home')
+
+    def test_post_action_binding_uses_assert_only_planning(self) -> None:
+        agent = PyUICompatAgent(case_name='Post_Action_Binding', execution_record_id=7)
+        history = HistoryStub()
+        step = {
+            'description': 'Open the requested menu',
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'required': True,
+                'target': {'intent': 'requested menu option'},
+            }],
+        }
+        agent._plan_ai_step_with_retries = AsyncMock(return_value=[{
+            'action': 'assert',
+            'assertion_bindings': [{'assertion_index': 1, 'locator': '#menu-option'}],
+        }])
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_bound_step') as persist_bound_step:
+            bound = asyncio.run(agent._bind_required_assertions_after_action(
+                object(), step, 1, [{'action': 'click', 'selector': '#menu'}], None, history,
+            ))
+
+        binding_step = agent._plan_ai_step_with_retries.await_args.args[1]
+        self.assertTrue(bound)
+        self.assertEqual(binding_step['allowed_capabilities'], ['browser.inspect'])
+        self.assertEqual(binding_step['_prior_actions'][0]['action'], 'click')
+        self.assertEqual(binding_step['_prior_actions'][0]['selector'], '#menu')
+        self.assertEqual(step['assertions'][0]['target']['locator'], '#menu-option')
+        persist_bound_step.assert_called_once()
+
+    def test_post_action_binding_uses_unique_completed_field_value(self) -> None:
+        agent = PyUICompatAgent(case_name='Field_Value_Binding', execution_record_id=7)
+        history = HistoryStub()
+        step = {
+            'description': 'Fill the requested search value',
+            'assertions': [{
+                'assert_kind': 'field_value',
+                'operator': 'equals',
+                'expected': {'value': 'black hair'},
+                'required': True,
+                'target': {'intent': 'search input'},
+            }],
+        }
+        agent._build_observable_elements = AsyncMock(return_value=[
+            {'tag': 'input', 'text': 'black hair', 'selector': '#search'},
+            {'tag': 'button', 'text': 'black hair', 'selector': '#label'},
+        ])
+        agent._plan_ai_step_with_retries = AsyncMock()
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_bound_step') as persist_bound_step:
+            bound = asyncio.run(agent._bind_required_assertions_after_action(
+                object(), step, 1, [{'action': 'fill', 'selector': '#search', 'value': 'black hair'}], None, history,
+            ))
+
+        self.assertTrue(bound)
+        self.assertEqual(step['assertions'][0]['target']['locator'], '#search')
+        agent._plan_ai_step_with_retries.assert_not_awaited()
+        persist_bound_step.assert_called_once_with(
+            7,
+            1,
+            [{'assertion_index': 1, 'locator': '#search'}],
         )
 
-    def test_fallback_actions_for_positive_user_list_assertion(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        actions = agent._fallback_actions_for_step({'description': '断言搜索结果中包含ai@test.com用户'})
-
-        self.assertEqual(
-            actions,
-            [
-                {
-                    'action': 'assert',
-                    'assert_kind': 'text_visible',
-                    'param': 'ai@test.com',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic positive list assertion',
-                }
-            ],
-        )
-
-    def test_fallback_actions_for_create_user_form_fields(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_004')
-
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': 'First Name输入框填写AI'}),
-            [
-                {
-                    'action': 'fill',
-                    'selector': "input[type='text'][placeholder='First Name']",
-                    'value': 'AI',
-                    'reason': 'fallback deterministic first-name fill',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': 'Last Name输入框填写Test'}),
-            [
-                {
-                    'action': 'fill',
-                    'selector': "input[type='text'][placeholder='Last Name']",
-                    'value': 'Test',
-                    'reason': 'fallback deterministic last-name fill',
-                }
-            ],
-        )
-
-    def test_fallback_actions_override_bad_cached_ai_plan(self) -> None:
-        with tempfile.TemporaryDirectory() as media_root:
-            with override_settings(MEDIA_ROOT=media_root):
-                agent = PyUICompatAgent(case_name='TC_004')
-                step = {'index': 8, 'description': 'First Name输入框填写AI'}
-                asyncio.run(agent._store_cached_ai_actions(step, [{'action': 'fill', 'selector': 'text=First Name', 'value': 'AI'}]))
-
-                history = PyUICompatHistory(cache_stats={'hit': 0, 'miss': 1})
-                actions, source = asyncio.run(agent._get_ai_actions_for_step(page=None, step=step, history=history))
-
-                self.assertEqual(source, 'fallback')
-                self.assertEqual(actions[0]['selector'], "input[type='text'][placeholder='First Name']")
-
-    def test_fallback_actions_for_tc005_camera_preview_flow(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_005')
-
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言当前页面展示出站点列表, 每个站点名称后都展示在线和离线的摄像头数量'}),
-            [
-                {
-                    'action': 'wait',
-                    'value': '20000',
-                    'reason': 'fallback wait for streaming page site list to hydrate',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'selector_non_empty',
-                    'selector_candidates': [
-                        '#btnSite',
-                        "button[id='btnSite']",
-                        "[id='btnSite']",
-                    ],
-                    'min_count': 1,
-                    'min_x': 80,
-                    'min_y': 120,
-                    'min_width': 120,
-                    'min_height': 20,
-                    'param': 'site_list',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic site list assertion',
-                },
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击搜索结果中目标站点名称'}),
-            [
-                {
-                    'action': 'click',
-                    'selector': '#btnSite',
-                    'param': 'first site result',
-                    'reason': 'fallback deterministic site result click',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': "从站点列表中找到第一个站点作为目标站点, 在placeholder为'Search site name...'的搜索框中输入目标站点名称"}),
-            [
-                {
-                    'action': 'search_site_with_cameras',
-                    'selector': "input[placeholder*='Search site name' i], input[placeholder*='Search' i]",
-                    'reason': 'fallback search the first site that has available cameras',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言目标站点名称下方展示出该站点的摄像头列表'}),
-            [
-                {
-                    'action': 'wait',
-                    'value': '15000',
-                    'reason': 'fallback wait for selected site camera list to hydrate',
-                },
-                {
-                    'action': 'assert',
-                    'assert_kind': 'selector_non_empty',
-                    'selector_candidates': [
-                        "div[class*='grid'] > div",
-                        "div[class*='grid'] > button",
-                        "div[class*='grid'] [class*='rounded']",
-                        "[class*='camera'] [class*='item']",
-                        "[class*='camera-item']",
-                        "[class*='list'] [class*='item']",
-                        "[class*='card']",
-                        "[class*='preview']",
-                        "[class*='thumbnail']",
-                        'img',
-                        'video',
-                        'canvas',
-                    ],
-                    'min_count': 1,
-                    'min_x': 80,
-                    'min_y': 120,
-                    'min_width': 40,
-                    'min_height': 20,
-                    'param': 'camera_list',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic camera list assertion',
-                },
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '从摄像头列表中找到第一个在线的摄像头, 点击该摄像头的预览图'}),
-            [
-                {
-                    'action': 'click_first_online_camera',
-                    'reason': 'fallback semantic online camera selection',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言当前页面展示出该摄像头的实时视频流'}),
-            [
-                {
-                    'action': 'assert',
-                    'assert_kind': 'stream_active',
-                    'param': 'stream_view',
-                    'expected': 'True',
-                    'reason': 'fallback deterministic active stream assertion',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '点击页面正下方的视频流关闭按钮, 该按钮为带盖垃圾桶形状'}),
-            [
-                {
-                    'action': 'close_active_stream',
-                    'reason': 'fallback semantic trash-button stream close',
-                }
-            ],
-        )
-        self.assertEqual(
-            agent._fallback_actions_for_step({'description': '断言实时视频流页面关闭'}),
-            [
-                {
-                    'action': 'assert_stream_closed',
-                    'reason': 'fallback semantic stream-close assertion',
-                }
-            ],
-        )
-
-    def test_empty_direct_step_uses_automatic_action_selection(self) -> None:
-        agent = PyUICompatAgent(case_name='TC_006')
-
-        normalized_step = agent._normalize_step(
-            {
-                'step_mode': 'direct',
-                'description': '打开 Cameras 页面，断言 Site 列表展示各 Site 的摄像头在线/离线数量。',
+    def test_assertion_replan_uses_persisted_scroll_evidence(self) -> None:
+        agent = PyUICompatAgent(case_name='Planner_Scroll_Evidence', execution_record_id=7)
+        history = HistoryStub()
+        step = {'description': 'Reveal and open the requested item', 'assertions': [{'action': 'assert'}]}
+        agent._plan_ai_step_with_retries = AsyncMock(side_effect=[
+            [{'action': 'scroll', 'selector': '#list'}],
+            [{'action': 'assert'}],
+        ])
+        agent._execute_ai_actions = AsyncMock()
+        agent._capture_media_state = AsyncMock(return_value=[])
+        agent._capture_screenshot = AsyncMock(return_value='retry.png')
+        persisted_scroll = {
+            'action': 'scroll',
+            'selector': '#list',
+            'scroll_state': {
+                'before': {'scroll_top': 0, 'remaining': 24},
+                'after': {'scroll_top': 1, 'remaining': 23},
             },
+        }
+        agent._persisted_step_action_history = Mock(side_effect=[[], [persisted_scroll]])
+        agent._persist_step_attempt = AsyncMock(side_effect=[
+            {'assertion_statuses': ['inconclusive']},
+            {'assertion_statuses': ['passed'], 'action': {'action': 'assert'}},
+        ])
+        page = SimpleNamespace(wait_for_timeout=AsyncMock())
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_replanned_step'):
+            result = asyncio.run(agent._retry_assertion_failure(
+                page, step, 1, [{'action': 'click', 'selector': '#initial'}], ['inconclusive'],
+                None, TimeoutError, history, None,
+            ))
+
+        second_replanning_step = agent._plan_ai_step_with_retries.await_args_list[1].args[1]
+        self.assertEqual(result[0], 'completed')
+        self.assertEqual(
+            second_replanning_step['_prior_actions'][-1]['scroll_state']['after']['scroll_top'],
             1,
         )
 
-        self.assertEqual(normalized_step['step_mode'], 'ai')
-        self.assertEqual(normalized_step['action'], '')
-        self.assertEqual(
-            agent._fallback_actions_for_step(normalized_step),
-            [{'action': 'open_camera_list', 'reason': 'camera workflow capability'}],
+    def test_verified_predecessor_context_keeps_bound_target_evidence(self) -> None:
+        agent = PyUICompatAgent(case_name='Planner_Target_Continuity')
+        history = HistoryStub()
+        history.steps = [
+            {
+                'step_num': 1,
+                'step_description': 'Locate the requested item',
+                'action': 'assert',
+                'executor': 'browser',
+                'assertions': [{
+                    'assert_kind': 'element_state',
+                    'target': {'intent': 'requested item', 'locator': '#item-7 img'},
+                }],
+                'result': True,
+            },
+            {
+                'step_num': 2,
+                'step_description': 'Unverified step',
+                'assertions': [{'target': {'locator': '#other'}}],
+                'result': False,
+            },
+        ]
+
+        context = agent._verified_predecessor_context(history)
+
+        self.assertEqual(context, [{
+            'step_num': 1,
+            'description': 'Locate the requested item',
+            'action': 'assert',
+            'executor': 'browser',
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'requested item', 'locator': '#item-7 img'},
+            }],
+        }])
+
+    def test_assertion_replan_contract_exhaustion_remains_inconclusive(self) -> None:
+        from apps.ai_testing.runtime.pyui_compat.runner import PlannerRetryExhaustedError
+
+        agent = PyUICompatAgent(case_name='Planner_Recovery', execution_record_id=7)
+        history = HistoryStub()
+        step = {'description': 'Verify requested state', 'assertions': [{'action': 'assert'}]}
+        agent._plan_ai_step_with_retries = AsyncMock(side_effect=PlannerRetryExhaustedError('no distinct action'))
+        agent._persisted_step_action_history = Mock(return_value=[])
+        agent._execute_ai_actions = AsyncMock()
+
+        result = asyncio.run(agent._retry_assertion_failure(
+            object(), step, 1, [{'action': 'scroll', 'selector': '#list'}], ['inconclusive'],
+            None, TimeoutError, history, None,
+        ))
+
+        self.assertEqual(result[0], 'inconclusive')
+        self.assertIn('PlannerRetryExhaustedError: no distinct action', result[1])
+        agent._execute_ai_actions.assert_not_awaited()
+
+    def test_assertion_replan_does_not_hide_runtime_failure(self) -> None:
+        agent = PyUICompatAgent(case_name='Planner_Recovery', execution_record_id=7)
+        agent._plan_ai_step_with_retries = AsyncMock(side_effect=RuntimeError('provider unavailable'))
+        agent._persisted_step_action_history = Mock(return_value=[])
+
+        with self.assertRaisesRegex(RuntimeError, 'provider unavailable'):
+            asyncio.run(agent._retry_assertion_failure(
+                object(), {'description': 'Verify state', 'assertions': [{'action': 'assert'}]},
+                1, [{'action': 'assert'}], ['inconclusive'], None, TimeoutError, HistoryStub(), None,
+            ))
+
+    def test_replan_failure_is_persisted_before_creating_new_plan(self) -> None:
+        agent = PyUICompatAgent(case_name='TC_004', execution_record_id=7)
+        agent._persist_step_attempt = AsyncMock()
+
+        asyncio.run(
+            agent._persist_replan_failure(
+                2,
+                {'description': 'Inspect current state'},
+                {'action': 'click'},
+                ValueError('target unavailable'),
+                object(),
+            )
         )
+
+        self.assertEqual(agent._persist_step_attempt.await_args.args[3], 'failed')
+        self.assertEqual(agent._persist_step_attempt.await_args.args[4], 'ValueError: target unavailable')
 
     def test_execute_step_selector_non_empty_applies_geometry_constraints(self) -> None:
         agent = PyUICompatAgent(case_name='TC_005')
@@ -1258,7 +1768,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
                 second = PyUICompatAgent(case_name='TC_005')
                 step = {'index': 1, 'description': '相同步骤'}
 
-                self.assertTrue(first._cache_key_for_step(step).startswith('v4::'))
+                self.assertTrue(first._cache_key_for_step(step).startswith('v5::'))
                 self.assertNotEqual(first._cache_key_for_step(step), second._cache_key_for_step(step))
 
     def test_history_step_action_uses_runtime_action_name(self) -> None:

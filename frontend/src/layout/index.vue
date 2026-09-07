@@ -375,9 +375,9 @@
               <el-icon><Folder /></el-icon>
               <span>{{ $t('menu.projectManagementCenter') }}</span>
             </el-menu-item>
-            <el-menu-item index="/configuration/env-setting">
+            <el-menu-item index="/configuration/environments">
               <el-icon><Connection /></el-icon>
-              <span>{{ $t('menu.apiAutomationEnvironment') }}</span>
+              <span>全局环境配置</span>
             </el-menu-item>
             <el-sub-menu index="ai-case-generation">
               <template #title>
@@ -741,7 +741,7 @@ const breadcrumbTitle = computed(() => {
     '/configuration/ai-gen/config-param': t('menu.generationConfig'),
     '/configuration/knowledge-base': t('menu.knowledgeBaseConfig'),
     '/configuration/ui-setting': t('menu.uiEnvConfig'),
-    '/configuration/env-setting': t('menu.apiAutomationEnvironment'),
+    '/configuration/environments': '全局环境配置',
     '/configuration/app-setting': t('menu.appEnvConfig'),
     '/configuration/ai-test/config-model': t('menu.aiModeModelConfig'),
     '/configuration/ai-test/config-prompt': t('menu.aiModePromptConfig'),

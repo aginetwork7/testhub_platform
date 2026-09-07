@@ -10,13 +10,13 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
 
-from apps.api_automation.models import ApiAutomationConfiguration
-from apps.api_automation.serializers import ApiAutomationConfigurationSerializer
+from apps.core.models import EnvironmentConfiguration
+from apps.core.serializers import EnvironmentConfigurationSerializer
 
 
-class ApiAutomationConfigurationDeviceKeyTests(TestCase):
+class EnvironmentConfigurationDeviceKeyTests(TestCase):
     def setUp(self) -> None:
-        self.configuration = ApiAutomationConfiguration.objects.create(
+        self.configuration = EnvironmentConfiguration.objects.create(
             name='Device Key Environment',
             environment='device-key',
         )
@@ -31,7 +31,7 @@ class ApiAutomationConfigurationDeviceKeyTests(TestCase):
             )
         ).decode('utf-8')
 
-        serializer = ApiAutomationConfigurationSerializer(
+        serializer = EnvironmentConfigurationSerializer(
             self.configuration,
             data={'main_device_key': encoded_key},
             partial=True,
@@ -40,7 +40,7 @@ class ApiAutomationConfigurationDeviceKeyTests(TestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         serializer.save()
         self.configuration.refresh_from_db()
-        serialized = ApiAutomationConfigurationSerializer(self.configuration).data
+        serialized = EnvironmentConfigurationSerializer(self.configuration).data
 
         self.assertEqual(self.configuration.get_event_device_key('main'), encoded_key)
         self.assertNotEqual(self.configuration.event_device_keys_encrypted, encoded_key)
