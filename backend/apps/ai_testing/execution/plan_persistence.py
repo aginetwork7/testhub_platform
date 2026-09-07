@@ -88,6 +88,7 @@ def persist_replanned_step(
             raise ValueError('Execution plan revision does not exist.')
 
         planned_tasks = _revision_source_tasks(previous_revision, step_order, failed_action, error_message, replanned_actions)
+        _validate_step_local_replan(previous_revision, planned_tasks, step_order)
         revision = persist_execution_plan(
             execution_record_id,
             previous_revision.source_goal,
@@ -153,6 +154,26 @@ def _revision_source_tasks(
     }
     tasks[step_order - 1] = target
     return tasks
+
+
+def _validate_step_local_replan(
+    previous_revision: AIExecutionPlanRevision,
+    replanned_tasks: Sequence[Mapping[str, Any]],
+    step_order: int,
+) -> None:
+    source_steps = previous_revision.plan.get('steps') if isinstance(previous_revision.plan, Mapping) else None
+    if not isinstance(source_steps, list) or len(source_steps) != len(replanned_tasks):
+        raise ValueError('Step replan must preserve the global plan shape.')
+    for index, (source_step, replanned_task) in enumerate(zip(source_steps, replanned_tasks), start=1):
+        if not isinstance(source_step, Mapping):
+            raise ValueError('Execution plan contains an invalid step.')
+        source_task = dict(source_step.get('source') or source_step)
+        if index != step_order and source_task != dict(replanned_task):
+            raise ValueError(f'Step replan cannot modify non-target step {index}.')
+        expected_step_key = str(source_step.get('step_key') or source_task.get('key') or source_task.get('id') or '')
+        replanned_step_key = str(replanned_task.get('key') or replanned_task.get('id') or expected_step_key)
+        if replanned_step_key != expected_step_key:
+            raise ValueError(f'Step replan cannot change step identity at position {index}.')
 
 
 def _copy_verified_predecessors(
@@ -222,6 +243,7 @@ def _normalize_task(task: Mapping[str, Any], index: int) -> dict[str, Any]:
         'allowed_capabilities': _list_value(task.get('allowed_capabilities')),
         'verification_required': task.get('verification_required', True) is not False,
         'assertions': _list_value(task.get('assertions')),
+        'correlates_resource': str(task.get('correlates_resource') or '').strip(),
         'source': dict(task),
     }
 

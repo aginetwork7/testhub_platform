@@ -53,11 +53,16 @@ def evaluate_step_assertions(execution_record_id: int, step_order: int) -> list[
             result.evidence_artifacts.add(*[artifact for artifact in evidence if artifact.id in evidence_ids])
             statuses.append(status)
 
-        if 'failed' in statuses:
+        required_statuses = [
+            status
+            for raw_assertion, status in zip(step.assertions, statuses)
+            if not isinstance(raw_assertion, Mapping) or raw_assertion.get('required', True) is not False
+        ]
+        if 'failed' in required_statuses:
             step.status = 'failed'
-        elif any(status in {'inconclusive', 'invalid_evidence'} for status in statuses):
+        elif any(status in {'inconclusive', 'invalid_evidence'} for status in required_statuses):
             step.status = 'inconclusive'
-        else:
+        elif required_statuses:
             step.status = 'verified'
         step.save(update_fields=['status', 'updated_at'])
         return statuses

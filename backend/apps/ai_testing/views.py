@@ -422,6 +422,11 @@ class AICaseViewSet(viewsets.ModelViewSet):
                 if ai_case.case_mode == 'freeform' and ai_case.planned_steps and not use_persisted_freeform_plan:
                     execution_record.logs += '[planner_v2] Ignored legacy persisted plan that does not meet the current assertion and capability contract.\n'
                     safe_save(execution_record, update_fields=['logs'])
+                runtime_task_steps = (
+                    ai_case.planned_steps
+                    if ai_case.case_mode == 'freeform' and ai_case.planned_steps
+                    else ai_case.task_steps
+                )
 
                 history = run_full_process_sync(
                     ai_case.task_description,
@@ -432,7 +437,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
                     enable_gif=(execution_mode == 'text'),
                     case_name=ai_case.name,
                     case_mode='hybrid' if use_persisted_freeform_plan else ai_case.case_mode,
-                    task_steps=ai_case.planned_steps if use_persisted_freeform_plan else ai_case.task_steps,
+                    task_steps=runtime_task_steps,
                     use_cache=use_cache,
                     execution_user_id=request.user.id,
                     environment_configuration=environment_configuration,

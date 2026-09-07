@@ -35,6 +35,9 @@ class _CanvasElement:
     async def screenshot(self, **_kwargs) -> bytes:
         return self._frame
 
+    async def get_attribute(self, _name: str) -> None:
+        return None
+
 
 class _CanvasLocator:
     def __init__(self, frames: list[bytes]) -> None:
@@ -78,6 +81,37 @@ class _FieldLocator:
 class _FieldPage:
     def locator(self, _selector):
         return _FieldLocator()
+
+
+class _SemanticInputLocator(_FieldLocator):
+    async def text_content(self, **_kwargs):
+        return ''
+
+    async def evaluate(self, _script):
+        return 'Magic Search V2'
+
+
+class _SemanticInputPage:
+    def locator(self, _selector):
+        return _SemanticInputLocator()
+
+
+class _AbsentLocator:
+    async def count(self):
+        return 0
+
+
+class _AbsentPage:
+    def locator(self, _selector):
+        return _AbsentLocator()
+
+
+class _ThemePage:
+    script = ''
+
+    async def evaluate(self, _script):
+        self.script = _script
+        return {'mode': 'dark', 'background_color': 'rgb(20, 20, 20)'}
 
 
 class BrowserObserverTests(unittest.TestCase):
@@ -131,3 +165,51 @@ class BrowserObserverTests(unittest.TestCase):
             'locator': '[data-field="category"]',
             'value': 'Other',
         }])
+
+    def test_dom_observer_collects_semantic_text_for_input_element_state(self) -> None:
+        artifacts = asyncio.run(collect_browser_observations(
+            _SemanticInputPage(),
+            [{'assert_kind': 'element_state', 'target': {'locator': '#search-mode'}}],
+            BrowserObservationContext(),
+        ))
+
+        self.assertEqual(artifacts, [{
+            'type': 'element_state',
+            'locator': '#search-mode',
+            'count': 1,
+            'visible': True,
+            'text': 'Magic Search V2',
+        }])
+
+    def test_dom_observer_collects_bound_absence(self) -> None:
+        artifacts = asyncio.run(collect_browser_observations(
+            _AbsentPage(),
+            [{
+                'assert_kind': 'absence',
+                'target': {'locator': '#closed-player'},
+            }],
+            BrowserObservationContext(),
+        ))
+
+        self.assertEqual(artifacts, [{
+            'type': 'absence_check',
+            'locator': '#closed-player',
+            'exists': False,
+        }])
+
+    def test_dom_observer_collects_theme_state_without_locator(self) -> None:
+        page = _ThemePage()
+
+        artifacts = asyncio.run(collect_browser_observations(
+            page,
+            [{'assert_kind': 'theme', 'target': {'page': 'current'}}],
+            BrowserObservationContext(),
+        ))
+
+        self.assertEqual(artifacts, [{
+            'type': 'theme_state',
+            'mode': 'dark',
+            'background_color': 'rgb(20, 20, 20)',
+        }])
+        self.assertIn('alpha <= 0.05', page.script)
+        self.assertIn('document.elementFromPoint', page.script)

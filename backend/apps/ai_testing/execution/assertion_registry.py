@@ -24,6 +24,10 @@ class AssertionKindDefinition:
 _EQUALITY_OPERATORS = frozenset({'equals', 'contains', 'matches', 'exists', 'not_exists'})
 _ORDERING_OPERATORS = frozenset({'equals', 'contains', 'matches', 'exists', 'not_exists', 'greater_than', 'less_than'})
 _COLLECTION_OPERATORS = frozenset({'equals', 'exists', 'not_exists', 'greater_than', 'less_than'})
+MEDIA_STATE_FIELDS = frozenset({
+    'paused', 'ended', 'readyState', 'networkState', 'currentTime', 'duration',
+    'videoWidth', 'videoHeight', 'currentSrc',
+})
 
 ASSERTION_KINDS: dict[str, AssertionKindDefinition] = {
     'text': AssertionKindDefinition(_EQUALITY_OPERATORS, ('dom_snapshot',)),
@@ -42,6 +46,7 @@ ASSERTION_KINDS: dict[str, AssertionKindDefinition] = {
     'command_result': AssertionKindDefinition(_EQUALITY_OPERATORS, ('command_receipt',)),
     'collection': AssertionKindDefinition(_COLLECTION_OPERATORS, ('collection_state',)),
     'absence': AssertionKindDefinition(_EQUALITY_OPERATORS, ('absence_check',)),
+    'theme': AssertionKindDefinition(_EQUALITY_OPERATORS, ('theme_state',)),
 }
 
 
@@ -61,7 +66,7 @@ def parse_assertion(payload: Mapping[str, Any]) -> AssertionSpec:
 
     target = _required_mapping(payload, 'target')
     expected = _required_mapping(payload, 'expected')
-    _validate_kind_payload(assert_kind, target, expected)
+    _validate_kind_payload(assert_kind, operator, target, expected)
     evidence_requirements = _parse_evidence_requirements(payload)
     missing_evidence = set(definition.required_evidence).difference(evidence_requirements)
     if missing_evidence:
@@ -91,10 +96,23 @@ def parse_assertion(payload: Mapping[str, Any]) -> AssertionSpec:
     )
 
 
-def _validate_kind_payload(assert_kind: str, target: dict[str, Any], expected: dict[str, Any]) -> None:
+def _validate_kind_payload(
+    assert_kind: str,
+    operator: str,
+    target: dict[str, Any],
+    expected: dict[str, Any],
+) -> None:
     locator_kinds = {'popup', 'element_state', 'collection', 'media', 'video', 'stream_state', 'playback'}
     if assert_kind in locator_kinds and not (target.get('locator') or target.get('intent')):
         raise AssertionContractError(f'Assertion target for {assert_kind} must include locator or intent.')
+    if (
+        assert_kind in {'media', 'video'}
+        and operator not in {'exists', 'not_exists'}
+        and (not set(expected) or not set(expected).issubset(MEDIA_STATE_FIELDS))
+    ):
+        raise AssertionContractError(
+            f'Assertion expected for {assert_kind} may contain only native media fields.'
+        )
     if assert_kind in {'stream_state', 'playback'}:
         value = expected.get('minimum_advanced_seconds')
         if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
@@ -103,6 +121,8 @@ def _validate_kind_payload(assert_kind: str, target: dict[str, Any], expected: d
         raise AssertionContractError('Assertion expected for visual_change must include boolean value.')
     if assert_kind == 'collection' and not isinstance(expected.get('value'), (int, float, bool)):
         raise AssertionContractError('Assertion expected for collection must include a numeric or boolean value.')
+    if assert_kind == 'theme' and str(expected.get('value') or '').strip().lower() not in {'dark', 'light'}:
+        raise AssertionContractError('Assertion expected for theme must be dark or light.')
 
 
 def _required_string(payload: Mapping[str, Any], field_name: str) -> str:

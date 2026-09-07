@@ -59,6 +59,14 @@ class AssertionRegistryTests(unittest.TestCase):
                 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress'],
             })
 
+    def test_rejects_video_with_unsupported_descriptive_state(self) -> None:
+        with self.assertRaisesRegex(AssertionContractError, 'native media fields'):
+            parse_assertion({
+                'action': 'assert', 'assert_kind': 'video', 'target': {'locator': 'video'},
+                'operator': 'equals', 'expected': {'value': 'playing'},
+                'evidence_requirements': ['media_state', 'media_event'],
+            })
+
     def test_stream_assertion_accepts_numeric_progress_operator(self) -> None:
         assertion = parse_assertion({
             'action': 'assert', 'assert_kind': 'stream_state', 'target': {'locator': 'video'},
@@ -84,3 +92,12 @@ class AssertionRegistryTests(unittest.TestCase):
                 'operator': 'contains', 'expected': {'value': 'at least one'},
                 'evidence_requirements': ['collection_state'],
             })
+
+    def test_theme_accepts_dark_or_light_expected_value(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert', 'assert_kind': 'theme', 'target': {'page': 'current'},
+            'operator': 'equals', 'expected': {'value': 'dark'},
+            'evidence_requirements': ['theme_state'],
+        })
+
+        self.assertEqual(assertion.assert_kind, 'theme')

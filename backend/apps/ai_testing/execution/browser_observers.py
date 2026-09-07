@@ -70,7 +70,67 @@ class DOMStateObserver:
         artifacts: list[dict[str, object]] = []
         for assertion in assertions:
             assert_kind = str(assertion.get('assert_kind') or '')
-            if assert_kind not in {'field_value', 'popup', 'element_state', 'collection'}:
+            if assert_kind not in {'field_value', 'popup', 'element_state', 'collection', 'absence', 'theme'}:
+                continue
+            if assert_kind == 'theme':
+                state = await page.evaluate(
+                    """() => {
+                        const root = document.documentElement;
+                        const body = document.body;
+                        const tokens = [
+                            root.getAttribute('data-theme'), body && body.getAttribute('data-theme'),
+                            root.getAttribute('theme'), body && body.getAttribute('theme'),
+                            root.className, body && body.className,
+                        ].filter(Boolean).join(' ').toLowerCase();
+                        let mode = /(^|[\\s_-])dark([\\s_-]|$)/.test(tokens) ? 'dark'
+                            : /(^|[\\s_-])light([\\s_-]|$)/.test(tokens) ? 'light' : '';
+                        const colorScheme = getComputedStyle(root).colorScheme.trim().toLowerCase();
+                        if (!mode && (colorScheme === 'dark' || colorScheme === 'light')) {
+                            mode = colorScheme;
+                        }
+                        const opaqueColor = (element) => {
+                            for (let current = element; current; current = current.parentElement) {
+                                const color = getComputedStyle(current).backgroundColor;
+                                const channels = color.match(/[\\d.]+/g);
+                                if (!channels || channels.length < 3) continue;
+                                const alpha = channels.length >= 4 ? Number(channels[3]) : 1;
+                                if (alpha <= 0.05) continue;
+                                const luminance = (0.2126 * Number(channels[0]) + 0.7152 * Number(channels[1]) + 0.0722 * Number(channels[2])) / 255;
+                                return {color, luminance};
+                            }
+                            return null;
+                        };
+                        const viewportWidth = Math.max(root.clientWidth, window.innerWidth || 0);
+                        const viewportHeight = Math.max(root.clientHeight, window.innerHeight || 0);
+                        const points = [
+                            [16, viewportHeight * 0.2],
+                            [16, viewportHeight * 0.5],
+                            [16, viewportHeight * 0.8],
+                            [viewportWidth * 0.5, 16],
+                            [viewportWidth - 16, 16],
+                        ];
+                        const surfaces = points
+                            .map(([x, y]) => opaqueColor(document.elementFromPoint(x, y)))
+                            .filter(Boolean);
+                        let backgroundColor = surfaces.length ? surfaces[0].color : '';
+                        if (!mode) {
+                            if (!surfaces.length) {
+                                const documentSurface = opaqueColor(body || root);
+                                if (documentSurface) {
+                                    surfaces.push(documentSurface);
+                                    backgroundColor = documentSurface.color;
+                                }
+                            }
+                            const darkCount = surfaces.filter((surface) => surface.luminance < 0.5).length;
+                            const lightCount = surfaces.length - darkCount;
+                            if (darkCount !== lightCount) {
+                                mode = darkCount > lightCount ? 'dark' : 'light';
+                            }
+                        }
+                        return {mode, background_color: backgroundColor};
+                    }"""
+                )
+                artifacts.append({'type': 'theme_state', **state})
                 continue
             target = assertion.get('target')
             locator_value = target.get('locator') if isinstance(target, Mapping) else None
@@ -82,8 +142,14 @@ class DOMStateObserver:
             try:
                 locator = page.locator(locator_text)
                 count = await locator.count()
+                if assert_kind == 'absence':
+                    artifacts.append({
+                        'type': 'absence_check',
+                        'locator': locator_text,
+                        'exists': count > 0,
+                    })
+                    continue
                 visible = bool(count and await locator.first.is_visible())
-                text = await locator.first.text_content(timeout=3000) if visible else ''
                 if assert_kind == 'field_value':
                     value = await locator.first.evaluate(
                         """element => {
@@ -93,6 +159,22 @@ class DOMStateObserver:
                     ) if visible else None
                     artifacts.append({'type': 'structured_value', 'locator': locator_text, 'value': value})
                     continue
+                semantic_text = getattr(locator.first, 'evaluate', None)
+                if visible and callable(semantic_text):
+                    text = await semantic_text(
+                        """element => {
+                            const value = 'value' in element && element.value != null ? String(element.value).trim() : '';
+                            return value || String(
+                                element.getAttribute('aria-valuetext')
+                                || element.getAttribute('aria-label')
+                                || element.getAttribute('placeholder')
+                                || element.textContent
+                                || ''
+                            ).trim();
+                        }"""
+                    )
+                else:
+                    text = await locator.first.text_content(timeout=3000) if visible else ''
                 artifacts.append({
                     'type': 'collection_state' if assert_kind == 'collection' else 'element_state',
                     'locator': locator_text, 'count': count, 'visible': visible, 'text': str(text or ''),
@@ -140,7 +222,11 @@ OBSERVERS: dict[str, tuple[ObserverDefinition, BrowserEvidenceObserver]] = {
         NATIVE_MEDIA_OBSERVER,
     ),
     'dom_state': (
-        ObserverDefinition('dom_state', ('structured_value', 'element_state', 'collection_state'), ('field_value', 'popup', 'element_state', 'collection')),
+        ObserverDefinition(
+            'dom_state',
+            ('structured_value', 'element_state', 'collection_state', 'absence_check', 'theme_state'),
+            ('field_value', 'popup', 'element_state', 'collection', 'absence', 'theme'),
+        ),
         DOM_STATE_OBSERVER,
     ),
     'visual_frame': (

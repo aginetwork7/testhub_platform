@@ -177,6 +177,51 @@ class ResourceEvidenceQualityGateTests(TestCase):
         self.assertEqual([item['revision_number'] for item in audit['revision_history']], [1, 2])
         self.assertEqual(audit['revision_history'][1]['reason'], 'replan_step_2_from_1')
 
+    def test_replan_changes_only_failed_step_and_preserves_global_plan(self) -> None:
+        record = AIExecutionRecord.objects.create(case_name='Step-local replan')
+        tasks = [
+            {'id': 'prepare', 'description': 'Prepare state', 'assertions': []},
+            {'id': 'operate', 'description': 'Perform operation', 'assertions': []},
+            {'id': 'verify', 'description': 'Verify final state', 'assertions': []},
+        ]
+        initial = persist_execution_plan(record.id, 'Complete workflow', tasks)
+
+        revision = persist_replanned_step(
+            record.id,
+            2,
+            {'action': 'click', 'selector': '#stale'},
+            'target unavailable',
+            [{'action': 'click', 'selector': '#current'}],
+        )
+
+        self.assertEqual(len(revision.plan['steps']), len(initial.plan['steps']))
+        self.assertEqual(revision.plan['steps'][0], initial.plan['steps'][0])
+        self.assertEqual(revision.plan['steps'][2], initial.plan['steps'][2])
+        self.assertEqual(revision.plan['steps'][1]['step_key'], initial.plan['steps'][1]['step_key'])
+        self.assertEqual(revision.plan['steps'][1]['intent'], initial.plan['steps'][1]['intent'])
+        self.assertEqual(
+            revision.plan['steps'][1]['source']['replan']['actions'],
+            [{'action': 'click', 'selector': '#current'}],
+        )
+
+    def test_replan_preserves_canonical_resource_correlation(self) -> None:
+        record = AIExecutionRecord.objects.create(case_name='Correlated resource replan')
+        persist_execution_plan(record.id, 'Select generated record', [
+            {'id': 'create', 'description': 'Create record', 'assertions': []},
+            {
+                'id': 'select', 'description': 'Select generated record', 'assertions': [],
+                'correlates_resource': 'alert_event',
+            },
+        ])
+
+        revision = persist_replanned_step(
+            record.id, 2, {'action': 'click', 'selector': '#stale'},
+            'target unavailable', [{'action': 'click', 'selector': '#current'}],
+        )
+
+        self.assertEqual(revision.plan['steps'][1]['correlates_resource'], 'alert_event')
+        self.assertEqual(revision.plan['steps'][1]['source']['correlates_resource'], 'alert_event')
+
     def test_replan_keeps_completed_predecessor_without_required_assertions(self) -> None:
         record = AIExecutionRecord.objects.create(case_name='Action-only predecessor')
         assertion = {
@@ -193,6 +238,33 @@ class ResourceEvidenceQualityGateTests(TestCase):
             [{'type': 'dom_snapshot', 'text': 'Selected'}],
         )
 
+        revision = persist_replanned_step(
+            record.id, 2, {'action': 'assert'}, 'Target unavailable', [{'action': 'assert'}],
+        )
+
+        predecessor = revision.steps.get(display_order=1)
+        self.assertEqual(predecessor.status, 'action_completed')
+        self.assertEqual(predecessor.attempts.count(), 1)
+
+    def test_optional_inconclusive_assertion_keeps_completed_predecessor(self) -> None:
+        record = AIExecutionRecord.objects.create(case_name='Optional assertion predecessor')
+        optional_assertion = {
+            'action': 'assert', 'assert_kind': 'text', 'target': {'page': 'current'},
+            'operator': 'contains', 'expected': {'value': 'Ready'},
+            'evidence_requirements': ['dom_snapshot'], 'required': False,
+        }
+        persist_execution_plan(record.id, 'Complete action then verify', [
+            {
+                'id': 'select', 'description': 'Select value', 'verification_required': False,
+                'assertions': [optional_assertion],
+            },
+            {'id': 'verify', 'description': 'Verify value', 'assertions': []},
+        ])
+        persist_step_attempt(
+            record.id, 1, {'action': 'click'}, {}, 'completed', '', 'environment', 'permission', [],
+        )
+
+        self.assertEqual(evaluate_step_assertions(record.id, 1), ['inconclusive'])
         revision = persist_replanned_step(
             record.id, 2, {'action': 'assert'}, 'Target unavailable', [{'action': 'assert'}],
         )

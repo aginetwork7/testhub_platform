@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contracts import AssertionSpec
+from .assertion_registry import MEDIA_STATE_FIELDS
 
 
 @dataclass(frozen=True)
@@ -83,12 +84,15 @@ def evaluate_assertion(
     if assertion.assert_kind == 'network':
         return _compare(assertion, _first_value(artifacts_by_type['network_response'], 'status'), 'status')
     if assertion.assert_kind == 'download_task':
-        return _compare(assertion, _first_value(artifacts_by_type['download_task_state'], 'status'), 'status')
+        return _compare(assertion, _last_value(artifacts_by_type['download_task_state'], 'status'), 'status')
     if assertion.assert_kind == 'command_result':
         return _compare(assertion, _first_value(artifacts_by_type['command_receipt'], 'exit_code'), 'exit_code')
     if assertion.assert_kind == 'absence':
         exists = _first_value(artifacts_by_type['absence_check'], 'exists')
         return _compare(assertion, exists, 'exists')
+    if assertion.assert_kind == 'theme':
+        mode = _first_value(artifacts_by_type['theme_state'], 'mode')
+        return _compare(assertion, mode, 'mode')
     if assertion.assert_kind in {'media', 'video'}:
         media_elements = _first_value(artifacts_by_type['media_state'], 'elements')
         return _evaluate_media_state(assertion, media_elements)
@@ -119,6 +123,10 @@ def _first_value(artifacts: Sequence[Mapping[str, Any]], key: str) -> object:
         if key in artifact:
             return artifact[key]
     return None
+
+
+def _last_value(artifacts: Sequence[Mapping[str, Any]], key: str) -> object:
+    return _first_value(tuple(reversed(artifacts)), key)
 
 
 def _matching_target_state(artifacts: Sequence[Mapping[str, Any]], target: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -189,8 +197,7 @@ def _evaluate_media_state(assertion: AssertionSpec, media_elements: object) -> A
         )
 
     expected = assertion.expected
-    supported_keys = {'paused', 'ended', 'readyState', 'networkState', 'currentTime', 'duration', 'videoWidth', 'videoHeight', 'currentSrc'}
-    expected_keys = set(expected).intersection(supported_keys)
+    expected_keys = set(expected).intersection(MEDIA_STATE_FIELDS)
     if not expected_keys:
         return AssertionEvaluation('inconclusive', {}, 'Media assertion has no supported expected fields.')
 

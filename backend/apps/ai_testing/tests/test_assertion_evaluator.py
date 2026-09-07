@@ -266,6 +266,16 @@ class AssertionEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(result.status, 'passed')
 
+    def test_download_task_assertion_uses_latest_event(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'download_task', 'target': {'download': 'current'}, 'operator': 'equals', 'expected': {'value': 'completed'}, 'evidence_requirements': ['download_task_state']})
+
+        result = evaluate_assertion(assertion, [
+            {'type': 'download_task_state', 'status': 'failed'},
+            {'type': 'download_task_state', 'status': 'completed'},
+        ])
+
+        self.assertEqual(result.status, 'passed')
+
     def test_visual_change_uses_before_and_after_frame_hashes(self) -> None:
         assertion = parse_assertion({'action': 'assert', 'assert_kind': 'visual_change', 'target': {'page': 'current'}, 'operator': 'equals', 'expected': {'value': True}, 'evidence_requirements': ['visual_frame_before', 'visual_frame_after']})
         result = evaluate_assertion(assertion, [{'type': 'visual_frame_before', 'content_hash': 'before'}, {'type': 'visual_frame_after', 'content_hash': 'after'}])
@@ -283,6 +293,17 @@ class AssertionEvaluatorTests(unittest.TestCase):
         result = evaluate_assertion(assertion, [{'type': 'visual_frame_before', 'content_hash': 'before'}])
 
         self.assertEqual(result.status, 'inconclusive')
+
+    def test_theme_assertion_uses_deterministic_theme_state(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert', 'assert_kind': 'theme', 'target': {'page': 'current'},
+            'operator': 'equals', 'expected': {'value': 'dark'},
+            'evidence_requirements': ['theme_state'],
+        })
+
+        result = evaluate_assertion(assertion, [{'type': 'theme_state', 'mode': 'dark'}])
+
+        self.assertEqual(result.status, 'passed')
 
     def test_stream_state_fails_without_active_progress(self) -> None:
         assertion = parse_assertion({'action': 'assert', 'assert_kind': 'stream_state', 'target': {'locator': 'video'}, 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 2}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})

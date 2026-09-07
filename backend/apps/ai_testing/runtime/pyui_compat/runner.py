@@ -19,6 +19,10 @@ logger = logging.getLogger('django')
 ACTION_CACHE_SCHEMA_VERSION = 'v5'
 
 
+class PlannerRetryExhaustedError(ValueError):
+    """Raised when every model-generated action violates the planner contract."""
+
+
 def _is_false_like(value):
     return str(value or '').strip().lower() in {'false', '0', 'no'}
 
@@ -47,10 +51,12 @@ class PyUICompatAgent:
         self.ai_case_id = ai_case_id
         self._cache_context_by_step = {}
         self._recent_network_events = []
-        self._runtime_correlation_values = []
         self._recent_download_events = []
+        self._download_event_baseline = 0
         self._execution_resources = []
         self._last_actionable_controls = []
+        self._last_accessibility_snapshot = {'snapshot_id': '', 'page_version': '', 'nodes': []}
+        self._mcp_client = None
 
     async def analyze_task(self, task_description, case_mode='freeform', task_steps=None):
         return self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -60,6 +66,25 @@ class PyUICompatAgent:
         if callback is not None:
             await self._emit(callback, {'type': 'log', 'content': 'planner_v2 runtime bootstrap: executor not implemented yet\n'})
         return tasks
+
+    @staticmethod
+    def _freeform_planning_goal(task_description: str, task_steps: object) -> str:
+        if not isinstance(task_steps, list):
+            return task_description
+        descriptions = [
+            str(step.get('description') or '').strip()[:500]
+            for step in task_steps[:20]
+            if isinstance(step, dict) and str(step.get('description') or '').strip()
+        ]
+        if not descriptions:
+            return task_description
+        requirements = '\n'.join(f'{index}. {description}' for index, description in enumerate(descriptions, start=1))
+        return (
+            f'{task_description}\n\n'
+            'Stored case step requirements contain explicit values that must be preserved while producing a new canonical plan. '
+            'Treat them as requirement context only; do not reuse legacy selectors or action payloads:\n'
+            f'{requirements}'
+        )
 
     def _resolve_browser_executable(self):
         """Prefer a browser that can decode original HEVC event media."""
@@ -83,7 +108,7 @@ class PyUICompatAgent:
             from apps.ai_testing.global_planner import GlobalTestPlanner
 
             execution_steps = await GlobalTestPlanner().create_plan(
-                task_description,
+                self._freeform_planning_goal(task_description, task_steps),
                 getattr(self.environment_configuration, 'id', None),
                 use_cache=self.use_cache,
             )
@@ -189,10 +214,34 @@ class PyUICompatAgent:
             )
             page = await context.new_page()
             self._attach_runtime_observers(page)
+            mcp_step_context = {'step': None}
 
             try:
                 await self._bootstrap_pyuitest_session(page, step_callback)
-                self._runtime_correlation_values = []
+                from apps.ai_testing.execution.mcp_tools import (
+                    BrowserMCPToolAdapter,
+                    MCPInProcessClient,
+                    MCPInProcessTransport,
+                    MCPJsonRpcDispatcher,
+                )
+
+                async def observe_current_step():
+                    current_step = mcp_step_context['step']
+                    if not isinstance(current_step, dict):
+                        raise ValueError('No active browser step for MCP observation.')
+                    return await self._collect_planner_observation(page, current_step)
+
+                browser_tools = BrowserMCPToolAdapter(
+                    lambda: (mcp_step_context['step'] or {}).get('allowed_capabilities') or [],
+                    action_handler=lambda instruction: self._execute_step(
+                        page,
+                        instruction,
+                        timeout_error=PlaywrightTimeout,
+                    ),
+                    observation_handler=observe_current_step,
+                )
+                dispatcher = MCPJsonRpcDispatcher(browser_tools)
+                self._mcp_client = MCPInProcessClient(MCPInProcessTransport(dispatcher))
 
                 for index, step in enumerate(normalized_steps, start=step_index_start):
                     if should_stop is not None and await self._check_stop(should_stop):
@@ -202,6 +251,7 @@ class PyUICompatAgent:
                         )
                         break
 
+                    mcp_step_context['step'] = step
                     history.planner_trace['step_retry_map'][str(index)] = 0
                     await self._emit(step_callback, {'task_id': index, 'status': 'in_progress'})
                     await self._emit(
@@ -210,6 +260,7 @@ class PyUICompatAgent:
                     )
 
                     started_at = time.perf_counter()
+                    self._download_event_baseline = len(self._recent_download_events)
                     media_state_before = await self._capture_media_state(page)
                     from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
                     visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
@@ -336,7 +387,11 @@ class PyUICompatAgent:
                             {'type': 'log', 'content': f"[planner_v2] Step {index} failed: {error_message}\n"},
                         )
 
-                    await page.wait_for_timeout(300)
+                    await self._wait_for_assertion_observation(page, step)
+                    if status == 'completed' and step.get('step_mode') == 'ai':
+                        await self._bind_required_assertions_after_action(
+                            page, step, index, ai_actions, step_callback, history,
+                        )
                     screenshot_path = await self._capture_screenshot(
                         page,
                         artifact_dir,
@@ -374,7 +429,9 @@ class PyUICompatAgent:
                     status = self._status_after_assertions(status, required_statuses)
                     if status != 'completed' and not error_message:
                         error_message = f'Required assertions were not verified: {", ".join(required_statuses)}.'
-                    if self._should_retry_assertions(step, action_completed, assertions_verified, action_source):
+                    if self._should_retry_assertions(
+                        step, action_completed, assertions_verified, action_source, required_statuses,
+                    ):
                         retry_result = await self._retry_assertion_failure(
                             page, step, index, ai_actions, required_statuses, step_callback,
                             PlaywrightTimeout, history, artifact_dir,
@@ -418,6 +475,7 @@ class PyUICompatAgent:
                             'result': status == 'completed',
                             'source': action_source,
                             'executor': step.get('executor', 'browser'),
+                            'assertions': step.get('assertions') or [],
                             'retry_count': history.planner_trace['step_retry_map'].get(str(index), 0),
                             'step_screenshot': screenshot_rel_path,
                             'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -474,6 +532,8 @@ class PyUICompatAgent:
                     history.artifacts.extend(report_artifacts)
                 history.planner_trace['case_report'] = history.case_report
             finally:
+                self._mcp_client = None
+                mcp_step_context['step'] = None
                 try:
                     await asyncio.wait_for(context.close(), timeout=10)
                 except Exception as exc:
@@ -657,8 +717,26 @@ class PyUICompatAgent:
             history.cache_stats['experience_hit'] = history.cache_stats.get('experience_hit', 0) + 1
             return experience_actions, 'experience'
 
-        ai_actions = await self._plan_ai_step_for_cacheable_step(page, step, history, step_callback=step_callback, step_index=step_index)
+        planning_step = {
+            **step,
+            '_verified_predecessors': self._verified_predecessor_context(history),
+        }
+        ai_actions = await self._plan_ai_step_for_cacheable_step(page, planning_step, history, step_callback=step_callback, step_index=step_index)
         return ai_actions, 'model'
+
+    @staticmethod
+    def _verified_predecessor_context(history):
+        return [
+            {
+                'step_num': completed_step.get('step_num'),
+                'description': completed_step.get('step_description'),
+                'action': completed_step.get('action'),
+                'executor': completed_step.get('executor'),
+                'assertions': completed_step.get('assertions') or [],
+            }
+            for completed_step in getattr(history, 'steps', [])
+            if completed_step.get('result') is True
+        ]
 
     async def _plan_ai_step_for_cacheable_step(self, page, step, history, step_callback=None, step_index=None):
         ai_actions = await self._plan_ai_step_with_retries(
@@ -694,7 +772,8 @@ class PyUICompatAgent:
                     )
                     if 'selector is not visible' in str(last_error):
                         planning_step['_planner_force_visual_loc'] = True
-                return await self._plan_ai_step(page, planning_step)
+                planned_actions = await self._plan_ai_step(page, planning_step)
+                return planned_actions
             except Exception as exc:
                 last_error = exc
                 history.artifacts.append(
@@ -710,9 +789,19 @@ class PyUICompatAgent:
                     break
                 await asyncio.sleep(min(1.0, 0.2 * attempt))
 
-        raise ValueError(f'Hybrid AI step planner failed after {max_attempts} attempts: {last_error}')
+        raise PlannerRetryExhaustedError(
+            f'Hybrid AI step planner failed after {max_attempts} attempts: {last_error}'
+        )
 
     async def _execute_ai_actions(self, page, step, ai_actions, index, step_callback, timeout_error, history=None, remaining_replans=2):
+        from apps.ai_testing.execution.mcp_tools import (
+            BrowserMCPToolAdapter,
+            MCPInProcessClient,
+            MCPInProcessTransport,
+            MCPJsonRpcDispatcher,
+        )
+
+        await self._apply_assertion_bindings(index, step, ai_actions)
         history_artifact = {
             'type': 'ai_plan',
             'step': index,
@@ -726,14 +815,18 @@ class PyUICompatAgent:
         )
         if history is not None:
             history.artifacts.append(history_artifact)
+        allowed_capabilities = step.get('allowed_capabilities') or []
+        mcp_client = self._mcp_client
+        if mcp_client is None:
+            browser_tools = BrowserMCPToolAdapter(
+                allowed_capabilities,
+                lambda instruction: self._execute_step(page, instruction, timeout_error=timeout_error),
+            )
+            mcp_client = MCPInProcessClient(MCPInProcessTransport(MCPJsonRpcDispatcher(browser_tools)))
         for sub_index, ai_action in enumerate(ai_actions, start=1):
             if self.execution_record_id is not None:
-                from apps.ai_testing.execution.capabilities import validate_browser_action
-
-                allowed_capabilities = step.get('allowed_capabilities')
                 if not isinstance(allowed_capabilities, list) or not allowed_capabilities:
                     raise ValueError('Persisted browser step is missing allowed_capabilities.')
-                validate_browser_action(str(ai_action.get('action') or ''), allowed_capabilities)
             await self._emit(
                 step_callback,
                 {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: {self._describe_action(ai_action)}\n"},
@@ -742,7 +835,11 @@ class PyUICompatAgent:
                 if ai_action.get('action') == 'assert' and not ai_action.get('assert_kind'):
                     action_result = None
                 else:
-                    action_result = await self._execute_step(page, ai_action, timeout_error=timeout_error)
+                    tool_result = await mcp_client.call_tool(
+                        'browser.act',
+                        {'instruction': ai_action},
+                    )
+                    action_result = tool_result['structuredContent']
                 if history is not None and isinstance(action_result, dict) and action_result.get('before_path'):
                     history.artifacts.extend([
                         {'type': 'playback_before_forward', 'step': index, 'path': action_result['before_path']},
@@ -792,14 +889,6 @@ class PyUICompatAgent:
                         f'{type(error).__name__}: {error}',
                         replan_actions,
                     )
-                    bindings = replan_actions[0].get('assertion_bindings', []) if replan_actions else []
-                    if bindings:
-                        from apps.ai_testing.execution.plan_persistence import persist_bound_step
-
-                        await sync_to_async(persist_bound_step)(self.execution_record_id, index, bindings)
-                        bound_step = self._bind_step_assertions(step, bindings)
-                        step.clear()
-                        step.update(bound_step)
                 await self._emit(
                     step_callback,
                     {'type': 'log', 'content': f"[planner_v2] Step {index}.{sub_index}: replanning from current page.\n"},
@@ -1254,6 +1343,7 @@ class PyUICompatAgent:
             {'type': 'url_snapshot', 'url': page_url},
             {'type': 'page_state', 'url': page_url},
             {'type': 'planner_actionable_controls', 'controls': self._last_actionable_controls},
+            {'type': 'planner_accessibility_snapshot', **self._last_accessibility_snapshot},
         ]
         artifacts.extend([
             {'type': 'network_response', **event}
@@ -1270,7 +1360,7 @@ class PyUICompatAgent:
                     native_media_before=media_state_before,
                     visual_frames_before=tuple(visual_frames_before or []),
                     canvas_frames_before=tuple(canvas_frames_before or []),
-                    download_events=tuple(self._recent_download_events),
+                    download_events=tuple(self._current_step_download_events()),
                 ),
             ))
         except Exception as error:
@@ -1298,10 +1388,11 @@ class PyUICompatAgent:
                     },
                 ])
 
+        audit_action = self._audit_action_payload(executed_action, step)
         persisted_attempt = await sync_to_async(persist_step_attempt)(
             self.execution_record_id,
             step_index,
-            self._audit_action_payload(executed_action, step),
+            audit_action,
             {'output': output} if output is not None else {},
             'completed' if status == 'completed' else status,
             error_message or '',
@@ -1311,13 +1402,14 @@ class PyUICompatAgent:
         )
         return {
             **persisted_attempt,
+            'action': audit_action,
             'assertion_statuses': await self._evaluate_persisted_assertions(step_index),
         }
 
     @staticmethod
     def _audit_action_payload(executed_action, step):
         action = executed_action if isinstance(executed_action, dict) else {}
-        return {
+        payload = {
             'action': str(action.get('action') or executed_action or step.get('action') or ''),
             'selector': str(action.get('selector') or ''),
             'url': str(action.get('url') or ''),
@@ -1327,6 +1419,7 @@ class PyUICompatAgent:
             'source': step.get('step_mode') or 'direct',
             'executor': step.get('executor') or 'browser',
         }
+        return payload
 
     @staticmethod
     def _bind_step_assertions(step, bindings):
@@ -1342,6 +1435,116 @@ class PyUICompatAgent:
             assertion['target'] = {'locator': binding['locator'], 'intent': semantic_intent}
         bound_step['assertions'] = assertions
         return bound_step
+
+    async def _apply_assertion_bindings(self, step_index, step, actions):
+        bindings = actions[0].get('assertion_bindings', []) if actions else []
+        if not bindings:
+            return
+        if self.execution_record_id is not None:
+            from apps.ai_testing.execution.plan_persistence import persist_bound_step
+
+            await sync_to_async(persist_bound_step)(self.execution_record_id, step_index, bindings)
+        bound_step = self._bind_step_assertions(step, bindings)
+        step.clear()
+        step.update(bound_step)
+
+    async def _bind_required_assertions_after_action(
+        self,
+        page,
+        step: dict,
+        step_index: int,
+        actions: list[dict],
+        step_callback,
+        history,
+    ) -> bool:
+        bindable_kinds = {'field_value', 'popup', 'element_state', 'collection', 'absence'}
+        unresolved = [
+            assertion
+            for assertion in step.get('assertions') or []
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('required', True) is not False
+                and assertion.get('assert_kind') in bindable_kinds
+                and not str((assertion.get('target') or {}).get('locator') or '').strip()
+            )
+        ]
+        if not unresolved or not actions or actions[-1].get('action') == 'assert':
+            return False
+        deterministic_bindings = await self._field_value_bindings_from_completed_action(
+            page,
+            step,
+            unresolved,
+            actions[-1],
+        )
+        if deterministic_bindings:
+            await self._apply_assertion_bindings(
+                step_index,
+                step,
+                [{'action': 'assert', 'assertion_bindings': deterministic_bindings}],
+            )
+            return True
+        binding_step = {
+            **step,
+            'allowed_capabilities': ['browser.inspect'],
+            '_prior_actions': [self._audit_action_payload(action, step) for action in actions[-8:]],
+            'description': (
+                f"{step['description']}\n"
+                'The state-changing action completed. Inspect the current page and return assert with complete '
+                'discovered locator bindings for every required DOM assertion. Do not perform another UI action.'
+            ),
+        }
+        try:
+            binding_actions = await self._plan_ai_step_with_retries(
+                page,
+                binding_step,
+                history,
+                step_callback=step_callback,
+                step_index=step_index,
+                max_attempts=2,
+            )
+        except PlannerRetryExhaustedError:
+            logger.info(
+                'planner_v2 could not bind required assertions after step %s action; continue with strict evidence capture',
+                step_index,
+            )
+            return False
+        await self._apply_assertion_bindings(step_index, step, binding_actions)
+        return True
+
+    async def _field_value_bindings_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        if len(unresolved) != 1 or unresolved[0].get('assert_kind') != 'field_value':
+            return []
+        if action.get('action') not in {'fill', 'input', 'type'}:
+            return []
+        assertion = unresolved[0]
+        expected = str((assertion.get('expected') or {}).get('value') or '')
+        action_value = str(action.get('value') or action.get('param') or '')
+        if assertion.get('operator') != 'equals' or not expected or action_value != expected:
+            return []
+        candidates = {
+            str(element.get('selector') or '').strip()
+            for element in await self._build_observable_elements(page)
+            if (
+                isinstance(element, dict)
+                and element.get('tag') in {'input', 'textarea', 'select'}
+                and str(element.get('text') or '') == expected
+                and str(element.get('selector') or '').strip()
+            )
+        }
+        if len(candidates) != 1:
+            return []
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        return [{'assertion_index': assertion_index, 'locator': candidates.pop()}]
 
     async def _evaluate_persisted_assertions(self, step_index):
         from apps.ai_testing.execution.assertion_persistence import evaluate_step_assertions
@@ -1376,12 +1579,13 @@ class PyUICompatAgent:
         return not has_required_assertion or PyUICompatAgent._assertions_are_verified(required_statuses)
 
     @staticmethod
-    def _should_retry_assertions(step, action_completed, assertions_verified, action_source):
+    def _should_retry_assertions(step, action_completed, assertions_verified, action_source, assertion_statuses=()):
         return (
             step.get('verification_required', True) is not False
             and action_completed
             and not assertions_verified
             and action_source == 'model'
+            and 'failed' not in assertion_statuses
         )
 
     @staticmethod
@@ -1394,38 +1598,124 @@ class PyUICompatAgent:
             return 'inconclusive'
         return action_status
 
+    async def _wait_for_assertion_observation(self, page, step):
+        assertions = step.get('assertions') or []
+        download_assertions = [
+            assertion
+            for assertion in assertions
+            if isinstance(assertion, dict) and assertion.get('assert_kind') == 'download_task'
+        ]
+        playback_assertions = [
+            assertion
+            for assertion in assertions
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') == 'playback'
+                and assertion.get('required', True) is not False
+            )
+        ]
+        collection_assertions = [
+            assertion
+            for assertion in assertions
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') == 'collection'
+                and assertion.get('required', True) is not False
+            )
+        ]
+        if collection_assertions:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+            timeout_ms = min(10000, max(
+                int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
+                for assertion in collection_assertions
+            ))
+            try:
+                await page.wait_for_load_state('networkidle', timeout=timeout_ms)
+            except (PlaywrightTimeoutError, TimeoutError):
+                logger.info(
+                    'planner_v2 collection observation networkidle timeout after %sms; '
+                    'continue with strict evidence capture',
+                    timeout_ms,
+                )
+            return
+        if playback_assertions:
+            timeout_ms = max(
+                int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
+                for assertion in playback_assertions
+            )
+            minimum_advanced_seconds = max(
+                float((assertion.get('expected') or {}).get('minimum_advanced_seconds') or 0)
+                for assertion in playback_assertions
+            )
+            deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+            playback_baselines = {}
+            while True:
+                media_state = await self._capture_media_state(page)
+                if isinstance(media_state, list):
+                    for media_index, media in enumerate(media_state):
+                        if not isinstance(media, dict):
+                            continue
+                        try:
+                            ready_state = int(media.get('readyState') or 0)
+                            current_time = float(media.get('currentTime') or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if ready_state < 2 or media.get('paused', True) or media.get('ended', False):
+                            continue
+                        baseline = playback_baselines.setdefault(media_index, current_time)
+                        if current_time - baseline >= minimum_advanced_seconds:
+                            return
+                remaining_ms = round((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    return
+                await page.wait_for_timeout(min(500, remaining_ms))
+        if not download_assertions:
+            await page.wait_for_timeout(300)
+            return
+        timeout_ms = max(
+            int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
+            for assertion in download_assertions
+        )
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while not self._current_step_download_events() and time.monotonic() < deadline:
+            await page.wait_for_timeout(min(500, max(1, round((deadline - time.monotonic()) * 1000))))
+
+    def _current_step_download_events(self):
+        return self._recent_download_events[self._download_event_baseline:]
+
     async def _retry_assertion_failure(self, page, step, step_index, actions, assertion_statuses, step_callback, timeout_error, history, artifact_dir):
         if self.execution_record_id is None:
             return None
         failure = f'Required assertions were not verified: {", ".join(assertion_statuses)}.'
         replan_limit = self._assertion_replan_limit()
-        prior_actions = [self._audit_action_payload(action, step) for action in actions[-8:]]
+        persisted_actions = await sync_to_async(self._persisted_step_action_history)(step_index)
+        prior_actions = persisted_actions or [self._audit_action_payload(action, step) for action in actions[-8:]]
+        persisted_attempt = None
+        screenshot_path = None
         for attempt in range(1, replan_limit + 1):
             replanning_step = {
                 **step,
                 '_planner_failure': failure,
-            '_prior_actions': prior_actions[-16:],
+                '_prior_actions': prior_actions[-16:],
+                '_verified_predecessors': self._verified_predecessor_context(history),
                 'description': (
                     f"{step['description']}\n"
                     f'{failure} Inspect the current page evidence and choose a different action sequence.'
                 ),
             }
-            replan_actions = await self._plan_ai_step_with_retries(
-                page, replanning_step, history, step_callback=step_callback, step_index=step_index,
-            )
+            try:
+                replan_actions = await self._plan_ai_step_with_retries(
+                    page, replanning_step, history, step_callback=step_callback, step_index=step_index,
+                )
+            except PlannerRetryExhaustedError as error:
+                error_message = f'{type(error).__name__}: {error}'
+                return 'inconclusive', error_message, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
             from apps.ai_testing.execution.plan_persistence import persist_replanned_step
 
             await sync_to_async(persist_replanned_step)(
                 self.execution_record_id, step_index, actions[-1] if actions else {}, failure, replan_actions,
             )
-            bindings = replan_actions[0].get('assertion_bindings', []) if replan_actions else []
-            if bindings:
-                from apps.ai_testing.execution.plan_persistence import persist_bound_step
-
-                await sync_to_async(persist_bound_step)(self.execution_record_id, step_index, bindings)
-                bound_step = self._bind_step_assertions(step, bindings)
-                step.clear()
-                step.update(bound_step)
             await self._emit(
                 step_callback,
                 {'type': 'log', 'content': f'[planner_v2] Step {step_index}: replanning after assertion failure ({attempt}/{replan_limit}).\n'},
@@ -1434,6 +1724,7 @@ class PyUICompatAgent:
             from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
             visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
             canvas_frames_before = await capture_canvas_frames(page, step.get('assertions') or [])
+            self._download_event_baseline = len(self._recent_download_events)
             try:
                 await self._execute_ai_actions(
                     page, step, replan_actions, step_index, step_callback, timeout_error, history=history,
@@ -1443,6 +1734,11 @@ class PyUICompatAgent:
             except Exception as error:
                 action_status = 'failed'
                 error_message = f'{type(error).__name__}: {error}'
+            await self._wait_for_assertion_observation(page, step)
+            if action_status == 'completed':
+                await self._bind_required_assertions_after_action(
+                    page, step, step_index, replan_actions, step_callback, history,
+                )
             screenshot_path = await self._capture_screenshot(
                 page, artifact_dir, self._step_screenshot_filename(step_index),
             )
@@ -1458,8 +1754,37 @@ class PyUICompatAgent:
                 return status, error_message, replan_actions[-1].get('action') if replan_actions else '', replan_actions, persisted_attempt, screenshot_path
             failure = f'Required assertions were not verified: {", ".join(required_statuses)}.'
             actions = replan_actions
-            prior_actions.extend(self._audit_action_payload(action, step) for action in replan_actions)
+            persisted_actions = await sync_to_async(self._persisted_step_action_history)(step_index)
+            if persisted_actions:
+                prior_actions = persisted_actions[-16:]
+            else:
+                persisted_action = persisted_attempt.get('action') if isinstance(persisted_attempt, dict) else None
+                prior_actions.append(
+                    persisted_action
+                    if isinstance(persisted_action, dict)
+                    else self._audit_action_payload(replan_actions[-1], step)
+                )
         return status, failure, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
+
+    def _persisted_step_action_history(self, step_index):
+        from apps.ai_testing.models import AIExecutionStepAttempt
+
+        if self.execution_record_id is None:
+            return []
+        attempts = AIExecutionStepAttempt.objects.filter(
+            step__plan_revision__execution_record_id=self.execution_record_id,
+            step__display_order=step_index,
+        ).order_by(
+            'step__plan_revision__revision_number',
+            'attempt_number',
+            'id',
+        )
+        history = []
+        for attempt in attempts:
+            if not isinstance(attempt.action, dict):
+                continue
+            history.append(dict(attempt.action))
+        return history
 
     def _assertion_replan_limit(self):
         settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
@@ -1471,38 +1796,12 @@ class PyUICompatAgent:
 
     async def _capture_media_state(self, page):
         try:
-            return await page.locator('video, audio').evaluate_all(
-                """
-                elements => elements.map(element => ({
-                    tag: element.tagName.toLowerCase(),
-                    paused: Boolean(element.paused),
-                    ended: Boolean(element.ended),
-                    readyState: Number(element.readyState),
-                    networkState: Number(element.networkState),
-                    currentTime: Number(element.currentTime),
-                    duration: Number.isFinite(element.duration) ? Number(element.duration) : null,
-                    videoWidth: Number(element.videoWidth || 0),
-                    videoHeight: Number(element.videoHeight || 0),
-                    currentSrc: String(element.currentSrc || element.src || ''),
-                }))
-                """
-            )
+            from apps.ai_testing.execution.browser_observers import NATIVE_MEDIA_OBSERVER
+
+            return await NATIVE_MEDIA_OBSERVER.capture_state(page)
         except Exception as error:
             logger.warning('planner_v2 failed to capture media evidence: %s', error)
             return None
-
-    @staticmethod
-    def _media_progress_seconds(before, after):
-        if not isinstance(before, list) or not isinstance(after, list):
-            return None
-        before_times = [item.get('currentTime') for item in before if isinstance(item, dict)]
-        after_times = [item.get('currentTime') for item in after if isinstance(item, dict)]
-        for before_time, after_time in zip(before_times, after_times):
-            try:
-                return max(0.0, float(after_time) - float(before_time))
-            except (TypeError, ValueError):
-                continue
-        return None
 
     def _build_planned_tasks(self, task_description, case_mode='freeform', task_steps=None):
         if case_mode in {'structured', 'hybrid'} and isinstance(task_steps, list) and task_steps:
@@ -1596,6 +1895,8 @@ class PyUICompatAgent:
             'assertions': raw_step.get('assertions') or [],
             'verification_required': raw_step.get('verification_required', True) is not False,
             'selector': selector,
+            'role': raw_step.get('role'),
+            'accessible_name': raw_step.get('accessible_name'),
             'loc': raw_step.get('loc'),
             'param': raw_step.get('param'),
             'url': raw_step.get('url') or raw_step.get('target_url'),
@@ -1610,6 +1911,7 @@ class PyUICompatAgent:
             'command': raw_step.get('command'),
             'resource_type': raw_step.get('resource_type'),
             'resource_reference': raw_step.get('resource_reference'),
+            'correlates_resource': raw_step.get('correlates_resource'),
             'operation': raw_step.get('operation'),
             'arguments': raw_step.get('arguments') or {},
             'device': raw_step.get('device'),
@@ -1655,6 +1957,46 @@ class PyUICompatAgent:
             validate_browser_action(action, step.get('allowed_capabilities') or [])
 
     async def _plan_ai_step(self, page, step):
+        from apps.ai_testing.execution.mcp_tools import (
+            BrowserMCPToolAdapter,
+            MCPInProcessClient,
+            MCPInProcessTransport,
+            MCPJsonRpcDispatcher,
+        )
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        mcp_client = self._mcp_client
+        if mcp_client is None:
+            browser_tools = BrowserMCPToolAdapter(
+                step.get('allowed_capabilities') or [],
+                observation_handler=lambda: self._collect_planner_observation(page, step),
+            )
+            mcp_client = MCPInProcessClient(MCPInProcessTransport(MCPJsonRpcDispatcher(browser_tools)))
+        tool_result = await mcp_client.call_tool('browser.observe', {})
+        actions = await VisualStepReplanner().create_actions(
+            step['description'],
+            tool_result['structuredContent'],
+        )
+        normalized_actions = []
+        for offset, action in enumerate(actions, start=1):
+            normalized_action = self._normalize_step(
+                {
+                    **action,
+                    'step_mode': 'direct',
+                    'description': action.get('description') or f"{step['description']} - action {offset}",
+                },
+                offset,
+            )
+            normalized_action['thinking'] = 'planned_by=planner_vision'
+            normalized_actions.append(normalized_action)
+        self._validate_planned_actions(
+            normalized_actions,
+            step['description'],
+            step.get('allowed_capabilities') or [],
+        )
+        return normalized_actions
+
+    async def _collect_planner_observation(self, page, step):
         current_url = page.url or ''
         try:
             page_title = await page.title()
@@ -1670,18 +2012,21 @@ class PyUICompatAgent:
         if len(normalized_text) > 1600:
             normalized_text = normalized_text[:1600]
 
-        from apps.ai_testing.global_planner import VisualStepReplanner
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+        from apps.ai_testing.execution.page_observation import capture_accessibility_snapshot
 
         actionable_controls = await self._build_actionable_controls(page)
         self._last_actionable_controls = [
             {
                 key: control.get(key)
-                for key in ('selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'top_layer', 'blocking_layer', 'z_index', 'container_text')
+                for key in ('selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'z_index', 'container_text')
             }
             for control in actionable_controls[:300]
             if isinstance(control, dict)
         ]
         observable_elements = await self._build_observable_elements(page)
+        accessibility_snapshot = await capture_accessibility_snapshot(page)
+        self._last_accessibility_snapshot = accessibility_snapshot
         try:
             page_metrics = await page.evaluate(
                 """() => {
@@ -1706,63 +2051,34 @@ class PyUICompatAgent:
                         scroll_height: element.scrollHeight,
                         client_height: element.clientHeight,
                         remaining: element.scrollHeight - element.clientHeight - element.scrollTop,
-                    })).filter(item => item.selector && item.remaining > 1).sort((left, right) => right.remaining - left.remaining).slice(0, 20);
+                    })).filter(item => item.selector && item.remaining > 1 && item.client_height * 0.8 >= 2).sort((left, right) => right.remaining - left.remaining).slice(0, 20);
                     return { scroll_y: window.scrollY, scroll_height: document.documentElement.scrollHeight, viewport_height: window.innerHeight, scroll_containers: scrollContainers };
                 }"""
             )
         except Exception:
             page_metrics = {}
-
-        actions = await VisualStepReplanner().create_actions(
-            step['description'],
-            {
-                'url': current_url,
-                'title': page_title,
-                'visible_text': normalized_text,
-                'actionable_controls': actionable_controls,
-                'observable_elements': observable_elements,
-                'page_metrics': page_metrics,
-                'allowed_capabilities': step.get('allowed_capabilities') or [],
-                'assertions': step.get('assertions') or [],
-                'execution_resources': [
-                    *self._execution_resources,
-                    {
-                        'resource_type': 'mutation_response',
-                        'resource': {
-                            'result_correlation': {
-                                'match_values': self._runtime_correlation_values[-50:],
-                            },
-                        },
-                    },
-                ],
-                'prior_actions': step.get('_prior_actions') or [],
-                'require_assertion_bindings': step.get('_require_assertion_bindings') is True,
-                'error': step.get('_planner_failure', ''),
-                'screenshot': await self._capture_inline_screenshot_data(page),
-            },
-        )
-        normalized_actions = []
-        for offset, action in enumerate(actions, start=1):
-            normalized_action = self._normalize_step(
-                {
-                    **action,
-                    'step_mode': 'direct',
-                    'description': action.get('description') or f"{step['description']} - action {offset}",
-                },
-                offset,
-            )
-            normalized_action['thinking'] = 'planned_by=planner_vision'
-            normalized_actions.append(normalized_action)
-        self._validate_planned_actions(
-            normalized_actions,
-            step['description'],
-            step.get('allowed_capabilities') or [],
-        )
-        return normalized_actions
+        return {
+            'url': current_url,
+            'title': page_title,
+            'visible_text': normalized_text,
+            'actionable_controls': actionable_controls,
+            'blocking_state': build_blocking_state(actionable_controls),
+            'observable_elements': observable_elements,
+            'accessibility_snapshot': accessibility_snapshot,
+            'page_metrics': page_metrics,
+            'allowed_capabilities': step.get('allowed_capabilities') or [],
+            'assertions': step.get('assertions') or [],
+            'correlates_resource': step.get('correlates_resource') or '',
+            'execution_resources': self._execution_resources,
+            'prior_actions': step.get('_prior_actions') or [],
+            'verified_predecessors': step.get('_verified_predecessors') or [],
+            'error': step.get('_planner_failure', ''),
+            'screenshot': await self._capture_inline_screenshot_data(page),
+        }
 
     async def _build_actionable_controls(self, page):
         try:
-            return await page.locator('body *').evaluate_all(
+            controls = await page.locator('body *').evaluate_all(
                 """
                 elements => elements.filter(element => {
                     const style = getComputedStyle(element);
@@ -1772,11 +2088,13 @@ class PyUICompatAgent:
                     const frameworkListener = Object.getOwnPropertySymbols(element).some(symbol => {
                         const value = element[symbol];
                         return String(symbol.description || '').includes('_vei') && value && typeof value === 'object' && Object.keys(value).length > 0;
-                    }) || Object.getOwnPropertyNames(element).some(property => {
+                    }) || (element._vei && typeof element._vei === 'object' && Object.keys(element._vei).length > 0) || Object.getOwnPropertyNames(element).some(property => {
                         const value = element[property];
                         return property.startsWith('__reactProps') && value && typeof value === 'object' && Object.keys(value).some(key => /^on[A-Z]/.test(key));
                     });
-                    const interactive = nativeControl || interactiveRole || element.hasAttribute('tabindex') || element.hasAttribute('onclick') || frameworkListener || style.cursor === 'pointer';
+                    const directSvg = Array.from(element.children).some(child => child.tagName === 'svg');
+                    const compactIconControl = directSvg && rect.width >= 16 && rect.height >= 16 && rect.width <= 80 && rect.height <= 80;
+                    const interactive = nativeControl || interactiveRole || element.hasAttribute('tabindex') || element.hasAttribute('onclick') || frameworkListener || style.cursor === 'pointer' || compactIconControl;
                     const hitTarget = document.elementFromPoint(
                         rect.left + rect.width / 2,
                         rect.top + rect.height / 2,
@@ -1786,7 +2104,7 @@ class PyUICompatAgent:
                     const rect = element.getBoundingClientRect();
                     const containsInteractive = Array.from(element.querySelectorAll('*')).some(child => {
                         const childStyle = getComputedStyle(child);
-                        const childFrameworkListener = Object.getOwnPropertySymbols(child).some(symbol => String(symbol.description || '').includes('_vei')) || Object.getOwnPropertyNames(child).some(property => property.startsWith('__reactProps'));
+                        const childFrameworkListener = Object.getOwnPropertySymbols(child).some(symbol => String(symbol.description || '').includes('_vei')) || (child._vei && typeof child._vei === 'object' && Object.keys(child._vei).length > 0) || Object.getOwnPropertyNames(child).some(property => property.startsWith('__reactProps'));
                         return ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(child.tagName) || ['button', 'link', 'option', 'menuitem', 'row'].includes(child.getAttribute('role')) || child.hasAttribute('onclick') || childFrameworkListener || childStyle.cursor === 'pointer';
                     });
                     const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
@@ -1796,6 +2114,12 @@ class PyUICompatAgent:
                     const title = element.getAttribute('title');
                     const href = element.getAttribute('href');
                     const semanticChild = element.querySelector('[aria-label], [title], [alt], [data-icon], [data-lucide], svg title, svg, use');
+                    const semanticUse = element.querySelector('svg use, use');
+                    const semanticReference = semanticUse ? (
+                        semanticUse.getAttribute('href')
+                        || semanticUse.getAttribute('xlink:href')
+                        || ''
+                    ) : '';
                     const semanticClass = semanticChild && typeof semanticChild.getAttribute('class') === 'string'
                         ? semanticChild.getAttribute('class').split(/\\s+/).find(token => /icon$/i.test(token)) || ''
                         : '';
@@ -1805,6 +2129,7 @@ class PyUICompatAgent:
                         || semanticChild.getAttribute('alt')
                         || semanticChild.getAttribute('data-icon')
                         || semanticChild.getAttribute('data-lucide')
+                        || semanticReference
                         || semanticChild.textContent
                         || semanticChild.getAttribute('href')
                         || semanticChild.getAttribute('xlink:href')
@@ -1814,9 +2139,9 @@ class PyUICompatAgent:
                     const name = (element.getAttribute('aria-label') || title || element.innerText || element.value || href || semanticName || '').trim().slice(0, 120);
                     const uniqueId = element.id && document.querySelectorAll(`#${CSS.escape(element.id)}`).length === 1;
                     const attributeSelector = (attribute, value) => `[${attribute}=${JSON.stringify(value)}]`;
-                    const structuralSelector = () => {
+                    const structuralSelector = (target = element) => {
                         const parts = [];
-                        let current = element;
+                        let current = target;
                         while (current && current !== document.body) {
                             const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
                             const position = siblings.indexOf(current) + 1;
@@ -1844,7 +2169,17 @@ class PyUICompatAgent:
                     const zIndex = Number.parseInt(getComputedStyle(dialog || positioned || element).zIndex, 10) || 0;
                     const topLayer = Boolean(dialog || positioned || zIndex > 0);
                     const blockingLayer = Boolean(dialog || (positioned && getComputedStyle(positioned).position === 'fixed' && positionedRatio >= 0.3));
-                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || '', name, selector, url, native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: group.length, group_ordinal: group.indexOf(element), top_layer: topLayer, blocking_layer: blockingLayer, z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                    const blockingLayerId = blockingLayer ? structuralSelector(dialog || positioned) : '';
+                    const inputType = String(element.getAttribute('type') || '').toLowerCase();
+                    const implicitRole = element.tagName === 'BUTTON' ? 'button'
+                        : element.tagName === 'A' && href ? 'link'
+                        : element.tagName === 'SELECT' ? 'combobox'
+                        : element.tagName === 'TEXTAREA' ? 'textbox'
+                        : element.tagName === 'INPUT' && ['button', 'submit', 'reset'].includes(inputType) ? 'button'
+                        : element.tagName === 'INPUT' && inputType === 'checkbox' ? 'checkbox'
+                        : element.tagName === 'INPUT' && inputType === 'radio' ? 'radio'
+                        : element.tagName === 'INPUT' ? 'textbox' : '';
+                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || implicitRole, name, selector, url, described_by: element.getAttribute('aria-describedby') || '', native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: group.length, group_ordinal: group.indexOf(element), top_layer: topLayer, blocking_layer: blockingLayer, blocking_layer_id: blockingLayerId, z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
                 }).filter(control => control.selector || control.name).sort((left, right) => {
                     const blockingLayerRank = Number(right.blocking_layer) - Number(left.blocking_layer);
                     const namedRank = Number(Boolean(right.name)) - Number(Boolean(left.name));
@@ -1855,6 +2190,20 @@ class PyUICompatAgent:
                 }).slice(0, 300);
                 """
             )
+            for control in controls:
+                described_by = str(control.pop('described_by', '') or '').strip()
+                if control.get('name') or not described_by or not control.get('selector'):
+                    continue
+                try:
+                    tooltip_name = await page.evaluate(
+                        "tooltipId => document.getElementById(tooltipId)?.innerText?.trim() || ''",
+                        described_by,
+                    )
+                except Exception:
+                    tooltip_name = ''
+                if tooltip_name:
+                    control['name'] = str(tooltip_name)[:120]
+            return controls
         except Exception:
             return []
 
@@ -1984,8 +2333,14 @@ class PyUICompatAgent:
                 raise ValueError(f'Planner action {index} uses unsupported action {name}')
             if action.get('loc'):
                 raise ValueError(f'Planner action {index} must not use fixed coordinates')
-            if name in {'click', 'double_click', 'right_click', 'hover'} and not str(action.get('selector') or '').strip():
-                raise ValueError(f'Planner action {index} {name} requires selector')
+            has_accessible_locator = bool(
+                str(action.get('role') or '').strip()
+                and str(action.get('accessible_name') or '').strip()
+            )
+            if name in {'click', 'double_click', 'right_click', 'hover', 'fill', 'press', 'select'} and not (
+                str(action.get('selector') or '').strip() or has_accessible_locator
+            ):
+                raise ValueError(f'Planner action {index} {name} requires selector or role and accessible_name')
             if name == 'navigate' and not action.get('url'):
                 raise ValueError(f'Planner action {index} navigate requires url')
             if name in {'fill', 'press', 'select'} and not action.get('value'):
@@ -1993,12 +2348,10 @@ class PyUICompatAgent:
             if allowed_capabilities is not None:
                 validate_browser_action(name, allowed_capabilities)
 
-    def _normalize_text_for_contains(self, text):
-        return re.sub(r'\s+', '', str(text or '').strip())
-
     def _attach_runtime_observers(self, page):
         self._recent_network_events = []
         self._recent_download_events = []
+        self._download_event_baseline = 0
 
         async def on_response(response):
             try:
@@ -2020,42 +2373,10 @@ class PyUICompatAgent:
                     }
                 )
                 self._recent_network_events = self._recent_network_events[-50:]
-                if response.ok:
-                    try:
-                        payload = await response.json()
-                    except (TypeError, ValueError):
-                        payload = None
-                    self._runtime_correlation_values.extend(self._extract_correlation_values(payload))
-                    self._runtime_correlation_values = list(dict.fromkeys(self._runtime_correlation_values))[-50:]
             except Exception:
                 logger.debug('planner_v2 failed to record runtime response', exc_info=True)
 
         page.on('response', on_response)
-
-    @staticmethod
-    def _extract_correlation_values(payload):
-        values = []
-        sensitive_keys = {'access', 'authorization', 'credential', 'password', 'refresh', 'secret', 'token'}
-
-        def collect(value, key=''):
-            if any(term in key.casefold() for term in sensitive_keys):
-                return
-            if isinstance(value, dict):
-                for child_key, child_value in value.items():
-                    collect(child_value, str(child_key))
-                return
-            if isinstance(value, list):
-                for child_value in value[:50]:
-                    collect(child_value, key)
-                return
-            if isinstance(value, bool) or value is None:
-                return
-            text = str(value).strip()
-            if 3 <= len(text) <= 128:
-                values.append(text)
-
-        collect(payload)
-        return values[:50]
 
         def on_download(download):
             async def capture_download_result():
@@ -2105,6 +2426,26 @@ class PyUICompatAgent:
             return await self._first_visible_locator(text_locator)
         except Exception:
             return None
+
+    async def _resolve_step_locator(self, page, step):
+        role = str(step.get('role') or '').strip()
+        accessible_name = str(step.get('accessible_name') or '').strip()
+        if role or accessible_name:
+            if not role or not accessible_name:
+                raise ValueError('Accessibility locator requires both role and accessible_name.')
+            locator = page.get_by_role(role, name=accessible_name, exact=True)
+            visible_matches = []
+            for index in range(await locator.count()):
+                candidate = locator.nth(index) if hasattr(locator, 'nth') else locator.first
+                if await candidate.is_visible():
+                    visible_matches.append(candidate)
+            if len(visible_matches) != 1:
+                raise ValueError(
+                    f'Accessibility locator role={role!r}, name={accessible_name!r} matched '
+                    f'{len(visible_matches)} visible elements.'
+                )
+            return visible_matches[0]
+        return await self._resolve_locator(page, step.get('selector'))
 
     @staticmethod
     async def _first_visible_locator(locator):
@@ -2197,7 +2538,7 @@ class PyUICompatAgent:
             return
 
         if action in {'click'}:
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc) or self._parse_point(param)
             if locator is not None:
                 await locator.click(timeout=timeout_ms)
@@ -2210,7 +2551,7 @@ class PyUICompatAgent:
             return
 
         if action in {'double_click'}:
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc) or self._parse_point(param)
             if locator is not None:
                 await locator.dblclick(timeout=timeout_ms)
@@ -2221,7 +2562,7 @@ class PyUICompatAgent:
             return
 
         if action in {'right_click'}:
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc) or self._parse_point(param)
             if locator is not None:
                 await locator.click(timeout=timeout_ms, button='right')
@@ -2232,7 +2573,7 @@ class PyUICompatAgent:
             return
 
         if action in {'hover'}:
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc) or self._parse_point(param)
             if locator is not None:
                 try:
@@ -2251,7 +2592,7 @@ class PyUICompatAgent:
 
         if action in {'type', 'fill', 'input'}:
             value = str(step.get('value') or param or '').strip()
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc)
             if locator is not None:
                 await locator.fill(value, timeout=timeout_ms)
@@ -2264,7 +2605,7 @@ class PyUICompatAgent:
 
         if action in {'press', 'keyboard_press', 'key', 'hotkey'}:
             value = str(step.get('value') or param or '').strip()
-            locator = await self._resolve_locator(page, selector) if selector else None
+            locator = await self._resolve_step_locator(page, step)
             if not value:
                 raise ValueError('press step requires value')
             if locator is not None:
@@ -2274,13 +2615,13 @@ class PyUICompatAgent:
             return
 
         if action in {'select', 'select_option'}:
-            selector = str(step.get('selector') or '').strip()
             value = str(step.get('value') or '').strip()
-            if not selector:
-                raise ValueError('select step requires selector')
             if not value:
                 raise ValueError('select step requires value')
-            await page.locator(selector).first.select_option(value, timeout=timeout_ms)
+            locator = await self._resolve_step_locator(page, step)
+            if locator is None:
+                raise ValueError('select step requires a resolvable element locator')
+            await locator.select_option(value, timeout=timeout_ms)
             return
 
         if action in {'wait', 'sleep'}:

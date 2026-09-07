@@ -122,5 +122,8 @@ class AlphaPlanningTests(TestCase):
     def test_planner_vision_default_prompt_is_seeded(self) -> None:
         prompt = AITestPromptConfig.objects.get(prompt_type='planner_vision', is_active=True)
 
-        self.assertIn('Return only one JSON object: {"actions":[...]}. No prose.', prompt.content)
-        self.assertIn('Compare two playback screenshots.', prompt.content)
+        self.assertIn('single-step observe-reason-act-verify loop', prompt.content)
+        self.assertIn('Resolve blocking state first.', prompt.content)
+        self.assertIn('Fail closed on ambiguity.', prompt.content)
+        self.assertNotIn('camera', prompt.content.lower())
+        self.assertNotIn('playback', prompt.content.lower())

@@ -1,4 +1,5 @@
 import inspect
+import json
 
 from django.test import SimpleTestCase
 from types import SimpleNamespace
@@ -83,6 +84,139 @@ class GlobalTestPlannerTests(SimpleTestCase):
             [{'assertion_index': 1, 'locator': '#status-menu'}],
         )
 
+    def test_visual_planner_allows_unique_accessible_action_on_blocking_layer(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_blocking_layer_action(
+            [{'action': 'click', 'role': 'button', 'accessible_name': 'Confirm'}],
+            [{'selector': '#confirm', 'role': 'button', 'name': 'Confirm', 'blocking_layer': True}],
+        )
+
+    def test_blocking_state_limits_actions_to_highest_layer(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        controls = [
+            {'selector': '#lower', 'blocking_layer': True, 'blocking_layer_id': '#first', 'z_index': 10},
+            {'selector': '#upper', 'blocking_layer': True, 'blocking_layer_id': '#second', 'z_index': 20},
+        ]
+        state = build_blocking_state(controls)
+
+        self.assertEqual(state['active_layer_ids'], ['#second'])
+        with self.assertRaisesRegex(GlobalPlanError, 'blocking dialog'):
+            VisualStepReplanner._validate_blocking_layer_action(
+                [{'action': 'click', 'selector': '#lower'}],
+                controls,
+                blocking_state=state,
+            )
+        VisualStepReplanner._validate_blocking_layer_action(
+            [{'action': 'click', 'selector': '#upper'}],
+            controls,
+            blocking_state=state,
+        )
+
+    def test_blocking_state_allows_controls_on_tied_active_layers(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        controls = [
+            {'selector': '#first', 'blocking_layer': True, 'blocking_layer_id': '#layer-a', 'z_index': 'auto'},
+            {'selector': '#second', 'blocking_layer': True, 'blocking_layer_id': '#layer-b', 'z_index': 0},
+        ]
+        state = build_blocking_state(controls)
+
+        self.assertEqual(state['active_layer_ids'], ['#layer-a', '#layer-b'])
+        VisualStepReplanner._validate_blocking_layer_action(
+            [{'action': 'click', 'selector': '#first'}],
+            controls,
+            blocking_state=state,
+        )
+
+    def test_blocking_state_is_inactive_without_blocking_controls(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+
+        state = build_blocking_state([{'selector': '#page', 'blocking_layer': False}])
+
+        self.assertFalse(state['is_blocked'])
+        self.assertEqual(state['active_layer_ids'], [])
+
+    def test_visual_planner_receives_normalized_blocking_state(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        source = inspect.getsource(VisualStepReplanner.create_actions)
+
+        self.assertIn('Blocking state:', source)
+        self.assertIn('blocking_state)', source)
+
+    def test_visual_planner_accepts_unique_accessibility_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_accessible_action(
+            [{'action': 'click', 'role': 'button', 'accessible_name': 'Settings'}],
+            {'nodes': [{'node_id': 'ax:button', 'role': 'button', 'name': 'Settings'}]},
+        )
+
+    def test_visual_planner_rejects_ambiguous_accessibility_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        nodes = [
+            {'node_id': 'ax:button-1', 'role': 'button', 'name': 'Save'},
+            {'node_id': 'ax:button-2', 'role': 'button', 'name': 'Save'},
+        ]
+
+        with self.assertRaisesRegex(GlobalPlanError, 'exactly one current AX node or actionable control'):
+            VisualStepReplanner._validate_accessible_action(
+                [{'action': 'click', 'role': 'button', 'accessible_name': 'Save'}],
+                {'nodes': nodes},
+            )
+
+    def test_visual_planner_resolves_duplicate_ax_nodes_with_unique_actionable_control(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        action = {'action': 'click', 'role': 'button', 'accessible_name': 'Save'}
+        nodes = [
+            {'node_id': 'ax:button-1', 'role': 'button', 'name': 'Save'},
+            {'node_id': 'ax:button-2', 'role': 'button', 'name': 'Save'},
+        ]
+
+        VisualStepReplanner._validate_accessible_action(
+            [action],
+            {'nodes': nodes},
+            [{'role': 'button', 'name': 'Save', 'selector': '#save'}],
+        )
+
+        self.assertEqual(action['selector'], '#save')
+        self.assertIsNone(action['role'])
+        self.assertIsNone(action['accessible_name'])
+
+    def test_visual_planner_rejects_repeated_accessibility_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        action = {'action': 'click', 'role': 'button', 'accessible_name': 'Settings'}
+
+        with self.assertRaisesRegex(GlobalPlanError, 'must not repeat'):
+            VisualStepReplanner._validate_non_repeating_action(
+                [action],
+                [action],
+                [{'role': 'button', 'name': 'Settings', 'blocking_layer': False}],
+            )
+
+    def test_visual_planner_rejects_navigation_as_absence_proof(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'absence', 'required': True}]
+
+        with self.assertRaisesRegex(GlobalPlanError, 'navigating away'):
+            VisualStepReplanner._validate_absence_recovery(
+                [{'action': 'navigate', 'url': '/other'}], [], assertions,
+            )
+        with self.assertRaisesRegex(GlobalPlanError, 'navigation link'):
+            VisualStepReplanner._validate_absence_recovery(
+                [{'action': 'click', 'selector': '#other'}],
+                [{'selector': '#other', 'url': '/other'}],
+                assertions,
+            )
+
     def test_unbound_assertion_error_directs_state_changing_recovery(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
@@ -90,49 +224,18 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         self.assertIn('return one state-changing action', source)
         self.assertIn('instead of assert', source)
-        self.assertIn("{'field_value', 'popup', 'element_state', 'collection'}", source)
+        self.assertIn("{'field_value', 'popup', 'element_state', 'collection', 'absence'}", source)
 
-    def test_final_field_assertion_supersedes_matching_precondition_assertion(self) -> None:
-        steps = [
-            {'assertions': [{
-                'assert_kind': 'element_state',
-                'target': {'intent': 'investigation category options'},
-                'operator': 'exists',
-                'required': True,
-            }]},
-            {'assertions': [{
-                'assert_kind': 'field_value',
-                'target': {'intent': 'investigation category field'},
-                'operator': 'contains',
-                'required': True,
-            }]},
-        ]
+    def test_visual_planner_waits_for_observed_loading_state(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
 
-        GlobalTestPlanner._demote_superseded_precondition_assertions(steps)
+        source = inspect.getsource(VisualStepReplanner.create_actions)
 
-        self.assertFalse(steps[0]['assertions'][0]['required'])
-        self.assertFalse(steps[0]['verification_required'])
-        self.assertTrue(steps[1]['assertions'][0]['required'])
+        self.assertIn('return assert with complete discovered bindings', source)
+        self.assertIn('do not repeat the transition', source)
+        self.assertIn('use one bounded wait action', source)
+        self.assertIn('never resubmit the triggering action while loading', source)
 
-    def test_unrelated_precondition_assertion_remains_required(self) -> None:
-        steps = [
-            {'assertions': [{
-                'assert_kind': 'element_state',
-                'target': {'intent': 'selected record detail'},
-                'operator': 'exists',
-                'required': True,
-            }]},
-            {'assertions': [{
-                'assert_kind': 'field_value',
-                'target': {'intent': 'investigation category field'},
-                'operator': 'contains',
-                'required': True,
-            }]},
-        ]
-
-        GlobalTestPlanner._demote_superseded_precondition_assertions(steps)
-
-        self.assertTrue(steps[0]['assertions'][0]['required'])
 
     def test_planner_prompt_distinguishes_static_ui_from_native_media(self) -> None:
         messages = GlobalTestPlanner._build_messages('Verify a static image', None, 'Base prompt')
@@ -142,31 +245,33 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('assert an objectively observable detail element', messages[0]['content'])
         self.assertIn('Use media or video only for native audio/video elements', messages[0]['content'])
         self.assertIn('Every fill, press, and select action must include a non-empty value', messages[0]['content'])
+        self.assertIn('use download_task', messages[0]['content'])
+        self.assertIn('Do not model download completion as element_state', messages[0]['content'])
         self.assertIn('Use fill only when the selected actionable control has editable=true', messages[0]['content'])
         self.assertIn('minimum_advanced_seconds', messages[0]['content'])
         self.assertIn('do not output login steps or login assertions', messages[0]['content'])
+        self.assertIn('Do not add a step solely to establish a generic post-login landing page', messages[0]['content'])
         self.assertIn('action="create" exactly', messages[0]['content'])
         self.assertIn('allowed_capabilities exactly as ["data_factory.create"]', messages[0]['content'])
         self.assertIn('exactly one user-visible state transition', messages[0]['content'])
+        self.assertIn('No browser step may pass from action completion alone', messages[0]['content'])
         self.assertIn('Never assert the final state before the commit action', messages[0]['content'])
         self.assertIn('Never create conditional steps', messages[0]['content'])
         self.assertIn('plan and verify the field update before the irreversible status transition', messages[0]['content'])
+        self.assertIn('Do not treat names from the user goal as exact rendered UI text', messages[0]['content'])
+        self.assertIn('assert the newly introduced control or panel', messages[0]['content'])
 
-    def test_visual_planner_prompt_uses_prior_actions_to_advance_transactions(self) -> None:
+    def test_visual_planner_supplies_react_context_and_enforces_absence_bindings(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         source = inspect.getsource(VisualStepReplanner.create_actions)
 
         self.assertIn('Prior actions:', source)
-        self.assertIn('do not repeat the same action and selector', source)
-        self.assertIn('return action="assert" with that locator binding immediately', source)
-        self.assertIn('expected numeric values are count thresholds rather than visible text', source)
-        self.assertIn('bind that group or container locator immediately', source)
-        self.assertIn('query or filter control whose name contains only the field label', source)
-        self.assertIn('detail-context control whose own name or container_text contains that current value', source)
-        self.assertIn('if not assertion_check:', source)
-        self.assertIn('bindings = []', source)
-        self.assertIn("action.pop('assertion_bindings', None)", source)
+        self.assertIn('Verified predecessor steps:', source)
+        self.assertIn('Accessibility snapshot:', source)
+        self.assertIn('Assertions to verify:', source)
+        self.assertIn('Only absence assertions may be bound before a state-changing action.', source)
+        self.assertIn("assertions[binding['assertion_index'] - 1].get('assert_kind') != 'absence'", source)
 
     def test_visual_planner_rejects_repeating_failed_state_change(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -181,17 +286,18 @@ class GlobalTestPlannerTests(SimpleTestCase):
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         actions = [{'action': 'click', 'selector': '#model-choice'}]
-        VisualStepReplanner._validate_visible_record_correlation(
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
             actions,
             [
                 {'tag': 'input', 'editable': True, 'selector': '#search', 'name': 'Camera A'},
                 {'tag': 'div', 'selector': '#record', 'container_text': 'Camera A'},
             ],
-            [{'resource': {'result_correlation': {'match_values': ['Camera A']}}}],
-            'Open the created record',
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A']}}}],
+            correlates_resource='alert_event',
         )
 
-        self.assertEqual(actions[0]['selector'], '#record')
+        self.assertEqual(resolved_actions[0]['selector'], '#record')
+        self.assertEqual(actions[0]['selector'], '#model-choice')
 
         VisualStepReplanner._validate_non_repeating_action(
             [{'action': 'click', 'selector': '#confirm'}],
@@ -244,16 +350,13 @@ class GlobalTestPlannerTests(SimpleTestCase):
                 'Navigate to the records view',
             )
 
-    def test_visual_planner_correlates_records_by_resource_values_before_order(self) -> None:
+    def test_visual_planner_passes_execution_resources_to_runtime_resolver(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         source = inspect.getsource(VisualStepReplanner.create_actions)
 
-        self.assertIn('result_correlation.match_values', source)
-        self.assertIn('select the unique highest-scoring record', source)
-        self.assertIn('never fall back to first_visible', source)
-        self.assertIn('do not assert or click a partial match', source)
-        self.assertIn('scrolling a discovered record-list container', source)
+        self.assertIn('Execution-scoped resources:', source)
+        self.assertIn('_resolve_visible_record_action', source)
 
     def test_visual_planner_requires_unique_runtime_correlated_visible_record(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -262,64 +365,185 @@ class GlobalTestPlannerTests(SimpleTestCase):
             {'selector': '#unrelated', 'name': 'Other record', 'container_text': 'Camera B'},
             {'selector': '#matched', 'name': 'Generated record', 'container_text': 'Camera A person'},
         ]
-        resources = [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}]
+        resources = [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}]
 
-        VisualStepReplanner._validate_visible_record_correlation(
-            [{'action': 'click', 'selector': '#matched'}], controls, resources, 'Open generated record',
+        VisualStepReplanner._resolve_visible_record_action(
+            [{'action': 'click', 'selector': '#matched'}], controls, resources,
+            correlates_resource='alert_event',
         )
         lower_scoring_action = [{'action': 'click', 'selector': '#unrelated'}]
-        VisualStepReplanner._validate_visible_record_correlation(
-            lower_scoring_action, controls, resources, 'Open generated record',
+        lower_scoring_action = VisualStepReplanner._resolve_visible_record_action(
+            lower_scoring_action, controls, resources,
+            correlates_resource='alert_event',
         )
         self.assertEqual(lower_scoring_action, [{'action': 'click', 'selector': '#matched'}])
 
         search_action = [{'action': 'fill', 'selector': '#search', 'value': 'Camera A'}]
-        VisualStepReplanner._validate_visible_record_correlation(
-            search_action, controls, resources, 'Open generated record',
+        search_action = VisualStepReplanner._resolve_visible_record_action(
+            search_action, controls, resources,
+            correlates_resource='alert_event',
         )
-        self.assertEqual(search_action, [{'action': 'click', 'selector': '#matched'}])
-        VisualStepReplanner._validate_visible_record_correlation(
+        self.assertEqual(search_action, [{'action': 'fill', 'selector': '#search', 'value': 'Camera A'}])
+        VisualStepReplanner._resolve_visible_record_action(
             [{'action': 'click', 'selector': '#navigation-link'}],
             controls,
             resources,
             'Navigate to records\nChoose a different action sequence.',
         )
 
+    def test_visual_planner_ignores_values_from_unrelated_resource_types(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        controls = [
+            {'selector': '#alert', 'container_text': 'Camera A person'},
+            {'selector': '#device', 'container_text': 'Device 42'},
+        ]
+        resources = [
+            {'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}},
+            {'resource_type': 'device', 'resource': {'result_correlation': {'match_values': ['Device 42']}}},
+        ]
+
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
+            [{'action': 'click', 'selector': '#device'}], controls, resources,
+            correlates_resource='alert_event',
+        )
+
+        self.assertEqual(resolved_actions, [{'action': 'click', 'selector': '#alert'}])
+
     def test_visual_planner_scrolls_until_all_record_correlation_values_are_visible(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         actions = [{'action': 'assert'}]
 
-        VisualStepReplanner._validate_visible_record_correlation(
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
             actions,
             [{'selector': '#partial-record', 'container_text': 'person'}],
-            [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
-            'Select the created record',
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
             {'scroll_containers': [{'selector': '#record-list', 'remaining': 500}]},
+            correlates_resource='alert_event',
         )
 
-        self.assertEqual(actions, [{'action': 'scroll', 'selector': '#record-list', 'value': 'down'}])
+        self.assertEqual(resolved_actions, [{'action': 'scroll', 'selector': '#record-list', 'value': 'down'}])
+        self.assertEqual(actions, [{'action': 'assert'}])
+
+    def test_visual_planner_opens_correlated_record_before_asserting(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
+            [{'action': 'assert'}],
+            [{'selector': '#matched', 'container_text': 'Camera A person'}],
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+            correlates_resource='alert_event',
+        )
+
+        self.assertEqual(resolved_actions, [{'action': 'click', 'selector': '#matched'}])
+
+    def test_visual_planner_does_not_apply_record_correlation_to_search(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions = [{'action': 'fill', 'selector': '#search', 'value': 'Camera A'}]
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
+            actions,
+            [{'selector': '#partial-record', 'container_text': 'person'}],
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+        )
+
+        self.assertEqual(resolved_actions, actions)
+
+    def test_visual_planner_does_not_apply_record_correlation_to_unrelated_open_step(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions = [{'action': 'assert'}]
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
+            actions,
+            [{'selector': '#camera', 'container_text': 'Default device camera'}],
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['generated alert']}}}],
+        )
+
+        self.assertEqual(resolved_actions, actions)
+
+    def test_visual_planner_does_not_override_verified_identity_with_record_correlation(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions = [{'action': 'click', 'selector': '#record-7'}]
+        VisualStepReplanner._resolve_visible_record_action(
+            actions,
+            [{'selector': '#record-7', 'name': 'Requested item'}],
+            [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['unrelated response value']}}}],
+            verified_predecessors=[{
+                'assertions': [{'target': {'locator': '#record-7 > img'}}],
+            }],
+            correlates_resource='alert_event',
+        )
+
+        self.assertEqual(actions, [{'action': 'click', 'selector': '#record-7'}])
+
+    def test_visual_planner_rejects_scroll_container_without_usable_viewport(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'no usable viewport'):
+            VisualStepReplanner._validate_offscreen_search_action(
+                [{'action': 'scroll', 'selector': '#clipped-label'}],
+                {'scroll_containers': [{
+                    'selector': '#clipped-label',
+                    'client_height': 1,
+                    'remaining': 24,
+                }]},
+                [],
+                [],
+            )
+
+    def test_visual_planner_allows_scroll_container_with_usable_viewport(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_offscreen_search_action(
+            [{'action': 'scroll', 'selector': '#record-list'}],
+            {'scroll_containers': [{
+                'selector': '#record-list',
+                'client_height': 500,
+                'remaining': 900,
+            }]},
+            [],
+            [],
+        )
 
     def test_visual_planner_rejects_partial_record_match_without_search_path(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         with self.assertRaisesRegex(GlobalPlanError, 'uncorrelated or partially correlated record'):
-            VisualStepReplanner._validate_visible_record_correlation(
+            VisualStepReplanner._resolve_visible_record_action(
                 [{'action': 'assert'}],
                 [{'selector': '#partial-record', 'container_text': 'person'}],
-                [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
-                'Select the created record',
+                [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+                correlates_resource='alert_event',
             )
 
     def test_visual_planner_rejects_unrelated_action_when_no_record_matches(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         with self.assertRaisesRegex(GlobalPlanError, 'uncorrelated or partially correlated record'):
-            VisualStepReplanner._validate_visible_record_correlation(
+            VisualStepReplanner._resolve_visible_record_action(
                 [{'action': 'click', 'selector': '#date-filter'}],
                 [{'selector': '#date-filter', 'container_text': 'Select date'}],
-                [{'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
-                'Select the created record',
+                [{'resource_type': 'alert_event', 'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}}}],
+                correlates_resource='alert_event',
+            )
+
+    def test_visual_planner_rejects_ambiguous_fully_correlated_records(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'multiple controls'):
+            VisualStepReplanner._resolve_visible_record_action(
+                [{'action': 'click', 'selector': '#first-record'}],
+                [
+                    {'selector': '#first-record', 'container_text': 'Camera A person'},
+                    {'selector': '#second-record', 'container_text': 'Camera A person'},
+                ],
+                [{
+                    'resource_type': 'alert_event',
+                    'resource': {'result_correlation': {'match_values': ['Camera A', 'person']}},
+                }],
+                correlates_resource='alert_event',
             )
 
     def test_visual_planner_uses_platform_ai_request_timeout(self) -> None:
@@ -336,6 +560,7 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         loaders = (
             VisualStepReplanner._load_active_model_config,
+            VisualStepReplanner._load_active_prompt_content,
             GlobalTestPlanner._load_active_model_configs,
             GlobalTestPlanner._load_active_prompt_content,
             GlobalTestPlanner._load_data_factory_resources,
@@ -345,17 +570,44 @@ class GlobalTestPlannerTests(SimpleTestCase):
             with self.subTest(loader=loader.__name__):
                 self.assertIn('close_old_connections()', inspect.getsource(loader))
 
-    def test_visual_planner_prompt_uses_page_metrics_for_offscreen_controls(self) -> None:
+    def test_visual_planner_uses_configured_prompt_as_policy_source(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        source = inspect.getsource(VisualStepReplanner.create_actions)
+
+        self.assertIn('prompt_content = await self._get_active_prompt_content()', source)
+        self.assertIn("f'{prompt_content}\\n\\nRuntime contract:\\n'", source)
+        self.assertIn('Never bind a collection assertion to a collection container', source)
+        self.assertNotIn('For theme assertions', source)
+
+    def test_visual_planner_rejects_choice_control_as_collection_evidence(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'collection', 'target': {'intent': 'search result items'}}]
+        bindings = [{'assertion_index': 1, 'locator': '#mode-option'}]
+        controls = [{'selector': '#mode-option', 'role': 'menuitem', 'top_layer': True}]
+
+        with self.assertRaisesRegex(GlobalPlanError, 'choice control'):
+            VisualStepReplanner._validate_collection_bindings(bindings, assertions, controls)
+
+    def test_visual_planner_allows_repeated_item_collection_evidence(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_collection_bindings(
+            [{'assertion_index': 1, 'locator': '.result-card'}],
+            [{'assert_kind': 'collection', 'target': {'intent': 'search result items'}}],
+            [{'selector': '.result-card', 'role': '', 'group_size': 3, 'top_layer': False}],
+        )
+
+    def test_visual_planner_supplies_page_metrics_to_offscreen_validator(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         source = inspect.getsource(VisualStepReplanner.create_actions)
 
         self.assertIn('Page metrics:', source)
-        self.assertIn('scroll to reveal more content', source)
-        self.assertIn('page_metrics.scroll_containers', source)
-        self.assertIn('continue scrolling that container instead of guessing an unnamed icon control', source)
+        self.assertIn('_validate_offscreen_search_action', source)
 
-    def test_visual_planner_enforces_offscreen_search_before_unnamed_controls(self) -> None:
+    def test_visual_planner_allows_discovered_icon_control_with_offscreen_content(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
         validator = VisualStepReplanner._validate_offscreen_search_action
@@ -364,14 +616,12 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         with self.assertRaisesRegex(GlobalPlanError, 'must scroll'):
             validator([{'action': 'wait'}], metrics, controls, [])
-        with self.assertRaisesRegex(GlobalPlanError, 'before guessing an unnamed control'):
-            validator([{'action': 'click', 'selector': '#anonymous'}], metrics, controls, [])
 
         validator(
             [{'action': 'click', 'selector': '#anonymous'}],
             metrics,
             controls,
-            [{'action': 'scroll', 'selector': '#panel'}],
+            [],
         )
 
     def test_planner_rejects_conditional_browser_step(self) -> None:
@@ -580,6 +830,82 @@ class GlobalTestPlannerTests(SimpleTestCase):
                 task_description='确认设备在线',
             )
 
+    def test_normalize_response_rejects_browser_step_with_verification_disabled(self) -> None:
+        response = {'choices': [{'message': {'content': json.dumps({'steps': [{
+            'executor': 'browser',
+            'description': 'Open a menu',
+            'allowed_capabilities': ['browser.act'],
+            'assertions': [],
+            'verification_required': False,
+        }]})}}]}
+
+        with self.assertRaisesRegex(GlobalPlanError, '禁止关闭验证'):
+            GlobalTestPlanner.normalize_response(response, None)
+
+    def test_normalize_response_rejects_browser_step_with_only_optional_assertions(self) -> None:
+        response = {'choices': [{'message': {'content': json.dumps({'steps': [{
+            'executor': 'browser',
+            'description': 'Open a menu',
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'popup',
+                'target': {'intent': 'opened menu'},
+                'operator': 'exists',
+                'expected': {'value': True},
+                'evidence_requirements': ['element_state'],
+                'required': False,
+            }],
+        }]})}}]}
+
+        with self.assertRaisesRegex(GlobalPlanError, 'at least one required assertion'):
+            GlobalTestPlanner.normalize_response(response, None)
+
+    def test_normalize_response_adds_inspect_capability_for_postcondition(self) -> None:
+        response = {'choices': [{'message': {'content': json.dumps({'steps': [{
+            'executor': 'browser',
+            'description': 'Open a menu',
+            'allowed_capabilities': ['browser.act'],
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'popup',
+                'target': {'intent': 'opened menu'},
+                'operator': 'exists',
+                'expected': {'value': True},
+                'evidence_requirements': ['element_state'],
+            }],
+        }]})}}]}
+
+        steps = GlobalTestPlanner.normalize_response(response, None)
+
+        self.assertEqual(steps[0]['allowed_capabilities'], ['browser.act', 'browser.inspect'])
+        self.assertTrue(steps[0]['verification_required'])
+
+    def test_normalize_response_rejects_visual_change_as_final_state_proof(self) -> None:
+        response = {
+            'choices': [{
+                'message': {
+                    'content': json.dumps({'steps': [{
+                        'executor': 'browser',
+                        'step_mode': 'ai',
+                        'description': 'Verify the requested state',
+                        'allowed_capabilities': ['browser.inspect', 'browser.act', 'browser.capture'],
+                        'assertions': [{
+                            'action': 'assert',
+                            'assert_kind': 'visual_change',
+                            'target': {'page': 'current'},
+                            'operator': 'equals',
+                            'expected': {'value': True},
+                            'evidence_requirements': ['visual_frame_before', 'visual_frame_after'],
+                        }],
+                    }]}),
+                },
+            }],
+        }
+
+        with self.assertRaisesRegex(GlobalPlanError, 'cannot prove a semantic final state'):
+            GlobalTestPlanner.normalize_response(response, configuration_id=None)
+
     def test_normalize_response_rejects_device_step_without_environment(self) -> None:
         response = {
             'choices': [{
@@ -649,6 +975,67 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertEqual(steps[0]['resource_type'], 'alert_event')
         self.assertEqual(steps[0]['allowed_capabilities'], ['data_factory.create'])
         self.assertEqual(steps[0]['assertions'][0]['assert_kind'], 'api_resource')
+
+    def test_normalize_response_preserves_prior_resource_correlation(self) -> None:
+        response = {
+            'choices': [{
+                'message': {
+                    'content': json.dumps({'steps': [
+                        {
+                            'executor': 'data_factory',
+                            'action': 'create',
+                            'description': 'Create event',
+                            'resource_type': 'alert_event',
+                            'arguments': {'alert_type': 'person'},
+                            'allowed_capabilities': ['data_factory.create'],
+                        },
+                        {
+                            'executor': 'browser',
+                            'description': 'Select its result',
+                            'allowed_capabilities': ['browser.inspect', 'browser.act'],
+                            'correlates_resource': 'alert_event',
+                            'assertions': [{
+                                'action': 'assert',
+                                'assert_kind': 'element_state',
+                                'target': {'intent': 'selected result detail'},
+                                'operator': 'exists',
+                                'expected': {'value': True},
+                                'evidence_requirements': ['element_state'],
+                            }],
+                        },
+                    ]}),
+                },
+            }],
+        }
+
+        steps = GlobalTestPlanner.normalize_response(response, configuration_id=5)
+
+        self.assertEqual(steps[1]['correlates_resource'], 'alert_event')
+
+    def test_normalize_response_rejects_unknown_resource_correlation(self) -> None:
+        response = {
+            'choices': [{
+                'message': {
+                    'content': json.dumps({'steps': [{
+                        'executor': 'browser',
+                        'description': 'Select a result',
+                        'allowed_capabilities': ['browser.inspect', 'browser.act'],
+                        'assertions': [{
+                            'action': 'assert',
+                            'assert_kind': 'element_state',
+                            'target': {'intent': 'selected result'},
+                            'operator': 'exists',
+                            'expected': {'value': True},
+                            'evidence_requirements': ['element_state'],
+                        }],
+                        'correlates_resource': 'alert_event',
+                    }]}),
+                },
+            }],
+        }
+
+        with self.assertRaisesRegex(GlobalPlanError, 'correlates_resource'):
+            GlobalTestPlanner.normalize_response(response, configuration_id=5)
 
     def test_normalize_response_rejects_legacy_data_factory_action(self) -> None:
         response = {
