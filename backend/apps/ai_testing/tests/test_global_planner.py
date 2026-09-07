@@ -16,7 +16,7 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('previous plan violated this contract', source)
         self.assertIn('Correct that specific violation', source)
         self.assertIn('Rebuild the full ordered plan rather than appending a repair step', source)
-        self.assertIn('max_tokens=4096', source)
+        self.assertNotIn('max_tokens=', source)
 
     def test_cached_plan_is_revalidated_without_reusing_execution_results(self) -> None:
         create_source = inspect.getsource(GlobalTestPlanner.create_plan)
@@ -553,7 +553,7 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         self.assertIn('asyncio.wait_for', source)
         self.assertIn('settings.TIMEOUTS_AI_REQUEST', source)
-        self.assertIn('max(config.max_tokens, 8192)', source)
+        self.assertNotIn('max_tokens=', source)
 
     def test_sync_planner_database_loaders_close_old_connections(self) -> None:
         from apps.ai_testing.global_planner import GlobalTestPlanner, VisualStepReplanner

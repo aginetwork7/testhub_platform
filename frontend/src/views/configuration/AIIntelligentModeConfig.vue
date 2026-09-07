@@ -45,7 +45,12 @@
                         <el-tooltip :content="$t('configuration.aiMode.messages.deleteConfirm')" placement="top"><button class="icon-btn delete-btn" @click="deleteConfig(config.id)" type="button"><el-icon><Delete /></el-icon></button></el-tooltip>
                       </div>
                     </div>
-                    <div class="config-details"><div class="detail-item"><label>{{ $t('configuration.aiMode.baseUrl') }}:</label><span>{{ config.base_url || $t('configuration.common.notSet') }}</span></div></div>
+                    <div class="config-details">
+                      <div class="detail-item"><label>{{ $t('configuration.aiMode.baseUrl') }}:</label><span>{{ config.base_url || $t('configuration.common.notSet') }}</span></div>
+                      <div class="detail-item"><label>{{ $t('configuration.aiMode.maxTokens') }}:</label><span>{{ config.max_tokens }}</span></div>
+                      <div class="detail-item"><label>{{ $t('configuration.aiMode.temperature') }}:</label><span>{{ config.temperature }}</span></div>
+                      <div class="detail-item"><label>{{ $t('configuration.aiMode.topP') }}:</label><span>{{ config.top_p }}</span></div>
+                    </div>
                   </div>
                 </template>
                 <button v-else class="empty-slot" @click="openAddModal">{{ $t('configuration.aiMode.addConfig') }}</button>
@@ -161,6 +166,22 @@
             </div>
 
             <div class="form-group">
+              <label>{{ $t('configuration.aiMode.maxTokens') }}</label>
+              <input v-model.number="configForm.max_tokens" type="number" min="1" step="1" class="form-input" required>
+            </div>
+
+            <div class="form-group">
+              <label>{{ $t('configuration.aiMode.temperature') }}</label>
+              <input v-model.number="configForm.temperature" type="number" min="0" max="2" step="0.1" class="form-input" required>
+            </div>
+
+            <div class="form-group">
+              <label>{{ $t('configuration.aiMode.topP') }}</label>
+              <input v-model.number="configForm.top_p" type="number" min="0" max="1" step="0.01" class="form-input" required>
+              <small class="form-hint">{{ $t('configuration.aiMode.samplingHint') }}</small>
+            </div>
+
+            <div class="form-group">
               <label class="checkbox-label">
                 <input v-model="configForm.is_active" type="checkbox">
                 <span class="checkmark"></span>
@@ -239,6 +260,9 @@ const configForm = ref({
   model_name: '',
   api_key: '',
   base_url: '',
+  max_tokens: 4096,
+  temperature: 0.7,
+  top_p: 0.9,
   is_active: true
 })
 
@@ -339,6 +363,9 @@ const resetForm = () => {
     model_name: '',
     api_key: '',
     base_url: '',
+    max_tokens: 4096,
+    temperature: 0.7,
+    top_p: 0.9,
     is_active: true
   }
 }
@@ -358,6 +385,9 @@ const editConfig = (config) => {
     model_name: config.model_name,
     api_key: maskedKey, // 显示与原API Key相同长度的掩码
     base_url: config.base_url,
+    max_tokens: config.max_tokens ?? 4096,
+    temperature: config.temperature ?? 0.7,
+    top_p: config.top_p ?? 0.9,
     is_active: config.is_active
   }
   showEditModal.value = true

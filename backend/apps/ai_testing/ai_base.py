@@ -1850,7 +1850,9 @@ class BaseBrowserAgent:
                 'base_url': config_obj.base_url,
                 'model_name': config_obj.model_name,
                 'provider': config_obj.model_type,
-                'temperature': config_obj.temperature  # 读取配置的temperature
+                'max_tokens': config_obj.max_tokens,
+                'temperature': config_obj.temperature,
+                'top_p': config_obj.top_p,
             }
 
         self.api_key = model_config.get('api_key')
@@ -1917,12 +1919,25 @@ class BaseBrowserAgent:
                 final_temperature = 0.0
                 logger.info(f"⚙️ 使用默认 temperature={final_temperature}")
 
-        logger.info(f"🎛️ 最终配置: temperature={final_temperature}")
+        is_reasoning_model = model_name_lower.startswith(('gpt-5', 'o1', 'o3', 'o4'))
+        if is_reasoning_model:
+            llm_parameters = {'max_completion_tokens': model_config['max_tokens']}
+        else:
+            llm_parameters = {
+                'temperature': final_temperature,
+                'top_p': model_config['top_p'],
+                'extra_body': {'max_tokens': model_config['max_tokens']},
+            }
+
+        logger.info(
+            f"🎛️ 最终配置: max_tokens={model_config['max_tokens']}, "
+            f"temperature={final_temperature}, top_p={model_config['top_p']}"
+        )
         self.llm = ChatOpenAI(
             model=self.model_name,
             api_key=self.api_key,
             base_url=self.base_url,
-            temperature=final_temperature,
+            **llm_parameters,
             callbacks=[RawResponseLogger()]
         )
 

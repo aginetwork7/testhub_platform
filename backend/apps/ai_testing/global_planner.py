@@ -10,6 +10,8 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import close_old_connections
 
+from apps.core.llm import LLMCallContext, OpenAICompatibleClient
+
 
 PLAN_SUBMISSION_TOOL = {
     'type': 'function',
@@ -75,8 +77,6 @@ class VisualStepReplanner:
         if not prompt_content:
             raise GlobalPlanError('未配置可用的 Planner Vision 提示词。')
 
-        from apps.requirement_analysis.models import AIModelService
-
         visible_text = str(evidence.get('visible_text') or '')[:600]
         actionable_controls = evidence.get('actionable_controls') or []
         observable_elements = (evidence.get('observable_elements') or [])[:80]
@@ -136,10 +136,13 @@ class VisualStepReplanner:
             messages[1]['content'].append({'type': 'image_url', 'image_url': {'url': screenshot}})
 
         response = await asyncio.wait_for(
-            AIModelService.call_openai_compatible_api(
+            OpenAICompatibleClient.complete(
                 config,
                 messages,
-                max_tokens=max(config.max_tokens, 8192),
+                context=LLMCallContext(
+                    component='ai_testing',
+                    operation='planner_vision',
+                ),
                 enable_thinking=True,
                 tools=[_action_submission_tool(len(assertions))],
                 tool_choice={'type': 'function', 'function': {'name': 'submit_browser_actions'}},
@@ -665,8 +668,6 @@ class GlobalTestPlanner:
         if not configs:
             raise GlobalPlanError('未配置可用的 Planner 模型。')
 
-        from apps.requirement_analysis.models import AIModelService
-
         prompt_content = await sync_to_async(self._load_active_prompt_content)('planner_text')
         if not prompt_content:
             raise GlobalPlanError('未配置可用的 Planner 文本提示词。')
@@ -678,10 +679,13 @@ class GlobalTestPlanner:
             for attempt in range(5):
                 try:
                     response = await asyncio.wait_for(
-                        AIModelService.call_openai_compatible_api(
+                        OpenAICompatibleClient.complete(
                             config,
                             retry_messages,
-                            max_tokens=4096,
+                            context=LLMCallContext(
+                                component='ai_testing',
+                                operation='planner_text',
+                            ),
                             enable_thinking=True,
                             tools=[PLAN_SUBMISSION_TOOL],
                             tool_choice={'type': 'function', 'function': {'name': 'submit_execution_plan'}},

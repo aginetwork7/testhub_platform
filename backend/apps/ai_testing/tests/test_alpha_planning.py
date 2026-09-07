@@ -39,7 +39,7 @@ class AlphaPlanningTests(TestCase):
         )
 
     @patch(
-        'apps.requirement_analysis.models.AIModelService.call_openai_compatible_api',
+        'apps.ai_testing.alpha.planning.OpenAICompatibleClient.complete',
         new_callable=AsyncMock,
     )
     def test_planner_response_creates_validated_draft_revision(self, model_call) -> None:
@@ -66,6 +66,10 @@ class AlphaPlanningTests(TestCase):
         self.assertEqual(self.run.round_count, 1)
         model_call.assert_awaited_once()
         self.assertEqual(model_call.await_args.args[0].role, 'alpha_planner')
+        context = model_call.await_args.kwargs['context']
+        self.assertEqual(context.component, 'alpha_agent')
+        self.assertEqual(context.operation, 'planning')
+        self.assertEqual(context.execution_id, self.run.id)
 
     @patch('apps.ai_testing.alpha.views.enqueue_alpha_planning', return_value='django-q-task-id')
     def test_plan_api_queues_planning_and_records_task_id(self, enqueue_alpha_planning) -> None:

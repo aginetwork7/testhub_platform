@@ -29,6 +29,8 @@ from django.utils import timezone
 from asgiref.sync import sync_to_async
 from django.db import models
 
+from apps.core.llm import LLMCallContext, OpenAICompatibleClient
+
 from .models import (
     RequirementDocument, RequirementAnalysis, BusinessRequirement,
     GeneratedTestCase, AnalysisTask, AIModelConfig, PromptConfig, TestCaseGenerationTask,
@@ -956,7 +958,14 @@ class AIModelConfigViewSet(viewsets.ModelViewSet):
                         # 设置60秒超时，统一使用OpenAI兼容API
                         result = loop.run_until_complete(
                             asyncio.wait_for(
-                                AIModelService.call_openai_compatible_api(config, test_messages),
+                                OpenAICompatibleClient.complete(
+                                    config,
+                                    test_messages,
+                                    context=LLMCallContext(
+                                        component='requirement_analysis',
+                                        operation='test_connection',
+                                    ),
+                                ),
                                 timeout=settings.TIMEOUTS_AI_REQUEST
                             )
                         )

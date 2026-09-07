@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from asgiref.sync import sync_to_async
 
 from apps.ai_testing.models import AlphaPlanRevision
+from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 
 
 class AlphaReflectionError(ValueError):
@@ -36,12 +37,15 @@ class AlphaReflectionService:
         if not prompt_content:
             raise AlphaReflectionError('No active Agent prompt is configured')
 
-        from apps.requirement_analysis.models import AIModelService
-
         messages = await sync_to_async(self._build_messages)(revision, prompt_content)
-        response = await AIModelService.call_openai_compatible_api(
+        response = await OpenAICompatibleClient.complete(
             config,
             messages,
+            context=LLMCallContext(
+                component='alpha_agent',
+                operation='reflection',
+                execution_id=revision.run_id,
+            ),
             max_tokens=min(config.max_tokens, 1000),
             response_format={'type': 'json_object'},
         )

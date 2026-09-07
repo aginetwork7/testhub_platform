@@ -7,11 +7,10 @@ import json
 import os
 import re
 from pathlib import Path
-import httpx
-from typing import Dict, Any, List, AsyncIterator, Optional
 from asgiref.sync import sync_to_async
 
 from django.core.files.storage import FileSystemStorage
+from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 from backend.log_config import get_logger
 
 # 自定义存储类，用于存储需求文档到项目根目录下的 Data/PRD
@@ -597,294 +596,6 @@ class AIModelService:
             f"【需求文档内容】\n{requirement_text}"
         )
 
-    @staticmethod
-    def _build_request_payload(
-            config: AIModelConfig,
-            messages: List[Dict[str, str]],
-            max_tokens: int,
-            stream: bool,
-            response_format: Optional[Dict[str, Any]] = None,
-            enable_thinking: Optional[bool] = None,
-            tools: Optional[List[Dict[str, Any]]] = None,
-            tool_choice: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
-            'model': config.model_name,
-            'messages': messages,
-            'temperature': config.temperature,
-            'top_p': config.top_p,
-            'stream': stream,
-        }
-        model_name = str(config.model_name or '').lower()
-        token_parameter = 'max_completion_tokens' if model_name.startswith(('gpt-5', 'o1', 'o3', 'o4')) else 'max_tokens'
-        data[token_parameter] = max_tokens
-
-        if config.model_type == 'qwen':
-            data['chat_template_kwargs'] = {'enable_thinking': bool(enable_thinking)}
-
-        if response_format is not None and not stream:
-            data['response_format'] = response_format
-        if tools and not stream:
-            data['tools'] = tools
-        if tool_choice is not None and tools and not stream:
-            data['tool_choice'] = tool_choice
-
-        return data
-
-    @staticmethod
-    def _build_chat_completions_url(config: AIModelConfig) -> str:
-        base_url = config.base_url.rstrip('/')
-        if base_url.endswith('/chat/completions'):
-            return base_url
-
-        if config.model_type in {'gemini', 'google_gemini'}:
-            return f'{base_url}/chat/completions'
-
-        version_match = re.search(r'/v(\d+)/?$', base_url)
-        if version_match:
-            return f'{base_url}/chat/completions'
-        return f'{base_url}/v1/chat/completions'
-
-    @staticmethod
-    async def call_openai_compatible_api(
-            config: AIModelConfig,
-            messages: List[Dict[str, str]],
-            max_tokens: int = None,
-            response_format: Optional[Dict[str, Any]] = None,
-            enable_thinking: Optional[bool] = None,
-            tools: Optional[List[Dict[str, Any]]] = None,
-            tool_choice: Optional[Any] = None,
-    ) -> Dict[str, Any]:
-        """
-        调用OpenAI兼容格式的API
-
-        Args:
-            config: AI模型配置
-            messages: 消息列表
-            max_tokens: 可选的最大token数，如果不指定则使用config.max_tokens
-
-        Returns:
-            API响应字典
-        """
-        headers = {
-            'Authorization': f'Bearer {config.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        # 使用传入的max_tokens或默认使用config.max_tokens
-        actual_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
-
-        data = AIModelService._build_request_payload(
-            config=config,
-            messages=messages,
-            max_tokens=actual_max_tokens,
-            stream=False,
-            response_format=response_format,
-            enable_thinking=enable_thinking,
-            tools=tools,
-            tool_choice=tool_choice,
-        )
-
-        url = AIModelService._build_chat_completions_url(config)
-
-        logger.info(f"=== API调用详情 ===")
-        logger.info(f"原始base_url: {config.base_url}")
-        logger.info(f"最终请求URL: {url}")
-        logger.info(f"模型名称: {config.model_name}")
-        logger.info(f"请求参数: max_tokens={actual_max_tokens}, temperature={config.temperature}, top_p={config.top_p}")
-
-        try:
-            # 增加HTTP超时时间到900秒（15分钟），支持大文档生成
-            # 禁用HTTP/2，使用HTTP/1.1以提高兼容性
-            # 显式设置所有超时参数，避免默认的连接超时导致请求失败
-            timeout_config = httpx.Timeout(
-                connect=60.0,  # 连接超时：60秒
-                read=900.0,  # 读取超时：900秒（15分钟）
-                write=60.0,  # 写入超时：60秒
-                pool=60.0  # 连接池超时：60秒
-            )
-            async with httpx.AsyncClient(timeout=timeout_config, http2=False) as client:
-                logger.info(f"发送POST请求到: {url}")
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=data
-                )
-
-                logger.info(f"收到响应: status_code={response.status_code}")
-
-                if response.status_code != 200:
-                    error_detail = response.text
-                    logger.error(f"API调用返回错误: Status={response.status_code}, Body={error_detail}")
-
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"API调用成功，响应内容: {str(result)[:200]}...")
-                return result
-        except httpx.HTTPStatusError as e:
-            provider_name = config.get_model_type_display()
-            error_msg = f"{provider_name} API返回错误 {e.response.status_code}: {e.response.text}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-        except httpx.TimeoutException as e:
-            provider_name = config.get_model_type_display()
-            logger.error(f"{provider_name} API请求超时: {repr(e)}")
-            raise Exception(f"{provider_name} API请求超时，请稍后再试或检查网络连接")
-        except Exception as e:
-            provider_name = config.get_model_type_display()
-            # Use repr(e) to capture the full exception type and message, especially if str(e) is empty
-            logger.error(f"{provider_name} API调用失败: {repr(e)}")
-            raise Exception(f"{provider_name} API调用失败: {str(e) or repr(e)}")
-
-    @staticmethod
-    async def call_deepseek_api(config: AIModelConfig, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """调用DeepSeek API (兼容OpenAI格式)"""
-        return await AIModelService.call_openai_compatible_api(config, messages)
-
-    @staticmethod
-    async def call_qwen_api(config: AIModelConfig, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """调用千问API (兼容OpenAI格式)"""
-        return await AIModelService.call_openai_compatible_api(config, messages)
-
-    @staticmethod
-    async def call_openai_compatible_api_stream(
-            config: AIModelConfig,
-            messages: List[Dict[str, str]],
-            callback=None,
-            max_tokens: int = None
-    ) -> AsyncIterator[str]:
-        """
-        流式调用OpenAI兼容格式的API，支持自动续写
-        """
-        headers = {
-            'Authorization': f'Bearer {config.api_key}',
-            'Content-Type': 'application/json'
-        }
-
-        # 使用传入的max_tokens或默认使用config.max_tokens
-        actual_max_tokens = max_tokens if max_tokens is not None else config.max_tokens
-
-        url = AIModelService._build_chat_completions_url(config)
-
-        # 续写控制
-        current_messages = list(messages)  # 浅拷贝
-        continuation_count = 0
-        MAX_CONTINUATIONS = 5  # 最大续写次数，防止死循环
-
-        while continuation_count <= MAX_CONTINUATIONS:
-            data = AIModelService._build_request_payload(
-                config=config,
-                messages=current_messages,
-                max_tokens=actual_max_tokens,
-                stream=True,
-            )
-
-            logger.info(f"发起流式请求 (第{continuation_count + 1}次), messages数量: {len(current_messages)}")
-
-            chunk_content_buffer = ""  # 本次请求生成的完整内容缓存
-            finish_reason = None
-
-            try:
-                # 显式设置所有超时参数
-                timeout_config = httpx.Timeout(
-                    connect=60.0,  # 连接超时：60秒
-                    read=900.0,  # 读取超时：900秒（15分钟）
-                    write=60.0,  # 写入超时：60秒
-                    pool=60.0  # 连接池超时：60秒
-                )
-                async with httpx.AsyncClient(timeout=timeout_config, http2=False) as client:
-                    async with client.stream('POST', url, headers=headers, json=data) as response:
-                        if response.status_code != 200:
-                            error_detail = await response.aread()
-                            error_msg = error_detail.decode('utf-8')
-                            logger.error(f"流式API调用返回错误: Status={response.status_code}, Body={error_msg}")
-                            response.raise_for_status()
-                        
-                        line_count = 0
-                        async for line in response.aiter_lines():
-                            line_count += 1
-                            if line_count <= 5:
-                                logger.info(f"原始响应行 {line_count}: {line[:200]}")
-                            
-                            if not line.strip():
-                                continue
-
-                            if line.startswith('data:'):
-                                if line.startswith('data: '):
-                                    data_str = line[6:]
-                                else:
-                                    data_str = line[5:]
-                                
-                                if data_str.strip() == '[DONE]':
-                                    logger.info("收到 [DONE] 信号")
-                                    break
-
-                                try:
-                                    chunk_data = json.loads(data_str)
-                                    
-                                    if 'status' in chunk_data and chunk_data.get('status') != '200':
-                                        error_msg = chunk_data.get('msg', 'Unknown error')
-                                        logger.error(f"API返回错误: status={chunk_data.get('status')}, msg={error_msg}")
-                                        raise ValueError(f"API错误: {error_msg}")
-                                    
-                                    if 'error' in chunk_data:
-                                        error_info = chunk_data['error']
-                                        error_msg = error_info.get('message', str(error_info)) if isinstance(error_info, dict) else str(error_info)
-                                        logger.error(f"API返回错误: {error_msg}")
-                                        raise ValueError(f"API错误: {error_msg}")
-                                    
-                                    if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                                        choice = chunk_data['choices'][0]
-                                        delta = choice.get('delta', {})
-                                        finish_reason = choice.get('finish_reason', None)
-                                        content = delta.get('content', '')
-
-                                        if content:
-                                            chunk_content_buffer += content
-                                            if callback:
-                                                await callback(content)
-                                            yield content
-
-                                        if finish_reason:
-                                            logger.info(f"收到 finish_reason: {finish_reason}")
-
-                                except json.JSONDecodeError as e:
-                                    logger.warning(f"JSON解析失败: {e}, data_str={data_str[:100]}")
-                                    continue
-                            else:
-                                logger.debug(f"非data行: {line[:100]}")
-
-                # 本次请求结束
-                # 检查 finish_reason
-                if finish_reason == 'length':
-                    logger.warning(
-                        f"检测到生成被截断 (finish_reason='length')，准备自动续写。当前已续写 {continuation_count} 次。")
-                    continuation_count += 1
-
-                    # 将本次生成的内容作为 assistant 回复加入历史
-                    # 注意：如果之前已经有assistant消息，需要追加内容而不是新增消息
-                    if current_messages[-1]['role'] == 'assistant':
-                        current_messages[-1]['content'] += chunk_content_buffer
-                    else:
-                        current_messages.append({"role": "assistant", "content": chunk_content_buffer})
-
-                    # 只有当上一条不是user的续写指令时，才添加新的user指令
-                    # 防止多次续写时堆叠重复的 user 指令
-                    if current_messages[-1]['role'] != 'user':
-                        current_messages.append(
-                            {"role": "user", "content": "请继续输出剩余的内容，不要重复已输出的部分，紧接着上文继续。"})
-
-                    # 发送换行符以分隔续写内容（可选，视模型而定，通常不需要，但为了保险）
-                    # yield "\n"
-                    continue
-                else:
-                    logger.info(f"流式生成正常结束 (finish_reason={finish_reason})")
-                    break
-
-            except Exception as e:
-                logger.error(f"流式请求异常: {e}")
-                # 如果是超时或其他网络错误，可能需要重试机制，这里暂时直接抛出
-                raise e
 
     @staticmethod
     async def generate_test_cases(task: TestCaseGenerationTask) -> str:
@@ -900,9 +611,10 @@ class AIModelService:
 
         # 所有支持的模型都使用兼容OpenAI的接口
         # 使用配置的max_tokens，不硬编码限制
-        response = await AIModelService.call_openai_compatible_api(
+        response = await OpenAICompatibleClient.complete(
             task.writer_model_config,
-            messages
+            messages,
+            context=LLMCallContext('requirement_analysis', 'generate_test_cases', task.id),
             # 不再硬编码max_tokens，使用配置文件中的值（如32000）
         )
 
@@ -934,7 +646,11 @@ class AIModelService:
             ]
 
             # 所有支持的模型都使用兼容OpenAI的接口
-            response = await AIModelService.call_openai_compatible_api(task.reviewer_model_config, messages)
+            response = await OpenAICompatibleClient.complete(
+                task.reviewer_model_config,
+                messages,
+                context=LLMCallContext('requirement_analysis', 'review_test_cases', task.id),
+            )
 
             return response['choices'][0]['message']['content']
         except Exception as e:
@@ -972,9 +688,10 @@ class AIModelService:
 
         # 流式调用API，确保正确关闭生成器
         # 使用配置的max_tokens，不硬编码限制
-        generator = AIModelService.call_openai_compatible_api_stream(
+        generator = OpenAICompatibleClient.stream(
             task.writer_model_config,
             messages,
+            context=LLMCallContext('requirement_analysis', 'generate_test_cases_stream', task.id),
             callback=callback
             # 不再硬编码max_tokens，使用配置文件中的值（如32000）
         )
@@ -1046,9 +763,10 @@ class AIModelService:
         ]
 
         # 流式调用API，确保正确关闭生成器
-        generator = AIModelService.call_openai_compatible_api_stream(
+        generator = OpenAICompatibleClient.stream(
             task.reviewer_model_config,
             messages,
+            context=LLMCallContext('requirement_analysis', 'review_test_cases_stream', task.id),
             callback=callback
         )
 
@@ -1132,9 +850,10 @@ class AIModelService:
 
         # 流式调用API，确保正确关闭生成器
         # 使用配置的max_tokens，不硬编码限制
-        generator = AIModelService.call_openai_compatible_api_stream(
+        generator = OpenAICompatibleClient.stream(
             task.writer_model_config,
             messages,
+            context=LLMCallContext('requirement_analysis', 'revise_test_cases_stream', task.id),
             callback=callback
             # 不再硬编码max_tokens，使用配置文件中的值（如32000）
         )
