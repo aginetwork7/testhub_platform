@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status
+from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -8,10 +8,17 @@ import os
 import logging
 import json
 from pathlib import Path
+from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+class AIModelParametersSerializer(serializers.Serializer):
+    max_tokens = serializers.IntegerField(min_value=1, required=False)
+    temperature = serializers.FloatField(min_value=0, max_value=2, required=False)
+    top_p = serializers.FloatField(min_value=0, max_value=1, required=False)
 
 class EnvironmentConfigViewSet(viewsets.ViewSet):
     """
@@ -211,6 +218,12 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
     queryset = AITestModelConfig.objects.filter(role__in=BROWSER_USE_ROLES)
 
     @staticmethod
+    def _validated_model_parameters(data: Mapping[str, Any]) -> dict[str, Any]:
+        serializer = AIModelParametersSerializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        return serializer.validated_data
+
+    @staticmethod
     def _running_in_docker():
         return os.path.exists('/.dockerenv') or os.getenv('IN_DOCKER', '').lower() == 'true'
 
@@ -292,9 +305,18 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
 
         return explicit_api_key
 
-    def _build_test_payload(self, role, model_name):
+    def _build_test_payload(
+        self,
+        role: str,
+        model_name: str,
+        max_tokens: int = 120,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+    ) -> dict[str, Any]:
+        model_name_lower = str(model_name or '').lower()
+        is_reasoning_model = model_name_lower.startswith(('gpt-5', 'o1', 'o3', 'o4'))
         if role == 'hermes_agent':
-            return {
+            payload = {
                 "model": model_name,
                 "messages": [
                     {
@@ -308,16 +330,20 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                         "role": "user",
                         "content": '请返回一个Hermes连接自检结果。'
                     }
-                ],
-                "max_tokens": 120,
-                "temperature": 0
+                ]
+            }
+        else:
+            payload = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Hi"}],
             }
 
-        return {
-            "model": model_name,
-            "messages": [{"role": "user", "content": "Hi"}],
-            "max_tokens": 1
-        }
+        token_parameter = 'max_completion_tokens' if is_reasoning_model else 'max_tokens'
+        payload[token_parameter] = max_tokens
+        if not is_reasoning_model:
+            payload['temperature'] = 1.0 if 'kimi' in model_name_lower else temperature
+            payload['top_p'] = top_p
+        return payload
 
     def _extract_test_message(self, role, response):
         try:
@@ -366,6 +392,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             'role': config.role,
             'model_name': config.model_name,
             'base_url': config.base_url,
+            'max_tokens': config.max_tokens,
+            'temperature': config.temperature,
+            'top_p': config.top_p,
             'is_active': config.is_active,
             'api_key_length': len(config.api_key) if config.api_key else 0,  # 返回API Key长度用于生成掩码
             'created_at': config.created_at,
@@ -379,6 +408,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         """
         data = request.data
         user = request.user
+        model_parameters = self._validated_model_parameters(data)
 
         # 验证必填字段
         role = data.get('role', 'executor_text')
@@ -411,6 +441,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             model_name=data['model_name'],
             api_key=data.get('api_key', ''),
             base_url=data.get('base_url', ''),
+            **model_parameters,
             is_active=data.get('is_active', True),
             created_by=user
         )
@@ -421,6 +452,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
             'model_type': config.model_type,
             'model_name': config.model_name,
             'base_url': config.base_url,
+            'max_tokens': config.max_tokens,
+            'temperature': config.temperature,
+            'top_p': config.top_p,
             'is_active': config.is_active,
             'created_at': config.created_at
         }, status=status.HTTP_201_CREATED)
@@ -437,6 +471,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 'model_type': config.model_type,
                 'model_name': config.model_name,
                 'base_url': config.base_url,
+                'max_tokens': config.max_tokens,
+                'temperature': config.temperature,
+                'top_p': config.top_p,
                 'is_active': config.is_active,
                 'created_at': config.created_at,
                 'updated_at': config.updated_at
@@ -454,6 +491,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         try:
             config = self.queryset.get(pk=pk)
             data = request.data
+            model_parameters = self._validated_model_parameters(data)
             new_role = data.get('role', config.role)
             if new_role not in self.BROWSER_USE_ROLES:
                 return Response(
@@ -483,6 +521,8 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 config.api_key = data['api_key']
             if 'base_url' in data:
                 config.base_url = data['base_url']
+            for field, value in model_parameters.items():
+                setattr(config, field, value)
             if 'is_active' in data:
                 config.is_active = data['is_active']
 
@@ -495,6 +535,9 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 'role': config.role,
                 'model_name': config.model_name,
                 'base_url': config.base_url,
+                'max_tokens': config.max_tokens,
+                'temperature': config.temperature,
+                'top_p': config.top_p,
                 'is_active': config.is_active,
                 'created_at': config.created_at,
                 'updated_at': config.updated_at
@@ -549,6 +592,12 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
         api_key = request.data.get('api_key')
         model_name = request.data.get('model_name')
         role = request.data.get('role', 'executor_text')
+        model_parameters = {
+            'max_tokens': 120,
+            'temperature': 0.7,
+            'top_p': 0.9,
+            **self._validated_model_parameters(request.data),
+        }
 
         if role != 'hermes_agent' and not api_key:
             return Response(
@@ -583,7 +632,7 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 "Content-Type": "application/json"
             }
 
-            data = self._build_test_payload(role, model_name)
+            data = self._build_test_payload(role, model_name, **model_parameters)
 
             logger.info(f"AI智能模式预览 - 发送POST请求到: {url}, role={role}")
             # 增加超时时间：连接超时60秒，读取超时900秒
@@ -651,7 +700,13 @@ class AIIntelligentModeConfigViewSet(viewsets.ViewSet):
                 "Content-Type": "application/json"
             }
 
-            data = self._build_test_payload(config.role, config.model_name)
+            data = self._build_test_payload(
+                config.role,
+                config.model_name,
+                config.max_tokens,
+                config.temperature,
+                config.top_p,
+            )
 
             logger.info(f"AI智能模式 - 发送POST请求到: {url}, role={config.role}")
             # 增加超时时间：连接超时60秒，读取超时900秒

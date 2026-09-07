@@ -55,7 +55,7 @@ class AlphaReflectionTests(TestCase):
         )
 
     @patch(
-        'apps.requirement_analysis.models.AIModelService.call_openai_compatible_api',
+        'apps.ai_testing.alpha.reflection.OpenAICompatibleClient.complete',
         new_callable=AsyncMock,
     )
     def test_reflection_uses_dedicated_reflection_model(self, model_call) -> None:
@@ -67,6 +67,10 @@ class AlphaReflectionTests(TestCase):
 
         self.assertEqual(verdict, ReflectionVerdict(verdict='pass', unmet_criteria=()))
         self.assertEqual(model_call.await_args.args[0].role, 'alpha_reflection')
+        context = model_call.await_args.kwargs['context']
+        self.assertEqual(context.component, 'alpha_agent')
+        self.assertEqual(context.operation, 'reflection')
+        self.assertEqual(context.execution_id, self.run.id)
 
     @patch(
         'apps.ai_testing.alpha.tasks.AlphaReflectionService.reflect_revision',

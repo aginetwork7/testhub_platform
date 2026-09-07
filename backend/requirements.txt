@@ -4,7 +4,7 @@ argon2-cffi
 barcode_generator==0.1rc15
 browser_use==0.12.6
 channels==4.3.2
-chardet==6.0.0.post1
+chardet==5.2.0
 chromadb==1.5.5
 croniter==6.0.0
 django-q2>=1.6.0

@@ -20,7 +20,7 @@ from apps.ai_testing.execution.mcp_tools import (
 from apps.ai_testing.execution.page_observation import capture_accessibility_snapshot
 from apps.ai_testing.runtime.pyui_compat import PyUICompatAgent
 from apps.ai_testing.runtime.pyui_compat.runner import PyUICompatHistory
-from apps.requirement_analysis.models import AIModelService
+from apps.core.llm import OpenAICompatibleClient
 
 
 @dataclass
@@ -1304,10 +1304,10 @@ class PyUICompatRuntimeTests(SimpleTestCase):
 
         self.assertEqual(page.waited_ms, 20000)
 
-    def test_build_request_payload_includes_response_format_when_present(self) -> None:
+    def test_request_payload_includes_response_format_when_present(self) -> None:
         config = type('ConfigStub', (), {'model_name': 'demo', 'temperature': 0.1, 'top_p': 0.2, 'model_type': 'qwen'})()
 
-        data = AIModelService._build_request_payload(
+        data = OpenAICompatibleClient.build_request_payload(
             config=config,
             messages=[{'role': 'user', 'content': 'hello'}],
             max_tokens=64,

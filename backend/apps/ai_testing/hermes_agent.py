@@ -97,7 +97,9 @@ class HermesAgent:
         self.base_url = self._normalize_base_url(config_obj.base_url)
         self.model_name = config_obj.model_name
         self.provider = config_obj.model_type
+        self.max_tokens = config_obj.max_tokens
         self.temperature = config_obj.temperature
+        self.top_p = config_obj.top_p
         self.api_key = config_obj.api_key
 
         if not self.api_key:
@@ -106,11 +108,22 @@ class HermesAgent:
         if not self.base_url:
             raise ValueError('The active AI Testing Hermes model has no base URL')
 
+        model_name_lower = self.model_name.lower()
+        is_reasoning_model = model_name_lower.startswith(('gpt-5', 'o1', 'o3', 'o4'))
+        if is_reasoning_model:
+            llm_parameters = {'max_completion_tokens': self.max_tokens}
+        else:
+            llm_parameters = {
+                'temperature': 1.0 if 'kimi' in model_name_lower else self.temperature,
+                'top_p': self.top_p,
+                'extra_body': {'max_tokens': self.max_tokens},
+            }
+
         self.llm = ChatOpenAI(
             model=self.model_name,
             api_key=self.api_key,
             base_url=self.base_url,
-            temperature=self.temperature,
+            **llm_parameters,
             timeout=self.request_timeout,
             max_retries=self.max_retries,
         )

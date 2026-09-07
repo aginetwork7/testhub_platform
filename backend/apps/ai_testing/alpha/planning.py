@@ -10,6 +10,7 @@ from asgiref.sync import sync_to_async
 from apps.ai_testing.alpha.orchestrator import AlphaOrchestrator
 from apps.ai_testing.alpha.skills.catalog import build_phase_one_registry
 from apps.ai_testing.models import AlphaRun
+from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 
 
 class AlphaPlanningError(ValueError):
@@ -28,12 +29,15 @@ class AlphaPlannerService:
         if not prompt_content:
             raise AlphaPlanningError('No active Agent prompt is configured')
 
-        from apps.requirement_analysis.models import AIModelService
-
         prior_feedback = await sync_to_async(self._load_prior_reflection_feedback)(run.id)
-        response = await AIModelService.call_openai_compatible_api(
+        response = await OpenAICompatibleClient.complete(
             config,
             self._build_messages(run.original_request, prior_feedback, prompt_content),
+            context=LLMCallContext(
+                component='alpha_agent',
+                operation='planning',
+                execution_id=run.id,
+            ),
             max_tokens=min(config.max_tokens, 1600),
             response_format={'type': 'json_object'},
         )
