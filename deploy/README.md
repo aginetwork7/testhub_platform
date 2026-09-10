@@ -15,6 +15,24 @@ Copy each template to the same path without `.example`, for example
 files are ignored by Git. Fill the runner tokens, Swagger token, host names, and
 Hermes API key paths before use.
 
+## Chromium HEVC Packages
+
+`Dockerfile.backend` installs the pinned Chromium HEVC build from
+`deploy/chromium-hevc/artifacts/`. The `.deb` files and `SHA256SUMS` there are
+ignored by Git, so a fresh clone or `git pull` never brings them along. Every
+checkout that builds the backend image, including the production checkout,
+needs its own copy. Copy the validated set from the build checkout before the
+first deployment and again after every Chromium version bump:
+
+```bash
+cp deploy/chromium-hevc/artifacts/*.deb deploy/chromium-hevc/artifacts/SHA256SUMS \
+   /home/agi7/testhub_platform/deploy/chromium-hevc/artifacts/
+```
+
+`deploy/deploy.sh` checks for the files and verifies their checksums before it
+backs up the database or builds; without them the Docker build fails inside
+the `sha256sum -c SHA256SUMS` step.
+
 ## Cutover Order
 
 1. Create the `agi7` working copy and its separate runtime directories.
