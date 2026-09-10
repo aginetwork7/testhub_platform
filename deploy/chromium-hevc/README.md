@@ -43,3 +43,8 @@ The `.deb` packages, checksum manifest, and playback evidence are local build
 artifacts and are intentionally excluded from Git. Run the collection step
 before building `Dockerfile.backend`; its package metadata and checksum gates
 reject missing or unexpected artifacts.
+
+Because the files are not in Git, every checkout that builds the image needs
+its own copy of the three `.deb` files and `SHA256SUMS`, including the
+production checkout described in `deploy/README.md`. `deploy/deploy.sh`
+verifies they are present and match `SHA256SUMS` before it starts a build.

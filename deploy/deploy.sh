@@ -3,6 +3,31 @@
 set -euo pipefail
 umask 077
 
+# The Chromium HEVC packages installed by Dockerfile.backend are excluded from
+# Git, so each checkout must be provisioned with them by hand. Check them here
+# so a missing or corrupt set fails before the backup and the image build.
+verify_chromium_artifacts() {
+    local artifact_dir="deploy/chromium-hevc/artifacts"
+    local version package_name package_file
+    version="$(sed -n 's/^ARG HEVC_CHROMIUM_VERSION="\([^"]*\)"$/\1/p' Dockerfile.backend)"
+    [[ -n "$version" ]] || {
+        printf 'Cannot read HEVC_CHROMIUM_VERSION from Dockerfile.backend.\n' >&2
+        return 1
+    }
+    for package_name in chromium chromium-common chromium-sandbox; do
+        package_file="${package_name}_${version}_arm64.deb"
+        [[ -f "$artifact_dir/$package_file" ]] || {
+            printf 'Missing %s/%s.\n' "$artifact_dir" "$package_file" >&2
+            return 1
+        }
+    done
+    [[ -f "$artifact_dir/SHA256SUMS" ]] || {
+        printf 'Missing %s/SHA256SUMS.\n' "$artifact_dir" >&2
+        return 1
+    }
+    (cd "$artifact_dir" && sha256sum --quiet -c SHA256SUMS)
+}
+
 [[ "$#" -eq 0 ]] || {
     printf 'Usage: %s\nDeploys the latest origin/base revision.\n' "$0" >&2
     exit 2
@@ -36,6 +61,11 @@ git fetch origin base --prune
 git merge --ff-only origin/base
 
 deployment_commit="$(git rev-parse HEAD)"
+
+verify_chromium_artifacts || {
+    printf 'Chromium HEVC packages are not tracked by Git; copy the validated *.deb files and SHA256SUMS into deploy/chromium-hevc/artifacts before deploying (see deploy/chromium-hevc/README.md).\n' >&2
+    exit 1
+}
 
 mkdir -p "$backup_directory"
 backup_file="$backup_directory/testhub-before-base-$(date +%Y%m%d-%H%M%S).sql"
