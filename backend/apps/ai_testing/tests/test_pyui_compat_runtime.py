@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass, field
+import inspect
 import tempfile
 import time
 from pathlib import Path
@@ -545,11 +546,25 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertNotIn('use[xlink', source)
         self.assertIn('new URL(href, document.baseURI).href', source)
         self.assertIn('native_control: nativeControl', source)
+        self.assertIn('group_selector: groupSelector', source)
+        self.assertIn('grouped.length >= 1 && parentSelector', source)
+        self.assertIn('classSiblings.length >= 1 ? classSiblings', source)
+        self.assertIn('has_visual_content: hasRenderedVisual', source)
         self.assertIn('blockingLayerRank || namedRank || nativeRank || topLayerRank', source)
         self.assertIn('left.depth - right.depth', source)
         self.assertIn('}).slice(0, 300)', source)
         self.assertIn("element.getAttribute('aria-describedby')", source)
         self.assertIn('document.getElementById(tooltipId)?.innerText', source)
+        self.assertIn("element.closest('[aria-disabled=\"true\"], [disabled], [inert]')", source)
+        self.assertIn("style.pointerEvents !== 'none'", source)
+
+    def test_observable_discovery_exposes_structural_collection_groups(self) -> None:
+        source = inspect.getsource(PyUICompatAgent._build_observable_elements)
+
+        self.assertIn('group_selector: groupSelector', source)
+        self.assertIn('group_size: grouped.length', source)
+        self.assertIn('group_ordinal: grouped.indexOf(element)', source)
+        self.assertIn('sameTagSiblings', source)
 
     def test_actionable_discovery_propagates_normalized_blocking_state(self) -> None:
         import inspect
@@ -693,7 +708,9 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         )
 
     def test_rebinding_replaces_stale_locator_without_nesting_intent(self) -> None:
-        step = {'assertions': [{'target': {'locator': '#stale', 'intent': {'intent': 'status menu'}}}]}
+        step = {'assertions': [{
+            'target': {'locator': '#stale', 'intent': {'intent': 'status menu'}, 'text': 'Investigate'},
+        }]}
 
         rebound = PyUICompatAgent._bind_step_assertions(
             step,
@@ -703,7 +720,345 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertEqual(rebound['assertions'][0]['target'], {
             'locator': '#current',
             'intent': 'status menu',
+            'text': 'Investigate',
         })
+
+    def test_assertion_retry_clears_locator_that_vanished_from_dom(self) -> None:
+        agent = PyUICompatAgent(case_name='Stale_Binding', execution_record_id=7)
+        step = {'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {
+                'locator': '#stale',
+                'intent': 'camera thumbnail',
+                'text': 'Camera thumbnail preview',
+                'visual_content': 'image',
+            },
+        }]}
+        page = SimpleNamespace(locator=Mock(return_value=SimpleNamespace(count=AsyncMock(return_value=0))))
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_unbound_step') as persist_unbound_step:
+            asyncio.run(agent._clear_vanished_assertion_bindings(page, step, 1))
+
+        self.assertEqual(step['assertions'][0]['target'], {
+            'intent': 'camera thumbnail',
+            'text': 'Camera thumbnail preview',
+            'visual_content': 'image',
+        })
+        persist_unbound_step.assert_called_once_with(7, 1, [1])
+
+    def test_assertion_shortfall_describes_only_unverified_contracts(self) -> None:
+        step = {'assertions': [
+            {'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'intent': 'camera thumbnail'}},
+            {'assert_kind': 'field_value', 'operator': 'equals', 'expected': {'value': 'ai@test.com'}, 'target': {'intent': 'email input'}},
+        ]}
+        detail = PyUICompatAgent._describe_assertion_shortfall(step, ['passed', 'inconclusive'])
+
+        self.assertNotIn('element_state', detail)
+        self.assertIn('field_value', detail)
+        self.assertIn('ai@test.com', detail)
+        self.assertIn('inconclusive', detail)
+
+        self.assertEqual(PyUICompatAgent._describe_assertion_shortfall({'assertions': []}, []), '')
+        self.assertEqual(PyUICompatAgent._describe_assertion_shortfall(step, ['passed', 'passed']), '')
+
+    def test_image_assertion_waits_for_rendered_visual_content_before_capture(self) -> None:
+        page = SimpleNamespace(
+            evaluate=AsyncMock(side_effect=[False, True]),
+            wait_for_timeout=AsyncMock(),
+        )
+        step = {'timeout_ms': 5000, 'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {'intent': 'camera thumbnail', 'visual_content': 'image', 'locator': '#thumb'},
+        }]}
+
+        asyncio.run(PyUICompatAgent()._wait_for_assertion_observation(page, step))
+
+        self.assertEqual(page.evaluate.await_count, 2)
+        self.assertEqual(page.evaluate.await_args_list[0].args[1], ['#thumb'])
+        self.assertEqual(
+            [call.args[0] for call in page.wait_for_timeout.await_args_list],
+            [500, 300],
+        )
+
+    def test_unbound_image_assertion_waits_for_media_introduced_since_baseline(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Wait')
+        agent._rendered_visual_baseline = {'#old'}
+        agent._rendered_visual_elements = AsyncMock(side_effect=[
+            [{'selector': '#old'}],
+            [{'selector': '#old'}, {'selector': '#detail-image'}],
+        ])
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=True), wait_for_timeout=AsyncMock())
+        step = {'timeout_ms': 8000, 'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {'intent': 'alert detail content', 'visual_content': 'image'},
+        }]}
+
+        asyncio.run(agent._wait_for_assertion_observation(page, step))
+
+        page.evaluate.assert_not_awaited()
+        self.assertEqual(agent._rendered_visual_elements.await_count, 2)
+        self.assertEqual([call.args[0] for call in page.wait_for_timeout.await_args_list], [500, 300])
+
+    def test_intent_only_exists_assertion_waits_briefly_only_with_baseline(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Wait')
+        agent._rendered_visual_elements = AsyncMock(return_value=[{'selector': '#panel-canvas'}])
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=True), wait_for_timeout=AsyncMock())
+        step = {'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {'intent': 'main window video panel in the opened case detail'},
+        }]}
+
+        asyncio.run(agent._wait_for_assertion_observation(page, step))
+        agent._rendered_visual_elements.assert_not_awaited()
+        page.evaluate.assert_not_awaited()
+
+        agent._rendered_visual_baseline = set()
+        asyncio.run(agent._wait_for_assertion_observation(page, step))
+        self.assertEqual(agent._rendered_visual_elements.await_count, 1)
+        page.evaluate.assert_not_awaited()
+
+    def test_non_image_assertions_skip_visual_settle_probe(self) -> None:
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=True), wait_for_timeout=AsyncMock())
+        step = {'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {'intent': 'status menu', 'locator': '#menu'},
+        }]}
+
+        asyncio.run(PyUICompatAgent()._wait_for_assertion_observation(page, step))
+
+        page.evaluate.assert_not_awaited()
+        page.wait_for_timeout.assert_awaited_once_with(300)
+
+    def test_observable_discovery_includes_textless_rendered_visual_elements(self) -> None:
+        source = inspect.getsource(PyUICompatAgent._build_observable_elements)
+
+        self.assertIn('const ownVisual', source)
+        self.assertIn('(text || ownVisual)', source)
+        self.assertIn('has_visual_content: hasVisualContent', source)
+        self.assertIn('left.offscreen - right.offscreen || left.order - right.order', source)
+        self.assertIn("element['visual_signal'] = None", source)
+
+    def test_actionable_discovery_flags_dialog_layers_for_popup_binding(self) -> None:
+        discovery_source = inspect.getsource(PyUICompatAgent._build_actionable_controls)
+        observation_source = inspect.getsource(PyUICompatAgent._collect_planner_observation)
+
+        self.assertIn('dialog_layer: Boolean(dialog)', discovery_source)
+        self.assertIn("'dialog_layer'", observation_source)
+        self.assertIn("'has_visual_content'", observation_source)
+
+    def test_rendered_visual_binding_prefers_fresh_top_layer_media(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Binding')
+        assertion = {
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'expected': {'value': True},
+            'target': {'intent': 'alert detail content', 'visual_content': 'image'},
+        }
+        step = {'assertions': [assertion]}
+        agent._rendered_visual_baseline = {'body > div:nth-of-type(2) > img:nth-of-type(1)'}
+        agent._rendered_visual_elements = AsyncMock(return_value=[
+            {'selector': 'body > div:nth-of-type(2) > img:nth-of-type(1)', 'area': 90000, 'top_layer': False},
+            {'selector': 'body > div:nth-of-type(8) > img:nth-of-type(1)', 'area': 240000, 'top_layer': True},
+            {'selector': 'body > div:nth-of-type(8) > img:nth-of-type(2)', 'area': 4000, 'top_layer': True},
+            {'selector': 'body > div:nth-of-type(3) > img:nth-of-type(1)', 'area': 500000, 'top_layer': False},
+        ])
+
+        bindings = asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), step, [assertion], {'action': 'click', 'selector': '#thumb'},
+        ))
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': 'body > div:nth-of-type(8) > img:nth-of-type(1)'}])
+
+    def test_rendered_visual_binding_requires_baseline_and_image_assertion(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Binding')
+        image_assertion = {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'visual_content': 'image'}}
+        text_assertion = {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'Team'}}
+        agent._rendered_visual_elements = AsyncMock(return_value=[{'selector': '#new', 'area': 1, 'top_layer': False}])
+
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [image_assertion]}, [image_assertion], {'action': 'click'},
+        )), [])
+        agent._rendered_visual_baseline = set()
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [text_assertion]}, [text_assertion], {'action': 'click'},
+        )), [])
+        agent._rendered_visual_elements = AsyncMock(return_value=[])
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [image_assertion]}, [image_assertion], {'action': 'click'},
+        )), [])
+
+    def test_rendered_visual_binding_declines_ambiguous_in_page_media(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Binding')
+        assertion = {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'visual_content': 'image'}}
+        agent._rendered_visual_baseline = set()
+        agent._rendered_visual_elements = AsyncMock(return_value=[
+            {'selector': '#a', 'area': 100, 'top_layer': False},
+            {'selector': '#b', 'area': 200, 'top_layer': False},
+        ])
+
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [assertion]}, [assertion], {'action': 'click'},
+        )), [])
+
+        agent._rendered_visual_elements = AsyncMock(return_value=[{'selector': '#only', 'area': 100, 'top_layer': False}])
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [assertion]}, [assertion], {'action': 'click'},
+        )), [{'assertion_index': 1, 'locator': '#only'}])
+
+    def test_invisible_image_binding_is_cleared_before_rebinding(self) -> None:
+        agent = PyUICompatAgent(case_name='Stale_Image_Binding', execution_record_id=9)
+        step = {'assertions': [{
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'target': {'locator': 'body > div:nth-of-type(8) > div:nth-of-type(1)', 'intent': 'alert detail', 'visual_content': 'image'},
+        }]}
+        page = SimpleNamespace(locator=Mock(return_value=SimpleNamespace(
+            count=AsyncMock(return_value=1),
+            first=SimpleNamespace(is_visible=AsyncMock(return_value=False)),
+        )))
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_unbound_step') as persist_unbound_step:
+            asyncio.run(agent._clear_vanished_assertion_bindings(page, step, 3))
+
+        self.assertNotIn('locator', step['assertions'][0]['target'])
+        persist_unbound_step.assert_called_once_with(9, 3, [1])
+
+    def test_rendered_visual_binding_covers_intent_only_detail_panel_assertions(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Binding')
+        assertion = {
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'expected': {'value': True},
+            'target': {'intent': 'main window video panel in the opened case detail'},
+        }
+        step = {'assertions': [assertion]}
+        agent._rendered_visual_baseline = {'body > div:nth-of-type(1) > img:nth-of-type(1)'}
+        agent._rendered_visual_elements = AsyncMock(return_value=[
+            {'selector': 'body > div:nth-of-type(1) > img:nth-of-type(1)', 'area': 11000, 'viewport_ratio': 0.007, 'top_layer': False},
+            {'selector': 'body > div:nth-of-type(1) > img:nth-of-type(2)', 'area': 11000, 'viewport_ratio': 0.007, 'top_layer': False},
+            {'selector': 'body > div:nth-of-type(1) > canvas:nth-of-type(1)', 'area': 867000, 'viewport_ratio': 0.55, 'top_layer': False},
+        ])
+
+        bindings = asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), step, [assertion], {'action': 'click', 'selector': '#case-thumb'},
+        ))
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': 'body > div:nth-of-type(1) > canvas:nth-of-type(1)'}])
+
+        agent._rendered_visual_elements = AsyncMock(return_value=[
+            {'selector': 'body > div:nth-of-type(9) > img:nth-of-type(1)', 'area': 11000, 'viewport_ratio': 0.007, 'top_layer': True},
+        ])
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), step, [assertion], {'action': 'click'},
+        )), [])
+
+        text_assertion = {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'intent': 'status', 'text': 'Investigate'}}
+        agent._rendered_visual_elements = AsyncMock(return_value=[
+            {'selector': 'body > div:nth-of-type(1) > canvas:nth-of-type(1)', 'area': 867000, 'viewport_ratio': 0.55, 'top_layer': False},
+        ])
+        self.assertEqual(asyncio.run(agent._rendered_visual_binding_from_completed_action(
+            object(), {'assertions': [text_assertion]}, [text_assertion], {'action': 'click'},
+        )), [])
+
+    def test_rendered_visual_baseline_is_captured_for_intent_only_exists_assertions(self) -> None:
+        agent = PyUICompatAgent(case_name='Fresh_Visual_Binding')
+        agent._rendered_visual_elements = AsyncMock(return_value=[{'selector': '#surface', 'area': 1}])
+
+        self.assertEqual(asyncio.run(agent._capture_rendered_visual_baseline(object(), {'assertions': [
+            {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'intent': 'detail video panel'}},
+        ]})), {'#surface'})
+        self.assertIsNone(asyncio.run(agent._capture_rendered_visual_baseline(object(), {'assertions': [
+            {'assert_kind': 'element_state', 'operator': 'exists', 'target': {'intent': 'status', 'text': 'Investigate'}},
+        ]})))
+
+    def test_selected_value_binder_picks_display_control_not_options_or_cards(self) -> None:
+        agent = PyUICompatAgent(case_name='Selected_Value_Binding')
+        assertion = {'assert_kind': 'field_value', 'operator': 'starts_with', 'expected': {'value': 'Site Manager'}, 'target': {'intent': 'role dropdown'}}
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'selector': '[title="Site Manager (Can manage sites)"]', 'tag': 'div', 'role': '', 'name': 'Site Manager (Can manage sites)', 'top_layer': False, 'group_size': 1, 'rect': {'x': 600, 'y': 700, 'width': 240, 'height': 32}},
+            {'selector': 'body > div:nth-of-type(9) > div:nth-of-type(2)', 'tag': 'div', 'role': 'option', 'name': 'Site Manager (Can manage sites)', 'top_layer': True, 'group_size': 5, 'rect': {'x': 600, 'y': 760, 'width': 240, 'height': 32}},
+            {'selector': '#card-3', 'tag': 'div', 'role': '', 'name': 'M\n\nms site manager\n\nSite Manager', 'top_layer': False, 'group_size': 4, 'rect': {'x': 120, 'y': 435, 'width': 335, 'height': 105}},
+        ])
+        agent._build_observable_elements = AsyncMock(return_value=[
+            {'selector': 'body > div:nth-of-type(1) > span:nth-of-type(3)', 'tag': 'span', 'text': 'Site Manager (Can manage sites)', 'rect': {'x': 600, 'y': 700, 'width': 240, 'height': 32}},
+        ])
+
+        bindings = asyncio.run(agent._selected_value_binding_from_completed_click(
+            object(), {'assertions': [assertion]}, [assertion], {'action': 'click', 'selector': '[title="Site Manager (Can manage sites)"]'},
+        ))
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '[title="Site Manager (Can manage sites)"]'}])
+
+        agent._build_observable_elements = AsyncMock(return_value=[])
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'selector': '#a', 'tag': 'div', 'name': 'Site Manager A', 'top_layer': False, 'group_size': 1},
+            {'selector': '#b', 'tag': 'div', 'name': 'Site Manager B', 'top_layer': False, 'group_size': 1},
+        ])
+        self.assertEqual(asyncio.run(agent._selected_value_binding_from_completed_click(
+            object(), {'assertions': [assertion]}, [assertion], {'action': 'click'},
+        )), [])
+
+    def test_ai_action_execution_captures_rendered_visual_baseline(self) -> None:
+        source = inspect.getsource(PyUICompatAgent._execute_ai_actions)
+        binding_source = inspect.getsource(PyUICompatAgent._bind_required_assertions_after_action)
+
+        self.assertIn('self._rendered_visual_baseline = await self._capture_rendered_visual_baseline(page, step)', source)
+        self.assertIn('_rendered_visual_binding_from_completed_action', binding_source)
+
+    def test_fill_match_tolerates_phone_masks_but_not_digit_changes(self) -> None:
+        self.assertTrue(PyUICompatAgent._fill_matches('+1 6465180948', '+1 (646) 518-0948'))
+        self.assertFalse(PyUICompatAgent._fill_matches('+1 6465180948', '+1 (164) 651-8094'))
+        self.assertTrue(PyUICompatAgent._fill_matches('ai@test.com', 'ai@test.com'))
+        self.assertTrue(PyUICompatAgent._fill_matches('black hair', 'Black  hair'))
+        self.assertFalse(PyUICompatAgent._fill_matches('black hair', 'black'))
+        self.assertTrue(PyUICompatAgent._fill_matches('', 'anything'))
+
+    def test_fill_repair_retypes_without_the_prefix_the_field_keeps(self) -> None:
+        agent = PyUICompatAgent(case_name='Fill_Repair')
+        typed = []
+        values = iter(['+1 (164) 651-8094', '+1', '+1 (646) 518-0948'])
+        locator = SimpleNamespace(
+            input_value=AsyncMock(side_effect=lambda **kwargs: next(values)),
+            click=AsyncMock(),
+            press=AsyncMock(),
+            press_sequentially=AsyncMock(side_effect=lambda text, **kwargs: typed.append(text)),
+        )
+
+        asyncio.run(agent._repair_fill_if_mismatched(locator, '+1 6465180948', 10000))
+
+        self.assertEqual(typed, ['6465180948'])
+        self.assertEqual([call.args[0] for call in locator.press.await_args_list], ['Control+A', 'Backspace'])
+
+    def test_fill_repair_is_skipped_when_the_value_landed(self) -> None:
+        agent = PyUICompatAgent(case_name='Fill_Repair')
+        locator = SimpleNamespace(
+            input_value=AsyncMock(return_value='ai@test.com'),
+            click=AsyncMock(),
+            press=AsyncMock(),
+            press_sequentially=AsyncMock(),
+        )
+
+        asyncio.run(agent._repair_fill_if_mismatched(locator, 'ai@test.com', 10000))
+
+        locator.press_sequentially.assert_not_awaited()
+        locator.click.assert_not_awaited()
+
+    def test_assertion_shortfall_includes_observed_values(self) -> None:
+        step = {'assertions': [
+            {'assert_kind': 'field_value', 'operator': 'phone_digits_equals', 'expected': {'value': '16465180948'}, 'target': {'intent': 'phone input'}},
+        ]}
+        detail = PyUICompatAgent._describe_assertion_shortfall(
+            step, ['failed'], actuals=[{'value': '+1 (164) 651-8094', 'reason': 'Assertion did not match evidence.'}],
+        )
+
+        self.assertIn('observed=', detail)
+        self.assertIn('+1 (164) 651-8094', detail)
+        self.assertNotIn('did not match', detail)
 
     def test_assertion_retry_accumulates_prior_action_history(self) -> None:
         import inspect
@@ -772,7 +1127,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
 
         self.assertTrue(should_retry)
 
-    def test_verifying_model_step_does_not_retry_failed_assertion(self) -> None:
+    def test_verifying_model_step_retries_failed_assertion(self) -> None:
         should_retry = PyUICompatAgent._should_retry_assertions(
             {'verification_required': True},
             action_completed=True,
@@ -781,7 +1136,37 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             assertion_statuses=['failed'],
         )
 
-        self.assertFalse(should_retry)
+        self.assertTrue(should_retry)
+
+    def test_verifying_reused_step_retries_unverified_assertions(self) -> None:
+        for action_source in ('cache', 'experience'):
+            with self.subTest(action_source=action_source):
+                should_retry = PyUICompatAgent._should_retry_assertions(
+                    {'verification_required': True},
+                    action_completed=True,
+                    assertions_verified=False,
+                    action_source=action_source,
+                    assertion_statuses=['inconclusive'],
+                )
+
+                self.assertTrue(should_retry)
+
+    def test_invalidating_reused_actions_uses_the_matching_store(self) -> None:
+        agent = PyUICompatAgent(case_name='Invalid_Reused_Action')
+        step = {'description': 'Perform the requested operation'}
+        agent._delete_cached_ai_actions = Mock()
+        agent._invalidate_verified_experience = AsyncMock()
+
+        asyncio.run(agent._invalidate_reused_actions(step, 'cache'))
+
+        agent._delete_cached_ai_actions.assert_called_once_with(step)
+        agent._invalidate_verified_experience.assert_not_awaited()
+
+        agent._delete_cached_ai_actions.reset_mock()
+        asyncio.run(agent._invalidate_reused_actions(step, 'experience'))
+
+        agent._delete_cached_ai_actions.assert_not_called()
+        agent._invalidate_verified_experience.assert_awaited_once_with(step)
 
     def test_optional_assertion_status_does_not_block_required_success(self) -> None:
         step = {
@@ -1465,6 +1850,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertEqual(binding_step['allowed_capabilities'], ['browser.inspect'])
         self.assertEqual(binding_step['_prior_actions'][0]['action'], 'click')
         self.assertEqual(binding_step['_prior_actions'][0]['selector'], '#menu')
+        self.assertEqual(binding_step['_prior_actions'][0]['status'], 'completed')
         self.assertEqual(step['assertions'][0]['target']['locator'], '#menu-option')
         persist_bound_step.assert_called_once()
 
@@ -1500,6 +1886,87 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             1,
             [{'assertion_index': 1, 'locator': '#search'}],
         )
+
+    def test_post_click_binding_uses_unique_named_top_layer_element(self) -> None:
+        agent = PyUICompatAgent(case_name='Element_State_Binding', execution_record_id=7)
+        history = HistoryStub()
+        step = {
+            'description': 'Open the requested menu',
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'operator': 'exists',
+                'expected': {'value': True},
+                'required': True,
+                'target': {'intent': 'requested item option in the open dropdown'},
+            }],
+        }
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'name': 'requested item details', 'selector': 'body > div > div', 'top_layer': True},
+            {'name': 'requested item details', 'selector': '[title="requested item details"]', 'top_layer': True},
+            {'name': 'requested item details', 'selector': '#background-item', 'top_layer': False},
+        ])
+        agent._plan_ai_step_with_retries = AsyncMock()
+
+        with patch('apps.ai_testing.execution.plan_persistence.persist_bound_step') as persist_bound_step:
+            bound = asyncio.run(agent._bind_required_assertions_after_action(
+                object(), step, 1, [{'action': 'click', 'selector': '#menu'}], None, history,
+            ))
+
+        self.assertTrue(bound)
+        self.assertEqual(step['assertions'][0]['target']['locator'], 'body > div > div')
+        agent._plan_ai_step_with_retries.assert_not_awaited()
+        persist_bound_step.assert_called_once()
+
+    def test_post_click_binding_falls_back_for_ambiguous_named_elements(self) -> None:
+        agent = PyUICompatAgent(case_name='Ambiguous_Element_Binding')
+        step = {
+            'assertions': [{
+                'assert_kind': 'element_state',
+                'operator': 'exists',
+                'expected': {'value': True},
+                'required': True,
+                'target': {'intent': 'requested item option'},
+            }],
+        }
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'name': 'requested item primary', 'selector': '#primary', 'top_layer': True},
+            {'name': 'requested item secondary', 'selector': '#secondary', 'top_layer': True},
+        ])
+
+        bindings = asyncio.run(agent._visible_element_binding_from_completed_click(
+            object(), step, step['assertions'], {'action': 'click'},
+        ))
+
+        self.assertEqual(bindings, [])
+
+    def test_post_click_binding_uses_multilingual_target_text(self) -> None:
+        agent = PyUICompatAgent(case_name='Multilingual_Element_Binding')
+        assertion = {
+            'assert_kind': 'element_state',
+            'operator': 'exists',
+            'expected': {'value': True},
+            'required': True,
+            'target': {'intent': '目标角色选项', 'text': '站点管理员'},
+        }
+        step = {'assertions': [assertion]}
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'name': '站点管理员（可管理指定站点）', 'selector': '#site-manager', 'top_layer': True},
+            {'name': '组织管理员（可管理所有站点）', 'selector': '#org-admin', 'top_layer': True},
+        ])
+
+        bindings = asyncio.run(agent._visible_element_binding_from_completed_click(
+            object(), step, [assertion], {'action': 'click'},
+        ))
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '#site-manager'}])
+
+    def test_normalize_step_preserves_structured_transition(self) -> None:
+        agent = PyUICompatAgent(case_name='Structured_Transition')
+        transition = {'kind': 'select_option', 'value': 'requested option'}
+
+        step = agent._normalize_step({'action': 'click', 'transition': transition}, 1)
+
+        self.assertEqual(step['transition'], transition)
 
     def test_assertion_replan_uses_persisted_scroll_evidence(self) -> None:
         agent = PyUICompatAgent(case_name='Planner_Scroll_Evidence', execution_record_id=7)
@@ -1539,6 +2006,29 @@ class PyUICompatRuntimeTests(SimpleTestCase):
             second_replanning_step['_prior_actions'][-1]['scroll_state']['after']['scroll_top'],
             1,
         )
+
+    def test_plan_ai_step_exposes_replanning_context_during_mcp_observation(self) -> None:
+        agent = PyUICompatAgent(case_name='Replanning_Observation')
+        replanning_step = {
+            'description': 'Choose a different control',
+            'allowed_capabilities': ['browser.inspect'],
+            '_prior_actions': [{'action': 'click', 'selector': '#failed'}],
+        }
+        observed_steps = []
+
+        async def observe(_name, _arguments):
+            observed_steps.append(agent._active_planning_step)
+            return {'structuredContent': {'actionable_controls': []}}
+
+        agent._mcp_client = SimpleNamespace(call_tool=AsyncMock(side_effect=observe))
+        with patch(
+            'apps.ai_testing.global_planner.VisualStepReplanner.create_actions',
+            new=AsyncMock(return_value=[{'action': 'assert'}]),
+        ):
+            asyncio.run(agent._plan_ai_step(object(), replanning_step))
+
+        self.assertIs(observed_steps[0], replanning_step)
+        self.assertIsNone(agent._active_planning_step)
 
     def test_verified_predecessor_context_keeps_bound_target_evidence(self) -> None:
         agent = PyUICompatAgent(case_name='Planner_Target_Continuity')

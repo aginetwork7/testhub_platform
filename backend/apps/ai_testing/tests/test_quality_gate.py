@@ -55,6 +55,43 @@ class QualityGateTests(unittest.TestCase):
 
 
 class ResourceEvidenceQualityGateTests(TestCase):
+    def test_playback_uses_persisted_visual_timestamp_evidence(self) -> None:
+        record = AIExecutionRecord.objects.create(case_name='Visual playback evidence')
+        persist_execution_plan(record.id, 'Verify playback seek', [{
+            'id': 'verify-playback',
+            'description': 'Verify playback seek',
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'playback',
+                'target': {'intent': 'recorded playback'},
+                'operator': 'equals',
+                'expected': {'minimum_advanced_seconds': 10},
+                'evidence_requirements': [
+                    'media_state_before',
+                    'media_state_after',
+                    'playback_time_progress',
+                ],
+            }],
+        }])
+        persist_step_attempt(
+            record.id,
+            1,
+            {'action': 'click'},
+            {},
+            'completed',
+            '',
+            'environment',
+            'permission',
+            [
+                {'type': 'media_state_before', 'elements': [{'paused': False}]},
+                {'type': 'media_state_after', 'elements': [{'paused': False}]},
+                {'type': 'playback_time_progress', 'advanced_seconds': 0},
+                {'type': 'playback_visual_progress', 'advanced_seconds': 10, 'confidence': 0.95},
+            ],
+        )
+
+        self.assertEqual(evaluate_step_assertions(record.id, 1), ['passed'])
+
     def test_stream_state_uses_persisted_canvas_evidence(self) -> None:
         record = AIExecutionRecord.objects.create(case_name='Canvas stream evidence')
         persist_execution_plan(record.id, 'Verify live stream', [{
@@ -86,8 +123,8 @@ class ResourceEvidenceQualityGateTests(TestCase):
                 {'type': 'media_state_before', 'elements': []},
                 {'type': 'media_state_after', 'elements': []},
                 {'type': 'playback_time_progress', 'advanced_seconds': 0},
-                {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'},
-                {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after'},
+                {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before', 'visual_signal': True},
+                {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after', 'visual_signal': True},
             ],
         )
 
@@ -275,7 +312,7 @@ class ResourceEvidenceQualityGateTests(TestCase):
 
     def test_binding_revision_preserves_semantic_target(self) -> None:
         record = AIExecutionRecord.objects.create(case_name='Bound assertion')
-        assertion = {'action': 'assert', 'assert_kind': 'element_state', 'target': {'locator': 'new alert'}, 'operator': 'exists', 'expected': {'value': True}, 'evidence_requirements': ['element_state']}
+        assertion = {'action': 'assert', 'assert_kind': 'element_state', 'target': {'locator': 'new alert', 'text': 'New Alert'}, 'operator': 'exists', 'expected': {'value': True}, 'evidence_requirements': ['element_state']}
         persist_execution_plan(record.id, 'Locate alert', [{'id': 'alert', 'description': 'Locate alert', 'assertions': [assertion]}])
 
         revision = persist_bound_step(record.id, 1, [{'assertion_index': 1, 'locator': '[data-testid="alert-row"]', 'selection_basis': 'first_visible'}])
@@ -284,12 +321,14 @@ class ResourceEvidenceQualityGateTests(TestCase):
         self.assertEqual(revision.reason, 'binding_step_1_from_1')
         self.assertEqual(bound['target']['locator'], '[data-testid="alert-row"]')
         self.assertEqual(bound['target']['intent'], 'new alert')
+        self.assertEqual(bound['target']['text'], 'New Alert')
 
         rebound_revision = persist_bound_step(record.id, 1, [{'assertion_index': 1, 'locator': '[data-testid="new-alert-row"]'}])
 
         rebound = rebound_revision.steps.get(display_order=1).assertions[0]
         self.assertEqual(rebound['target']['locator'], '[data-testid="new-alert-row"]')
         self.assertEqual(rebound['target']['intent'], 'new alert')
+        self.assertEqual(rebound['target']['text'], 'New Alert')
 
     def test_invalid_evidence_hash_is_inconclusive_at_quality_gate(self) -> None:
         record = AIExecutionRecord.objects.create(case_name='Invalid evidence')

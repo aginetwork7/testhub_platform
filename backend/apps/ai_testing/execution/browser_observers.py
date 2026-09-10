@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import json
+import re
+from io import BytesIO
 from typing import Any, Protocol
+
+from asgiref.sync import sync_to_async
+from PIL import Image, ImageStat
 
 
 class BrowserEvidenceObserver(Protocol):
@@ -56,8 +63,11 @@ class NativeMediaObserver:
             {'type': 'media_state_after', 'elements': after_state},
         ])
         progress = media_progress_seconds(context.native_media_before, after_state)
-        if progress is not None:
-            artifacts.append({'type': 'playback_time_progress', 'advanced_seconds': progress})
+        if progress is None:
+            # No comparable native media element: the measured native progress is zero, which lets
+            # playback/stream evaluation fall through to canvas or visual evidence instead of stalling.
+            progress = 0.0
+        artifacts.append({'type': 'playback_time_progress', 'advanced_seconds': progress})
         if _started_playing(context.native_media_before, after_state):
             artifacts.append({'type': 'media_event', 'name': 'playing'})
         return artifacts
@@ -175,10 +185,28 @@ class DOMStateObserver:
                     )
                 else:
                     text = await locator.first.text_content(timeout=3000) if visible else ''
-                artifacts.append({
+                has_visual_content = False
+                target_visual_content = target.get('visual_content') if isinstance(target, Mapping) else None
+                if visible and target_visual_content == 'image':
+                    has_visual_content = bool(await locator.first.evaluate(
+                        """element => [element, ...element.querySelectorAll('img, canvas, video, [style]')].some(candidate => {
+                            if (candidate instanceof HTMLImageElement) return candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
+                            if (candidate instanceof HTMLCanvasElement) return candidate.width > 1 && candidate.height > 1;
+                            if (candidate instanceof HTMLVideoElement) return candidate.readyState >= 2 && candidate.videoWidth > 1 && candidate.videoHeight > 1;
+                            return getComputedStyle(candidate).backgroundImage !== 'none';
+                        })"""
+                    ))
+                visual_signal = None
+                if has_visual_content:
+                    visual_signal = measure_visual_signal(await locator.first.screenshot(type='png', timeout=5000))
+                state_artifact = {
                     'type': 'collection_state' if assert_kind == 'collection' else 'element_state',
                     'locator': locator_text, 'count': count, 'visible': visible, 'text': str(text or ''),
-                })
+                }
+                if target_visual_content == 'image':
+                    state_artifact['has_visual_content'] = has_visual_content
+                    state_artifact['visual_signal'] = visual_signal
+                artifacts.append(state_artifact)
             except Exception:
                 continue
         return artifacts
@@ -187,8 +215,21 @@ class DOMStateObserver:
 class VisualFrameObserver:
     async def collect(self, page: Any, assertions: Sequence[Mapping[str, object]], context: BrowserObservationContext) -> list[dict[str, object]]:
         after = await capture_visual_frames(page, assertions)
-        artifacts = [{'type': 'visual_frame_before', **frame} for frame in context.visual_frames_before]
-        artifacts.extend({'type': 'visual_frame_after', **frame} for frame in after)
+        artifacts = [
+            {'type': 'visual_frame_before', 'content_hash': frame['content_hash']}
+            for frame in context.visual_frames_before
+        ]
+        artifacts.extend(
+            {'type': 'visual_frame_after', 'content_hash': frame['content_hash']}
+            for frame in after
+        )
+        if any(str(assertion.get('assert_kind') or '') == 'playback' for assertion in assertions):
+            native_after = await NATIVE_MEDIA_OBSERVER.capture_state(page)
+            visual_progress = None
+            if not _native_playback_satisfies(assertions, context.native_media_before, native_after):
+                visual_progress = await compare_playback_timestamps(context.visual_frames_before, after)
+            if visual_progress is not None:
+                artifacts.append({'type': 'playback_visual_progress', **visual_progress})
         return artifacts
 
 
@@ -230,7 +271,11 @@ OBSERVERS: dict[str, tuple[ObserverDefinition, BrowserEvidenceObserver]] = {
         DOM_STATE_OBSERVER,
     ),
     'visual_frame': (
-        ObserverDefinition('visual_frame', ('visual_frame_before', 'visual_frame_after'), ('visual_change',)),
+        ObserverDefinition(
+            'visual_frame',
+            ('visual_frame_before', 'visual_frame_after', 'playback_visual_progress'),
+            ('visual_change', 'playback'),
+        ),
         VISUAL_FRAME_OBSERVER,
     ),
     'canvas_stream': (
@@ -257,11 +302,141 @@ async def collect_browser_observations(page: Any, assertions: Sequence[Mapping[s
     return artifacts
 
 
+async def capture_largest_media_frame(page: Any) -> bytes | None:
+    """Screenshot the dominant visible player surface so only its burned-in clock is in view."""
+    try:
+        surfaces = page.locator('canvas, video')
+        best = None
+        best_area = 0.0
+        for index in range(await surfaces.count()):
+            candidate = surfaces.nth(index)
+            if not await candidate.is_visible():
+                continue
+            box = await candidate.bounding_box()
+            if not box or box['width'] < 160 or box['height'] < 90:
+                continue
+            area = float(box['width']) * float(box['height'])
+            if area > best_area:
+                best, best_area = candidate, area
+        if best is None:
+            return None
+        return await best.screenshot(type='png', timeout=5000)
+    except Exception:
+        return None
+
+
 async def capture_visual_frames(page: Any, assertions: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    if not any(str(assertion.get('assert_kind') or '') == 'visual_change' for assertion in assertions):
+    kinds = {str(assertion.get('assert_kind') or '') for assertion in assertions}
+    if not kinds.intersection({'visual_change', 'playback'}):
         return []
-    frame = await page.screenshot(type='png', full_page=False, timeout=10000)
-    return [{'content_hash': hashlib.sha256(frame).hexdigest()}]
+    frame = await capture_largest_media_frame(page) if 'playback' in kinds else None
+    if frame is None:
+        frame = await page.screenshot(type='png', full_page=False, timeout=10000)
+    return [{
+        'content_hash': hashlib.sha256(frame).hexdigest(),
+        'image_url': f'data:image/png;base64,{base64.b64encode(frame).decode("ascii")}',
+    }]
+
+
+async def compare_playback_timestamps(
+    before_frames: Sequence[Mapping[str, object]],
+    after_frames: Sequence[Mapping[str, object]],
+) -> dict[str, object] | None:
+    before_image = str(before_frames[0].get('image_url') or '') if before_frames else ''
+    after_image = str(after_frames[0].get('image_url') or '') if after_frames else ''
+    if not before_image or not after_image:
+        return None
+
+    from apps.ai_testing.models import AITestModelConfig, AITestPromptConfig
+    from apps.core.llm import LLMCallContext, LLMClientError, OpenAICompatibleClient
+
+    def load_configuration() -> tuple[object | None, str]:
+        config = (
+            AITestModelConfig.objects.filter(role='executor_vision', is_active=True).order_by('id').first()
+            or AITestModelConfig.objects.filter(role='planner_vision', is_active=True).order_by('id').first()
+        )
+        prompt = (
+            AITestPromptConfig.get_active_config('executor_vision')
+            or AITestPromptConfig.get_active_config('planner_vision')
+        )
+        return config, str(prompt.content if prompt is not None else '')
+
+    config, configured_prompt = await sync_to_async(load_configuration)()
+    if config is None or not configured_prompt:
+        return None
+    messages = [
+        {
+            'role': 'system',
+            'content': configured_prompt,
+        },
+        {
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': (
+                        'Assess playback advance only. Both images show the same video player surface: the first is before the action, the second is after. '
+                        'Read the burned-in timestamp overlay (OSD clock) rendered inside the video picture itself; ignore list, timeline, or system-clock text outside the picture. '
+                        'Return only JSON with before_time, after_time (24-hour HH:MM:SS), advanced_seconds, and confidence between 0 and 1; use low confidence when either clock is unreadable.'
+                    ),
+                },
+                {'type': 'image_url', 'image_url': {'url': before_image}},
+                {'type': 'image_url', 'image_url': {'url': after_image}},
+            ],
+        },
+    ]
+    try:
+        response = await OpenAICompatibleClient.complete(
+            config,
+            messages,
+            context=LLMCallContext(component='ai_testing', operation='playback_timestamp_evidence'),
+            max_tokens=256,
+            response_format={'type': 'json_object'},
+        )
+        payload = json.loads(str(response['choices'][0]['message']['content']).strip())
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError, LLMClientError):
+        return None
+    return visual_timestamp_progress(payload)
+
+
+def visual_timestamp_progress(payload: object) -> dict[str, object] | None:
+    """Turn a model's before/after clock reading into signed playback progress."""
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        before_seconds = _timestamp_seconds(payload.get('before_time'))
+        after_seconds = _timestamp_seconds(payload.get('after_time'))
+        confidence = float(payload.get('confidence') or 0)
+    except (TypeError, ValueError):
+        return None
+    if before_seconds is None or after_seconds is None or not 0 <= confidence <= 1:
+        return None
+    advanced_seconds = after_seconds - before_seconds
+    # Only a clock that wrapped past midnight may be normalized; any other backwards
+    # reading is a regression (or a misread) and must not count as progress.
+    if advanced_seconds < 0 and before_seconds >= 23 * 60 * 60 and after_seconds <= 60 * 60:
+        advanced_seconds += 24 * 60 * 60
+    return {
+        'before_time': str(payload.get('before_time')),
+        'after_time': str(payload.get('after_time')),
+        'advanced_seconds': advanced_seconds,
+        'confidence': confidence,
+    }
+
+
+def _timestamp_seconds(value: object) -> int | None:
+    match = re.search(r'(?<!\d)(\d{1,2}):(\d{2}):(\d{2})(?!\d)(?:\s*([AaPp][Mm]))?', str(value or '').strip())
+    if match is None:
+        return None
+    hours, minutes, seconds = (int(part) for part in match.groups()[:3])
+    meridiem = (match.group(4) or '').lower()
+    if meridiem:
+        if hours < 1 or hours > 12:
+            return None
+        hours = hours % 12 + (12 if meridiem == 'pm' else 0)
+    if hours > 23 or minutes > 59 or seconds > 59:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
 
 
 async def capture_canvas_frames(page: Any, assertions: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -283,6 +458,7 @@ async def capture_canvas_frames(page: Any, assertions: Sequence[Mapping[str, obj
                 'width': box['width'],
                 'height': box['height'],
                 'content_hash': hashlib.sha256(frame).hexdigest(),
+                'visual_signal': measure_visual_signal(frame),
             })
         except Exception:
             continue
@@ -290,12 +466,49 @@ async def capture_canvas_frames(page: Any, assertions: Sequence[Mapping[str, obj
 
 
 def media_progress_seconds(before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]]) -> float | None:
+    progress_values: list[float] = []
     for before_item, after_item in zip(before, after):
         try:
-            return max(0.0, float(after_item.get('currentTime') or 0) - float(before_item.get('currentTime') or 0))
+            progress_values.append(
+                max(0.0, float(after_item.get('currentTime') or 0) - float(before_item.get('currentTime') or 0))
+            )
         except (AttributeError, TypeError, ValueError):
             continue
-    return None
+    return max(progress_values) if progress_values else None
+
+
+def measure_visual_signal(frame: bytes) -> bool:
+    try:
+        image = Image.open(BytesIO(frame)).convert('RGB').resize((64, 64))
+        color_count = len(image.getcolors(maxcolors=4097) or [])
+        average_deviation = sum(ImageStat.Stat(image).stddev) / 3
+    except (OSError, ValueError):
+        return False
+    return color_count >= 256 and average_deviation >= 12
+
+
+def _native_playback_satisfies(
+    assertions: Sequence[Mapping[str, object]],
+    before: object,
+    after: Sequence[Mapping[str, object]],
+) -> bool:
+    if not isinstance(before, Sequence) or isinstance(before, (str, bytes)):
+        return False
+    minimums = [
+        assertion.get('expected', {}).get('minimum_advanced_seconds')
+        for assertion in assertions
+        if assertion.get('assert_kind') == 'playback' and isinstance(assertion.get('expected'), Mapping)
+    ]
+    try:
+        required_progress = max(float(value) for value in minimums)
+    except (TypeError, ValueError):
+        return False
+    progress = media_progress_seconds(before, after)
+    return (
+        progress is not None
+        and progress >= required_progress
+        and any(not bool(item.get('paused', True)) for item in after)
+    )
 
 
 def _started_playing(before: Sequence[Mapping[str, object]], after: Sequence[Mapping[str, object]]) -> bool:

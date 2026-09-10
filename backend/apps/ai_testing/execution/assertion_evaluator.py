@@ -48,6 +48,13 @@ def evaluate_assertion(
         state = _matching_target_state(artifacts_by_type['element_state'], assertion.target)
         if state is None:
             return AssertionEvaluation('inconclusive', {}, 'Target element state was not captured.')
+        if assertion.target.get('visual_content') == 'image' and assertion.operator in {'exists', 'not_exists'}:
+            actual = (
+                bool(state.get('visible'))
+                and bool(state.get('has_visual_content'))
+                and bool(state.get('visual_signal'))
+            )
+            return _compare(assertion, actual, 'has_visual_content')
         actual = state.get('visible') if assertion.operator in {'exists', 'not_exists'} else state.get('text')
         return _compare(assertion, actual, 'visible' if assertion.operator in {'exists', 'not_exists'} else 'text')
     if assertion.assert_kind == 'collection':
@@ -152,8 +159,16 @@ def _compare(assertion: AssertionSpec, actual_value: object, actual_key: str) ->
     expected_text = str(expected_value)
     if assertion.operator == 'equals':
         passed = actual_text == expected_text
+    elif assertion.operator == 'phone_digits_equals':
+        actual_digits = ''.join(character for character in actual_text if character.isdigit())
+        expected_digits = ''.join(character for character in expected_text if character.isdigit())
+        passed = bool(expected_digits) and actual_digits == expected_digits
     elif assertion.operator == 'contains':
         passed = expected_text.casefold() in actual_text.casefold()
+    elif assertion.operator == 'starts_with':
+        passed = actual_text.casefold().startswith(expected_text.casefold())
+    elif assertion.operator == 'not_contains':
+        passed = expected_text.casefold() not in actual_text.casefold()
     elif assertion.operator == 'matches':
         try:
             passed = re.search(expected_text, actual_text) is not None
@@ -225,16 +240,25 @@ def _evaluate_playback_progress(
         return AssertionEvaluation('inconclusive', {}, 'Playback progress evidence is not numeric.')
     after_is_playing = any(isinstance(item, Mapping) and not item.get('paused', True) for item in after)
     native_playback_passed = advanced_seconds >= minimum and after_is_playing
+    visual_progress = _first_value(artifacts_by_type.get('playback_visual_progress', []), 'advanced_seconds')
+    visual_confidence = _first_value(artifacts_by_type.get('playback_visual_progress', []), 'confidence')
+    try:
+        visual_playback_passed = float(visual_progress) >= minimum and float(visual_confidence) >= 0.8
+    except (TypeError, ValueError):
+        visual_playback_passed = False
     changed_canvas_indexes = _changed_canvas_indexes(artifacts_by_type) if assertion.assert_kind == 'stream_state' else []
-    passed = native_playback_passed or bool(changed_canvas_indexes)
+    passed = native_playback_passed or visual_playback_passed or bool(changed_canvas_indexes)
     return AssertionEvaluation(
         'passed' if passed else 'failed',
         {
             'advanced_seconds': advanced_seconds,
             'after_is_playing': after_is_playing,
+            'visual_advanced_seconds': visual_progress,
+            'visual_confidence': visual_confidence,
             'changed_canvas_indexes': changed_canvas_indexes,
         },
         'Playback state advanced.' if native_playback_passed else
+        'Visible playback timestamp advanced.' if visual_playback_passed else
         'Visible media canvas frames changed.' if changed_canvas_indexes else
         'Playback did not advance in an active media element.',
     )
@@ -255,7 +279,13 @@ def _changed_canvas_indexes(
         index = metadata.get('index')
         before_hash = before_frames.get(index)
         after_hash = metadata.get('content_hash')
-        if isinstance(index, int) and before_hash and after_hash and before_hash != after_hash:
+        before_signal = next((
+            bool(_artifact_metadata(frame).get('visual_signal'))
+            for frame in artifacts_by_type.get('canvas_frame_before', [])
+            if _artifact_metadata(frame).get('index') == index
+        ), False)
+        after_signal = bool(metadata.get('visual_signal'))
+        if isinstance(index, int) and before_hash and after_hash and before_hash != after_hash and before_signal and after_signal:
             changed.append(index)
     return changed
 

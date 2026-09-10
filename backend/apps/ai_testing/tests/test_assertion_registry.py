@@ -76,6 +76,40 @@ class AssertionRegistryTests(unittest.TestCase):
 
         self.assertEqual(assertion.operator, 'greater_than')
 
+    def test_phone_digits_operator_is_limited_to_field_values(self) -> None:
+        with self.assertRaisesRegex(AssertionContractError, 'Unsupported operator'):
+            parse_assertion({
+                'action': 'assert',
+                'assert_kind': 'text',
+                'target': {'locator': '#phone'},
+                'operator': 'phone_digits_equals',
+                'expected': {'value': '+1 6465180948'},
+                'evidence_requirements': ['dom_snapshot'],
+            })
+
+    def test_text_supports_not_contains(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert',
+            'assert_kind': 'text',
+            'target': {'page': 'current'},
+            'operator': 'not_contains',
+            'expected': {'value': 'removed record'},
+            'evidence_requirements': ['dom_snapshot'],
+        })
+
+        self.assertEqual(assertion.operator, 'not_contains')
+
+    def test_element_state_rejects_not_contains(self) -> None:
+        with self.assertRaisesRegex(AssertionContractError, 'Unsupported operator'):
+            parse_assertion({
+                'action': 'assert',
+                'assert_kind': 'element_state',
+                'target': {'intent': 'status label'},
+                'operator': 'not_contains',
+                'expected': {'value': 'removed'},
+                'evidence_requirements': ['element_state'],
+            })
+
     def test_element_state_accepts_semantic_target_before_binding(self) -> None:
         assertion = parse_assertion({
             'action': 'assert', 'assert_kind': 'element_state',

@@ -82,6 +82,8 @@ def _evaluate_assertion(
     evidence_types = set(assertion.evidence_requirements)
     if assertion.assert_kind == 'stream_state':
         evidence_types.update({'canvas_frame_before', 'canvas_frame_after'})
+    if assertion.assert_kind == 'playback':
+        evidence_types.add('playback_visual_progress')
     matching_evidence = [
         artifact
         for artifact in evidence
