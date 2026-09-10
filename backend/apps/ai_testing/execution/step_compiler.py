@@ -17,6 +17,7 @@ def compile_browser_step(
     assertions: Sequence[dict[str, Any]],
     step_index: int,
     correlates_resource: str = '',
+    transition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile one browser transition with a mandatory immediate postcondition."""
     required_assertions = [
@@ -44,4 +45,6 @@ def compile_browser_step(
     }
     if correlates_resource:
         step['correlates_resource'] = correlates_resource
+    if transition:
+        step['transition'] = dict(transition)
     return step

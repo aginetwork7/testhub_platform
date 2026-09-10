@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from apps.core.browser_auth import resolve_browser_login
 from apps.ai_testing.execution.capabilities import allowed_browser_actions
 from apps.ai_testing.global_planner import GlobalPlanError, GlobalTestPlanner
+from apps.ai_testing.views import has_canonical_freeform_plan
 
 
 class GlobalTestPlannerTests(SimpleTestCase):
@@ -28,6 +29,69 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertNotIn('attempt', cache_source)
         self.assertNotIn('evidence', cache_source)
         self.assertNotIn('quality', cache_source)
+        self.assertIn('require_transition=True', create_source)
+
+    def test_strict_normalization_rejects_browser_step_without_transition(self) -> None:
+        response = {
+            'choices': [{'message': {'tool_calls': [{'function': {
+                'name': 'submit_execution_plan',
+                'arguments': json.dumps({'steps': [{
+                    'executor': 'browser',
+                    'description': 'Verify current page',
+                    'allowed_capabilities': ['browser.inspect'],
+                    'assertions': [{
+                        'action': 'assert',
+                        'assert_kind': 'text',
+                        'target': {'page': 'current'},
+                        'operator': 'contains',
+                        'expected': {'value': 'Ready'},
+                        'evidence_requirements': ['dom_snapshot'],
+                    }],
+                }]})
+            }}]}}],
+        }
+
+        with self.assertRaisesRegex(GlobalPlanError, '缺少结构化 transition'):
+            GlobalTestPlanner.normalize_response(
+                response,
+                configuration_id=None,
+                require_transition=True,
+            )
+
+    def test_canonical_freeform_plan_accepts_valid_persisted_steps(self) -> None:
+        planned_steps = [{
+            'executor': 'browser',
+            'description': 'Verify current page',
+            'allowed_capabilities': ['browser.inspect'],
+            'transition': {'kind': 'generic'},
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'text',
+                'target': {'page': 'current'},
+                'operator': 'contains',
+                'expected': {'value': 'Ready'},
+                'evidence_requirements': ['dom_snapshot'],
+            }],
+        }]
+
+        self.assertTrue(has_canonical_freeform_plan(planned_steps, None, 'Verify current page'))
+
+    def test_canonical_freeform_plan_rejects_step_without_transition(self) -> None:
+        planned_steps = [{
+            'executor': 'browser',
+            'description': 'Verify current page',
+            'allowed_capabilities': ['browser.inspect'],
+            'assertions': [{
+                'action': 'assert',
+                'assert_kind': 'text',
+                'target': {'page': 'current'},
+                'operator': 'contains',
+                'expected': {'value': 'Ready'},
+                'evidence_requirements': ['dom_snapshot'],
+            }],
+        }]
+
+        self.assertFalse(has_canonical_freeform_plan(planned_steps, None, 'Verify current page'))
 
     def test_browser_login_uses_global_environment_configuration(self) -> None:
         configuration = SimpleNamespace(
@@ -156,6 +220,34 @@ class GlobalTestPlannerTests(SimpleTestCase):
             {'nodes': [{'node_id': 'ax:button', 'role': 'button', 'name': 'Settings'}]},
         )
 
+    def test_visual_planner_rejects_disabled_accessibility_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'target is disabled'):
+            VisualStepReplanner._validate_accessible_action(
+                [{'action': 'click', 'role': 'button', 'accessible_name': 'Offline camera'}],
+                {'nodes': [{
+                    'node_id': 'ax:camera',
+                    'role': 'button',
+                    'name': 'Offline camera',
+                    'states': {'disabled': True},
+                }]},
+            )
+
+    def test_visual_planner_prefers_discovered_selector_over_partial_accessibility_locator(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        action = {'action': 'click', 'selector': '#settings', 'role': 'button'}
+
+        VisualStepReplanner._validate_accessible_action(
+            [action],
+            {'nodes': []},
+            [{'selector': '#settings', 'role': 'button', 'name': 'Settings'}],
+        )
+
+        self.assertIsNone(action['role'])
+        self.assertIsNone(action['accessible_name'])
+
     def test_visual_planner_rejects_ambiguous_accessibility_action(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
@@ -169,6 +261,53 @@ class GlobalTestPlannerTests(SimpleTestCase):
                 [{'action': 'click', 'role': 'button', 'accessible_name': 'Save'}],
                 {'nodes': nodes},
             )
+
+    def test_visual_planner_accepts_discovered_collection_group_selector(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#results > .result'}]
+        assertions = [{'assert_kind': 'collection'}]
+        elements = [{
+            'selector': '#results > .result:nth-of-type(1)',
+            'group_selector': '#results > .result',
+            'group_size': 3,
+        }]
+
+        VisualStepReplanner._validate_collection_bindings(bindings, assertions, elements)
+
+    def test_visual_planner_rejects_single_item_selector_for_collection(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#results > .result:nth-of-type(1)'}]
+        assertions = [{'assert_kind': 'collection'}]
+        elements = [{
+            'selector': '#results > .result:nth-of-type(1)',
+            'group_selector': '#results > .result',
+            'group_size': 3,
+        }]
+
+        with self.assertRaisesRegex(GlobalPlanError, 'group_selector'):
+            VisualStepReplanner._validate_collection_bindings(bindings, assertions, elements)
+
+    def test_visual_planner_ignores_locator_binding_for_playback_assertion(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#video-player'}]
+        assertions = [{'assert_kind': 'playback'}]
+
+        filtered = VisualStepReplanner._filter_non_dom_assertion_bindings(bindings, assertions)
+
+        self.assertEqual(filtered, [])
+
+    def test_visual_planner_preserves_invalid_binding_index_for_validation(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 2, 'locator': '#video-player'}]
+        assertions = [{'assert_kind': 'playback'}]
+
+        filtered = VisualStepReplanner._filter_non_dom_assertion_bindings(bindings, assertions)
+
+        self.assertEqual(filtered, bindings)
 
     def test_visual_planner_resolves_duplicate_ax_nodes_with_unique_actionable_control(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -199,6 +338,30 @@ class GlobalTestPlannerTests(SimpleTestCase):
                 [action],
                 [action],
                 [{'role': 'button', 'name': 'Settings', 'blocking_layer': False}],
+            )
+
+    def test_visual_planner_rejects_immediate_repeated_scroll(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        action = {'action': 'scroll', 'selector': '#results'}
+
+        with self.assertRaisesRegex(GlobalPlanError, 'must not repeat'):
+            VisualStepReplanner._validate_non_repeating_action(
+                [action],
+                [action],
+                [{'selector': '#results', 'blocking_layer': False}],
+            )
+
+    def test_visual_planner_rejects_immediate_repeated_blocking_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        action = {'action': 'click', 'selector': '#confirm'}
+
+        with self.assertRaisesRegex(GlobalPlanError, 'must not repeat'):
+            VisualStepReplanner._validate_non_repeating_action(
+                [action],
+                [action],
+                [{'selector': '#confirm', 'blocking_layer': True}],
             )
 
     def test_visual_planner_rejects_navigation_as_absence_proof(self) -> None:
@@ -258,8 +421,473 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('Never assert the final state before the commit action', messages[0]['content'])
         self.assertIn('Never create conditional steps', messages[0]['content'])
         self.assertIn('plan and verify the field update before the irreversible status transition', messages[0]['content'])
+        self.assertIn('operator="phone_digits_equals"', messages[0]['content'])
         self.assertIn('Do not treat names from the user goal as exact rendered UI text', messages[0]['content'])
         self.assertIn('assert the newly introduced control or panel', messages[0]['content'])
+        self.assertIn('existence of an unrelated control does not prove selection', messages[0]['content'])
+
+    def test_phone_field_assertion_is_upgraded_for_cached_plans(self) -> None:
+        assertions = GlobalTestPlanner._normalize_assertions([
+            {
+                'action': 'assert',
+                'assert_kind': 'field_value',
+                'target': {'intent': 'Phone Number input'},
+                'operator': 'equals',
+                'expected': {'value': '+1 6465180948'},
+                'evidence_requirements': ['structured_value'],
+            },
+        ], step_index=7)
+
+        self.assertEqual(assertions[0]['operator'], 'phone_digits_equals')
+
+    def test_dropdown_selection_rejects_unrelated_existence_assertion(self) -> None:
+        with self.assertRaisesRegex(GlobalPlanError, '未验证所选值'):
+            GlobalTestPlanner._validate_dropdown_selection_assertion(
+                'Select the Site Manager option from the role dropdown.',
+                [{
+                    'assert_kind': 'element_state',
+                    'target': {'intent': 'submit control'},
+                    'operator': 'exists',
+                    'expected': {'value': True},
+                }],
+                step_index=9,
+            )
+
+    def test_dropdown_selection_accepts_requested_selected_value(self) -> None:
+        GlobalTestPlanner._validate_dropdown_selection_assertion(
+            'Select the requested option from the role dropdown.',
+            [{
+                'assert_kind': 'field_value',
+                'target': {'intent': 'role dropdown'},
+                'operator': 'equals',
+                'expected': {'value': 'requested option'},
+            }],
+            step_index=9,
+        )
+
+    def test_dropdown_selection_accepts_transaction_dialog_without_committed_value(self) -> None:
+        GlobalTestPlanner._validate_dropdown_selection_assertion(
+            'Select the requested option from the status dropdown.',
+            [{
+                'assert_kind': 'element_state',
+                'target': {'intent': 'reason dialog opened by the selection'},
+                'operator': 'exists',
+                'expected': {'value': True},
+            }],
+            step_index=5,
+            transition={'kind': 'select_option', 'value': 'Investigate'},
+        )
+
+    def test_dropdown_selection_rejects_committed_value_before_transaction_dialog(self) -> None:
+        with self.assertRaisesRegex(GlobalPlanError, 'before the transaction dialog is confirmed'):
+            GlobalTestPlanner._validate_dropdown_selection_assertion(
+                'Select the requested option from the status dropdown.',
+                [
+                    {
+                        'assert_kind': 'element_state',
+                        'target': {'intent': 'selected status value'},
+                        'operator': 'contains',
+                        'expected': {'value': 'Investigate'},
+                    },
+                    {
+                        'assert_kind': 'element_state',
+                        'target': {'intent': 'reason dialog opened by the selection'},
+                        'operator': 'exists',
+                        'expected': {'value': True},
+                    },
+                ],
+                step_index=5,
+                transition={'kind': 'select_option', 'value': 'Investigate'},
+            )
+
+    def test_dropdown_selection_uses_contains_for_rendered_label(self) -> None:
+        assertions = [{
+            'assert_kind': 'field_value',
+            'target': {'intent': 'role dropdown'},
+            'operator': 'equals',
+            'expected': {'value': 'requested option'},
+        }]
+
+        GlobalTestPlanner._normalize_dropdown_selection_operator(
+            'Select the requested option from the role dropdown.',
+            assertions,
+        )
+
+        self.assertEqual(assertions[0]['operator'], 'starts_with')
+
+    def test_dropdown_selection_does_not_weaken_ordinary_field_equality(self) -> None:
+        assertions = [{
+            'assert_kind': 'field_value',
+            'target': {'intent': 'email input'},
+            'operator': 'equals',
+            'expected': {'value': 'requested@example.com'},
+        }]
+
+        GlobalTestPlanner._normalize_dropdown_selection_operator(
+            'Fill the email input with requested@example.com.',
+            assertions,
+        )
+
+        self.assertEqual(assertions[0]['operator'], 'equals')
+
+    def test_structured_dropdown_transition_is_language_independent(self) -> None:
+        transition = {'kind': 'select_option', 'value': 'Site Manager'}
+        assertions = [{
+            'assert_kind': 'field_value',
+            'target': {'intent': 'role control'},
+            'operator': 'equals',
+            'expected': {'value': 'Site Manager'},
+        }]
+
+        GlobalTestPlanner._normalize_dropdown_selection_operator('选择指定角色', assertions, transition)
+        GlobalTestPlanner._validate_dropdown_selection_assertion(
+            '选择指定角色', assertions, step_index=1, transition=transition,
+        )
+
+        self.assertEqual(assertions[0]['operator'], 'starts_with')
+
+    def test_select_option_removes_redundant_label_when_new_control_proves_mode(self) -> None:
+        assertions = [
+            {
+                'assert_kind': 'element_state',
+                'target': {'intent': 'mode selected value'},
+                'operator': 'contains',
+                'expected': {'value': 'Magic Search V2'},
+            },
+            {
+                'assert_kind': 'element_state',
+                'target': {'intent': 'Magic Search V2 search input'},
+                'operator': 'exists',
+                'expected': {'value': True},
+            },
+        ]
+
+        GlobalTestPlanner._remove_redundant_selection_label_assertion(
+            assertions,
+            {'kind': 'select_option', 'value': 'Magic Search V2'},
+        )
+
+        self.assertEqual(assertions, [{
+            'assert_kind': 'element_state',
+            'target': {'intent': 'Magic Search V2 search input'},
+            'operator': 'exists',
+            'expected': {'value': True},
+        }])
+
+    def test_search_result_rejects_unbindable_absence_assertion(self) -> None:
+        with self.assertRaisesRegex(GlobalPlanError, 'text not_contains'):
+            GlobalTestPlanner._validate_search_result_absence_assertion(
+                'Search for the removed record to verify removal.',
+                [{
+                    'assert_kind': 'absence',
+                    'target': {'intent': 'removed record result'},
+                    'operator': 'not_exists',
+                    'expected': {'value': True},
+                }],
+                step_index=14,
+            )
+
+    def test_structured_absent_results_transition_is_language_independent(self) -> None:
+        with self.assertRaisesRegex(GlobalPlanError, 'text not_contains'):
+            GlobalTestPlanner._validate_search_result_absence_assertion(
+                '查询并验证记录已移除',
+                [{
+                    'assert_kind': 'absence',
+                    'target': {'intent': 'removed record result'},
+                }],
+                step_index=1,
+                transition={
+                    'kind': 'filter_results',
+                    'value': 'record identifier',
+                    'result_presence': 'absent',
+                },
+            )
+
+    def test_dropdown_value_binding_rejects_clicked_option(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{
+            'assert_kind': 'field_value',
+            'target': {'intent': 'role dropdown'},
+            'operator': 'equals',
+            'expected': {'value': 'requested option'},
+        }]
+
+        with self.assertRaisesRegex(GlobalPlanError, 'clicked option'):
+            VisualStepReplanner._validate_dropdown_value_binding(
+                [{'assertion_index': 1, 'locator': '#requested-option'}],
+                assertions,
+                [{'action': 'click', 'selector': '#requested-option'}],
+                'Select the requested option from the role dropdown.',
+            )
+
+    def test_dropdown_value_binding_accepts_selected_control(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_dropdown_value_binding(
+            [{'assertion_index': 1, 'locator': '#role-control'}],
+            [{
+                'assert_kind': 'field_value',
+                'target': {'intent': 'role dropdown'},
+                'operator': 'equals',
+                'expected': {'value': 'requested option'},
+            }],
+            [{'action': 'click', 'selector': '#requested-option'}],
+            'Choose the requested option from the role menu.',
+        )
+
+    def test_dropdown_text_binding_rejects_mismatched_observed_value(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'expected selected value'):
+            VisualStepReplanner._validate_dropdown_value_binding(
+                [{'assertion_index': 1, 'locator': '#selected-value'}],
+                [{
+                    'assert_kind': 'element_state',
+                    'target': {'intent': 'selected option'},
+                    'operator': 'contains',
+                    'expected': {'value': 'Other'},
+                }],
+                [{'action': 'click', 'selector': '#other-option'}],
+                'Select Other from the reason dropdown.',
+                discovered_elements=[{'selector': '#selected-value', 'text': 'Investigate'}],
+            )
+
+    def test_visible_element_binding_does_not_require_state_word_in_text(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_dropdown_value_binding(
+            [{'assertion_index': 1, 'locator': '#menu-option'}],
+            [{
+                'assert_kind': 'element_state',
+                'target': {'text': 'Magic Search V2'},
+                'operator': 'exists',
+                'expected': {'value': 'visible'},
+            }],
+            [{'action': 'click', 'selector': '#menu-toggle'}],
+            'Open the search mode menu.',
+            discovered_elements=[{'selector': '#menu-option', 'text': 'Magic Search V2'}],
+        )
+
+    def test_select_option_step_rejects_second_state_change_after_completed_action(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'already completed its select-option transition'):
+            VisualStepReplanner._validate_non_repeating_action(
+                [{'action': 'click', 'selector': '#unrelated-control'}],
+                [{'action': 'click', 'selector': '#requested-option', 'status': 'completed'}],
+                [{'selector': '#unrelated-control', 'blocking_layer': True}],
+                step_description='Select the requested option from the role dropdown.',
+            )
+
+    def test_completed_select_option_binds_unique_blocking_popup(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            [{'action': 'click', 'selector': '#dialog-control'}],
+            [],
+            [{
+                'assert_kind': 'popup',
+                'operator': 'exists',
+                'expected': {'value': True},
+            }],
+            [{'action': 'click', 'selector': '#requested-option', 'status': 'completed'}],
+            'Select the requested option from the status dropdown.',
+            None,
+            {'is_blocked': True, 'active_layer_ids': ['#reason-dialog']},
+        )
+
+        self.assertEqual(actions, [{'action': 'assert'}])
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '#reason-dialog'}])
+
+    def test_completed_click_binds_unique_dialog_layer_popup(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            [{'action': 'click', 'selector': '#download-again'}],
+            [],
+            [{'assert_kind': 'popup', 'operator': 'exists', 'expected': {'value': True}}],
+            [{'action': 'click', 'selector': '#download', 'status': 'completed'}],
+            'Click the Download control on the playback page to open the download confirmation dialog.',
+            {'kind': 'generic'},
+            {'is_blocked': True, 'active_layer_ids': ['#download-dialog'], 'dialog_layer_ids': ['#download-dialog']},
+        )
+
+        self.assertEqual(actions, [{'action': 'assert'}])
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '#download-dialog'}])
+
+    def test_completed_click_does_not_bind_non_dialog_blocking_layer_popup(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        original_actions = [{'action': 'click', 'selector': '#download-again'}]
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            original_actions,
+            [],
+            [{'assert_kind': 'popup', 'operator': 'exists', 'expected': {'value': True}}],
+            [{'action': 'click', 'selector': '#download', 'status': 'completed'}],
+            'Click the Download control on the playback page to open the download confirmation dialog.',
+            {'kind': 'generic'},
+            {'is_blocked': True, 'active_layer_ids': ['#fixed-sidebar'], 'dialog_layer_ids': []},
+        )
+
+        self.assertEqual(actions, original_actions)
+        self.assertEqual(bindings, [])
+
+    def test_blocking_layer_accepts_assert_binding_inside_active_layer(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+        from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
+
+        layer_id = 'body > div:nth-of-type(3) > div:nth-of-type(1)'
+        controls = [{
+            'selector': f'{layer_id} > div:nth-of-type(2) > button:nth-of-type(1)',
+            'blocking_layer': True,
+            'blocking_layer_id': layer_id,
+            'dialog_layer': True,
+            'z_index': 1000,
+        }]
+        state = build_blocking_state(controls)
+
+        self.assertEqual(state['dialog_layer_ids'], [layer_id])
+        VisualStepReplanner._validate_blocking_layer_action(
+            [{'action': 'assert'}],
+            controls,
+            bindings=[{'assertion_index': 1, 'locator': f'{layer_id} > div:nth-of-type(1) > span:nth-of-type(2)'}],
+            blocking_state=state,
+        )
+        with self.assertRaisesRegex(GlobalPlanError, 'blocking dialog'):
+            VisualStepReplanner._validate_blocking_layer_action(
+                [{'action': 'assert'}],
+                controls,
+                bindings=[{'assertion_index': 1, 'locator': 'body > div:nth-of-type(1) > h1:nth-of-type(1)'}],
+                blocking_state=state,
+            )
+
+    def test_blocking_state_without_dialog_controls_has_no_dialog_layer_ids(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+
+        state = build_blocking_state([
+            {'selector': '#banner-close', 'blocking_layer': True, 'blocking_layer_id': '#banner', 'z_index': 5},
+        ])
+
+        self.assertEqual(state['active_layer_ids'], ['#banner'])
+        self.assertEqual(state['dialog_layer_ids'], [])
+
+    def test_dropdown_value_binding_accepts_shared_selector_when_it_now_names_the_display(self) -> None:
+        from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
+
+        assertions = [{'assert_kind': 'field_value', 'operator': 'starts_with', 'expected': {'value': 'Site Manager'}, 'target': {'intent': 'role dropdown'}}]
+        prior = [{'action': 'click', 'selector': '[title="Site Manager (Can manage sites)"]', 'status': 'completed'}]
+        bindings = [{'assertion_index': 1, 'locator': '[title="Site Manager (Can manage sites)"]'}]
+
+        VisualStepReplanner._validate_dropdown_value_binding(
+            bindings, assertions, prior, 'Select the Site Manager option from the role dropdown.', {'kind': 'select_option'},
+            [{'selector': '[title="Site Manager (Can manage sites)"]', 'tag': 'span', 'role': '', 'top_layer': False, 'group_size': 1}],
+        )
+        with self.assertRaisesRegex(GlobalPlanError, 'clicked option'):
+            VisualStepReplanner._validate_dropdown_value_binding(
+                bindings, assertions, prior, 'Select the Site Manager option from the role dropdown.', {'kind': 'select_option'},
+                [{'selector': '[title="Site Manager (Can manage sites)"]', 'tag': 'div', 'role': 'option', 'top_layer': True, 'group_size': 5}],
+            )
+        with self.assertRaisesRegex(GlobalPlanError, 'clicked option'):
+            VisualStepReplanner._validate_dropdown_value_binding(
+                bindings, assertions, prior, 'Select the Site Manager option from the role dropdown.', {'kind': 'select_option'}, [],
+            )
+
+    def test_popup_absence_reuses_unique_verified_popup_locator(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = VisualStepReplanner._bind_verified_popup_absence(
+            [{'assertion_index': 2, 'locator': '#committed-status'}],
+            [
+                {
+                    'assert_kind': 'popup',
+                    'operator': 'not_exists',
+                    'expected': {'value': True},
+                },
+                {
+                    'assert_kind': 'field_value',
+                    'operator': 'starts_with',
+                    'expected': {'value': 'requested status'},
+                },
+            ],
+            [{
+                'assertions': [{
+                    'assert_kind': 'popup',
+                    'operator': 'exists',
+                    'target': {'locator': '#reason-dialog'},
+                }],
+            }],
+        )
+
+        self.assertEqual(bindings, [
+            {'assertion_index': 2, 'locator': '#committed-status'},
+            {'assertion_index': 1, 'locator': '#reason-dialog'},
+        ])
+
+    def test_exact_text_binding_prefers_unique_semantic_control(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = VisualStepReplanner._bind_exact_text_assertions(
+            [{'assertion_index': 1, 'locator': '#wrong-control'}],
+            [{
+                'assert_kind': 'element_state',
+                'operator': 'exists',
+                'target': {'text': 'Requested Mode'},
+                'expected': {'value': True},
+            }],
+            [
+                {'role': '', 'name': 'Requested Mode', 'selector': '#container'},
+                {'role': 'menuitem', 'name': 'Requested Mode', 'selector': '#option'},
+            ],
+        )
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '#option'}])
+
+    def test_exact_text_binding_rejects_existing_mismatched_control(self) -> None:
+        from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'does not uniquely match'):
+            VisualStepReplanner._bind_exact_text_assertions(
+                [{'assertion_index': 1, 'locator': '#wrong-control'}],
+                [{
+                    'assert_kind': 'element_state',
+                    'operator': 'exists',
+                    'target': {'text': 'Requested Mode'},
+                    'expected': {'value': True},
+                }],
+                [{'role': 'button', 'name': 'Other Mode', 'selector': '#wrong-control'}],
+            )
+
+    def test_exact_text_binding_keeps_equal_semantic_matches_unbound(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = VisualStepReplanner._bind_exact_text_assertions(
+            [],
+            [{
+                'assert_kind': 'element_state',
+                'operator': 'exists',
+                'target': {'text': 'Requested Mode'},
+                'expected': {'value': True},
+            }],
+            [
+                {'role': 'menuitem', 'name': 'Requested Mode', 'selector': '#first'},
+                {'role': 'menuitem', 'name': 'Requested Mode', 'selector': '#second'},
+            ],
+        )
+
+        self.assertEqual(bindings, [])
+
+    def test_completed_action_uses_complete_exact_text_bindings(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        actions = VisualStepReplanner._resolve_completed_bound_assertion(
+            [{'action': 'click', 'selector': '#other-control'}],
+            [{'assertion_index': 1, 'locator': '#requested-option'}],
+            {1},
+            [{'action': 'click', 'selector': '#menu', 'status': 'completed'}],
+        )
+
+        self.assertEqual(actions, [{'action': 'assert'}])
 
     def test_visual_planner_supplies_react_context_and_enforces_absence_bindings(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -270,8 +898,13 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertIn('Verified predecessor steps:', source)
         self.assertIn('Accessibility snapshot:', source)
         self.assertIn('Assertions to verify:', source)
-        self.assertIn('Only absence assertions may be bound before a state-changing action.', source)
-        self.assertIn("assertions[binding['assertion_index'] - 1].get('assert_kind') != 'absence'", source)
+        self.assertIn('Only absence or discovered collection assertions may be bound before a state-changing action.', source)
+        self.assertIn('Its locator must use a discovered observable element group_selector', source)
+        self.assertIn("assertions[binding['assertion_index'] - 1].get('assert_kind') not in {'absence', 'collection'}", source)
+        self.assertGreater(
+            source.index('_validate_accessible_action'),
+            source.index('_resolve_completed_bound_assertion'),
+        )
 
     def test_visual_planner_rejects_repeating_failed_state_change(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
@@ -299,6 +932,29 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertEqual(resolved_actions[0]['selector'], '#record')
         self.assertEqual(actions[0]['selector'], '#model-choice')
 
+    def test_visible_correlated_detail_replaces_scroll_with_bound_assertion(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        resolved_actions = VisualStepReplanner._resolve_visible_record_action(
+            [{'action': 'scroll', 'selector': '#records', 'value': 'down'}],
+            [{'tag': 'div', 'selector': '#detail', 'container_text': 'Person Camera A'}],
+            [{
+                'resource_type': 'alert_event',
+                'resource': {'result_correlation': {'match_values': ['Person', 'Camera A']}},
+            }],
+            correlates_resource='alert_event',
+            assertions=[{
+                'assert_kind': 'element_state',
+                'operator': 'exists',
+                'expected': {'value': True},
+            }],
+        )
+
+        self.assertEqual(resolved_actions, [{
+            'action': 'assert',
+            'assertion_bindings': [{'assertion_index': 1, 'locator': '#detail'}],
+        }])
+
         VisualStepReplanner._validate_non_repeating_action(
             [{'action': 'click', 'selector': '#confirm'}],
             [
@@ -320,7 +976,10 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         VisualStepReplanner._validate_non_repeating_action(
             [{'action': 'scroll', 'selector': '#panel'}],
-            [{'action': 'scroll', 'selector': '#panel'}],
+            [
+                {'action': 'scroll', 'selector': '#panel'},
+                {'action': 'click', 'selector': '#expand'},
+            ],
         )
 
     def test_visual_planner_rejects_undiscovered_navigation_url(self) -> None:
@@ -462,6 +1121,80 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         self.assertEqual(resolved_actions, actions)
 
+    def test_visual_planner_rejects_image_binding_to_placeholder(self) -> None:
+        from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'rendered image content'):
+            VisualStepReplanner._validate_visual_content_bindings(
+                [{'assertion_index': 1, 'locator': '#placeholder'}],
+                [{'assert_kind': 'element_state', 'target': {'visual_content': 'image'}}],
+                [{'selector': '#placeholder', 'has_visual_content': False}],
+            )
+
+    def test_visual_planner_accepts_image_binding_with_rendered_content(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_visual_content_bindings(
+            [{'assertion_index': 1, 'locator': '#thumb'}],
+            [{'assert_kind': 'element_state', 'target': {'visual_content': 'image'}}],
+            [{'selector': '#thumb', 'has_visual_content': True}],
+        )
+
+        VisualStepReplanner._validate_visual_content_bindings(
+            [{'assertion_index': 1, 'locator': '#thumb > img'}],
+            [{'assert_kind': 'element_state', 'target': {'visual_content': 'image'}}],
+            [{'selector': '#thumb', 'group_selector': '#thumb > img', 'has_visual_content': True}],
+        )
+
+    def test_exact_text_binding_leaves_image_assertion_bindings_to_visual_validation(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#hero'}]
+        resolved = VisualStepReplanner._bind_exact_text_assertions(
+            bindings,
+            [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'camera', 'visual_content': 'image'}}],
+            [{'selector': '#hero', 'text': 'Front door camera', 'has_visual_content': True}],
+        )
+
+        self.assertEqual(resolved, bindings)
+
+    def test_exact_text_binding_accepts_model_binding_containing_target_text(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#row'}]
+        resolved = VisualStepReplanner._bind_exact_text_assertions(
+            bindings,
+            [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'camera'}}],
+            [{'selector': '#row', 'text': 'Camera 01'}, {'selector': '#other', 'text': 'Settings'}],
+        )
+
+        self.assertEqual(resolved, bindings)
+
+    def test_exact_text_binding_accepts_model_choice_among_equal_matches(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        bindings = [{'assertion_index': 1, 'locator': '#team-b'}]
+        resolved = VisualStepReplanner._bind_exact_text_assertions(
+            bindings,
+            [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'Team'}}],
+            [
+                {'selector': '#team-a', 'name': 'Team', 'role': 'button'},
+                {'selector': '#team-b', 'name': 'Team', 'role': 'button'},
+            ],
+        )
+
+        self.assertEqual(resolved, bindings)
+
+    def test_exact_text_binding_still_rejects_unrelated_model_binding(self) -> None:
+        from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
+
+        with self.assertRaisesRegex(GlobalPlanError, 'does not uniquely match'):
+            VisualStepReplanner._bind_exact_text_assertions(
+                [{'assertion_index': 1, 'locator': '#other'}],
+                [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'camera'}}],
+                [{'selector': '#other', 'text': 'Settings'}],
+            )
+
     def test_visual_planner_does_not_override_verified_identity_with_record_correlation(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
@@ -596,7 +1329,13 @@ class GlobalTestPlannerTests(SimpleTestCase):
         VisualStepReplanner._validate_collection_bindings(
             [{'assertion_index': 1, 'locator': '.result-card'}],
             [{'assert_kind': 'collection', 'target': {'intent': 'search result items'}}],
-            [{'selector': '.result-card', 'role': '', 'group_size': 3, 'top_layer': False}],
+            [{
+                'selector': '.result-card:nth-of-type(1)',
+                'group_selector': '.result-card',
+                'role': '',
+                'group_size': 3,
+                'top_layer': False,
+            }],
         )
 
     def test_visual_planner_supplies_page_metrics_to_offscreen_validator(self) -> None:

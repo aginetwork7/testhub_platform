@@ -22,6 +22,11 @@ class AssertionKindDefinition:
 
 
 _EQUALITY_OPERATORS = frozenset({'equals', 'contains', 'matches', 'exists', 'not_exists'})
+_TEXT_OPERATORS = _EQUALITY_OPERATORS | {'not_contains'}
+_FIELD_VALUE_OPERATORS = frozenset({
+    'equals', 'contains', 'starts_with', 'matches', 'exists', 'not_exists',
+    'greater_than', 'less_than', 'phone_digits_equals',
+})
 _ORDERING_OPERATORS = frozenset({'equals', 'contains', 'matches', 'exists', 'not_exists', 'greater_than', 'less_than'})
 _COLLECTION_OPERATORS = frozenset({'equals', 'exists', 'not_exists', 'greater_than', 'less_than'})
 MEDIA_STATE_FIELDS = frozenset({
@@ -30,8 +35,8 @@ MEDIA_STATE_FIELDS = frozenset({
 })
 
 ASSERTION_KINDS: dict[str, AssertionKindDefinition] = {
-    'text': AssertionKindDefinition(_EQUALITY_OPERATORS, ('dom_snapshot',)),
-    'field_value': AssertionKindDefinition(_ORDERING_OPERATORS, ('structured_value',)),
+    'text': AssertionKindDefinition(_TEXT_OPERATORS, ('dom_snapshot',)),
+    'field_value': AssertionKindDefinition(_FIELD_VALUE_OPERATORS, ('structured_value',)),
     'popup': AssertionKindDefinition(_EQUALITY_OPERATORS, ('element_state',)),
     'media': AssertionKindDefinition(_EQUALITY_OPERATORS, ('media_state',)),
     'video': AssertionKindDefinition(_EQUALITY_OPERATORS, ('media_state', 'media_event')),

@@ -49,9 +49,13 @@ def has_canonical_freeform_plan(planned_steps, environment_configuration_id, tas
         return False
     try:
         GlobalTestPlanner.normalize_response(
-            {'choices': [{'message': {'content': json.dumps({'steps': planned_steps})}}]},
+            {'choices': [{'message': {'tool_calls': [{'function': {
+                'name': 'submit_execution_plan',
+                'arguments': json.dumps({'steps': planned_steps}),
+            }}]}}]},
             environment_configuration_id,
             task_description,
+            require_transition=True,
         )
     except (GlobalPlanError, TypeError, ValueError):
         return False
@@ -215,11 +219,13 @@ def resolve_environment_configuration_from_task(task_description, user):
             str(configuration.environment or '').strip().lower(),
             str(configuration.name or '').strip().lower(),
         }
-        for alias in aliases:
+        # Check the most specific alias first so the match length is deterministic
+        # (a display name such as "sam 环境" outranks its bare environment code).
+        for alias in sorted(aliases, key=len, reverse=True):
             if not alias:
                 continue
             if re.fullmatch(r'[a-z0-9_-]+', alias):
-                matched = re.search(rf'(?<![a-z0-9_-]){re.escape(alias)}(?![a-z0-9_-])', text)
+                matched = re.search(rf'(?<![a-z0-9_@./-]){re.escape(alias)}(?![a-z0-9_@./-])', text)
             else:
                 matched = alias in text
             if matched:
@@ -231,7 +237,12 @@ def resolve_environment_configuration_from_task(task_description, user):
     matches.sort(key=lambda item: item[:2], reverse=True)
     best_length = matches[0][0]
     best_matches = [item for item in matches if item[0] == best_length]
-    return best_matches[0][2] if len(best_matches) == 1 else None
+    if len(best_matches) == 1:
+        return best_matches[0][2]
+    default_candidates = [item for item in best_matches if item[2].is_default]
+    if default_candidates:
+        return default_candidates[0][2]
+    return None
 
 
 def _is_relative_to(path, base_path):

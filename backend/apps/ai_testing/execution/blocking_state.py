@@ -20,8 +20,9 @@ def build_blocking_state(actionable_controls: list[dict[str, Any]]) -> dict[str,
             continue
         layer = layers.setdefault(
             layer_id,
-            {'layer_id': layer_id, 'z_index': 0, 'selectors': [], 'semantic_targets': []},
+            {'layer_id': layer_id, 'z_index': 0, 'selectors': [], 'semantic_targets': [], 'dialog': False},
         )
+        layer['dialog'] = layer['dialog'] or control.get('dialog_layer') is True
         layer['z_index'] = max(layer['z_index'], _normalize_z_index(control.get('z_index')))
         if selector and selector not in layer['selectors']:
             layer['selectors'].append(selector)
@@ -39,6 +40,7 @@ def build_blocking_state(actionable_controls: list[dict[str, Any]]) -> dict[str,
             'active_layer_ids': [],
             'allowed_selectors': [],
             'allowed_semantic_targets': [],
+            'dialog_layer_ids': [],
         }
 
     active_z_index = ordered_layers[0]['z_index']
@@ -49,4 +51,5 @@ def build_blocking_state(actionable_controls: list[dict[str, Any]]) -> dict[str,
         'active_layer_ids': [layer['layer_id'] for layer in active_layers],
         'allowed_selectors': [selector for layer in active_layers for selector in layer['selectors']],
         'allowed_semantic_targets': [target for layer in active_layers for target in layer['semantic_targets']],
+        'dialog_layer_ids': [layer['layer_id'] for layer in active_layers if layer['dialog']],
     }

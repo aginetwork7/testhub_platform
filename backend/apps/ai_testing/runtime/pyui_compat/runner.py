@@ -18,6 +18,77 @@ logger = logging.getLogger('django')
 
 ACTION_CACHE_SCHEMA_VERSION = 'v5'
 
+RENDERED_VISUAL_ELEMENTS_JS = """
+() => {
+    const structuralSelector = (target) => {
+        const parts = [];
+        let current = target;
+        while (current && current !== document.body) {
+            const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
+            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
+            if (current.parentElement === document.body) {
+                const candidate = `body > ${parts.join(' > ')}`;
+                if (document.querySelectorAll(candidate).length === 1) return candidate;
+            }
+            current = current.parentElement;
+        }
+        return '';
+    };
+    const rendered = (element) => {
+        if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 1 && element.naturalHeight > 1;
+        if (element instanceof HTMLCanvasElement) return element.width > 1 && element.height > 1;
+        if (element instanceof HTMLVideoElement) return element.readyState >= 2 && element.videoWidth > 1;
+        return false;
+    };
+    const isTopLayer = (element) => {
+        if (element.closest('[role="dialog"], dialog, [aria-modal="true"]')) return true;
+        for (let current = element; current && current !== document.body; current = current.parentElement) {
+            const style = getComputedStyle(current);
+            if (['fixed', 'sticky'].includes(style.position) || (Number.parseInt(style.zIndex, 10) || 0) > 0) return true;
+        }
+        return false;
+    };
+    return Array.from(document.querySelectorAll('img, canvas, video')).filter(element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none' && rendered(element);
+    }).map(element => {
+        const rect = element.getBoundingClientRect();
+        return { selector: structuralSelector(element), tag: element.tagName.toLowerCase(), area: Math.round(rect.width * rect.height), viewport_ratio: (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight), top_layer: isTopLayer(element), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+    }).filter(item => item.selector).slice(0, 300);
+}
+"""
+
+VISUAL_CONTENT_SETTLED_JS = """
+(locators) => {
+    const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const rendered = (element) => {
+        if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 1 && element.naturalHeight > 1;
+        if (element instanceof HTMLCanvasElement) return element.width > 1 && element.height > 1;
+        if (element instanceof HTMLVideoElement) return element.readyState >= 2 && element.videoWidth > 1;
+        return getComputedStyle(element).backgroundImage !== 'none';
+    };
+    const pending = (element) => {
+        if (element instanceof HTMLImageElement) return !element.complete;
+        if (element instanceof HTMLVideoElement) return element.readyState < 2 && !element.error && Boolean(element.currentSrc || element.src || element.srcObject);
+        return false;
+    };
+    if (locators.length) {
+        return locators.every((locator) => {
+            let element = null;
+            try { element = document.querySelector(locator); } catch (error) { return true; }
+            if (!element) return false;
+            return [element, ...element.querySelectorAll('img, canvas, video, [style]')].some(rendered);
+        });
+    }
+    return !Array.from(document.querySelectorAll('img, video')).filter(visible).some(pending);
+}
+"""
+
 
 class PlannerRetryExhaustedError(ValueError):
     """Raised when every model-generated action violates the planner contract."""
@@ -55,8 +126,10 @@ class PyUICompatAgent:
         self._download_event_baseline = 0
         self._execution_resources = []
         self._last_actionable_controls = []
+        self._rendered_visual_baseline = None
         self._last_accessibility_snapshot = {'snapshot_id': '', 'page_version': '', 'nodes': []}
         self._mcp_client = None
+        self._active_planning_step = None
 
     async def analyze_task(self, task_description, case_mode='freeform', task_steps=None):
         return self._build_planned_tasks(task_description, case_mode=case_mode, task_steps=task_steps)
@@ -226,7 +299,7 @@ class PyUICompatAgent:
                 )
 
                 async def observe_current_step():
-                    current_step = mcp_step_context['step']
+                    current_step = self._active_planning_step or mcp_step_context['step']
                     if not isinstance(current_step, dict):
                         raise ValueError('No active browser step for MCP observation.')
                     return await self._collect_planner_observation(page, current_step)
@@ -354,10 +427,7 @@ class PyUICompatAgent:
                                 if action_source in {'cache', 'experience'}:
                                     history.cache_stats['fallback_replan'] = history.cache_stats.get('fallback_replan', 0) + 1
                                     history.planner_trace['step_retry_map'][str(index)] = 1
-                                    if action_source == 'cache':
-                                        self._delete_cached_ai_actions(step)
-                                    else:
-                                        await self._invalidate_verified_experience(step)
+                                    await self._invalidate_reused_actions(step, action_source)
                                     await self._emit(
                                         step_callback,
                                         {'type': 'log', 'content': f"[planner_v2] Step {index} reused plan failed, retrying with fresh AI plan.\n"},
@@ -432,6 +502,14 @@ class PyUICompatAgent:
                     if self._should_retry_assertions(
                         step, action_completed, assertions_verified, action_source, required_statuses,
                     ):
+                        if action_source in {'cache', 'experience'}:
+                            history.cache_stats['fallback_replan'] = history.cache_stats.get('fallback_replan', 0) + 1
+                            await self._invalidate_reused_actions(step, action_source)
+                            action_source = 'model'
+                            await self._emit(
+                                step_callback,
+                                {'type': 'log', 'content': f"[planner_v2] Step {index} reused plan evidence failed, retrying with fresh AI plan.\n"},
+                            )
                         retry_result = await self._retry_assertion_failure(
                             page, step, index, ai_actions, required_statuses, step_callback,
                             PlaywrightTimeout, history, artifact_dir,
@@ -802,6 +880,7 @@ class PyUICompatAgent:
         )
 
         await self._apply_assertion_bindings(index, step, ai_actions)
+        self._rendered_visual_baseline = await self._capture_rendered_visual_baseline(page, step)
         history_artifact = {
             'type': 'ai_plan',
             'step': index,
@@ -1009,6 +1088,12 @@ class PyUICompatAgent:
         removed = cache.pop(self._cache_key_for_step(step, page_context), None)
         if removed is not None:
             self._write_action_cache(cache)
+
+    async def _invalidate_reused_actions(self, step, action_source):
+        if action_source == 'cache':
+            self._delete_cached_ai_actions(step)
+        elif action_source == 'experience':
+            await self._invalidate_verified_experience(step)
 
     @staticmethod
     def _step_context_key(step):
@@ -1427,12 +1512,15 @@ class PyUICompatAgent:
         assertions = [dict(assertion) for assertion in step.get('assertions', [])]
         for binding in bindings:
             assertion = assertions[int(binding['assertion_index']) - 1]
-            semantic_intent = assertion.get('target', {})
+            original_target = assertion.get('target', {})
+            semantic_intent = original_target
             while isinstance(semantic_intent, dict) and 'intent' in semantic_intent:
                 semantic_intent = semantic_intent['intent']
-            if isinstance(semantic_intent, dict) and set(semantic_intent) == {'locator'}:
+            if isinstance(semantic_intent, dict) and 'locator' in semantic_intent:
                 semantic_intent = semantic_intent['locator']
-            assertion['target'] = {'locator': binding['locator'], 'intent': semantic_intent}
+            target = dict(original_target) if isinstance(original_target, dict) else {}
+            target.update({'locator': binding['locator'], 'intent': semantic_intent})
+            assertion['target'] = target
         bound_step['assertions'] = assertions
         return bound_step
 
@@ -1458,6 +1546,8 @@ class PyUICompatAgent:
         history,
     ) -> bool:
         bindable_kinds = {'field_value', 'popup', 'element_state', 'collection', 'absence'}
+        if self.execution_record_id is not None and self._image_assertions(step):
+            await self._clear_vanished_assertion_bindings(page, step, step_index)
         unresolved = [
             assertion
             for assertion in step.get('assertions') or []
@@ -1476,6 +1566,27 @@ class PyUICompatAgent:
             unresolved,
             actions[-1],
         )
+        if not deterministic_bindings:
+            deterministic_bindings = await self._selected_value_binding_from_completed_click(
+                page,
+                step,
+                unresolved,
+                actions[-1],
+            )
+        if not deterministic_bindings:
+            deterministic_bindings = await self._visible_element_binding_from_completed_click(
+                page,
+                step,
+                unresolved,
+                actions[-1],
+            )
+        if not deterministic_bindings:
+            deterministic_bindings = await self._rendered_visual_binding_from_completed_action(
+                page,
+                step,
+                unresolved,
+                actions[-1],
+            )
         if deterministic_bindings:
             await self._apply_assertion_bindings(
                 step_index,
@@ -1486,11 +1597,17 @@ class PyUICompatAgent:
         binding_step = {
             **step,
             'allowed_capabilities': ['browser.inspect'],
-            '_prior_actions': [self._audit_action_payload(action, step) for action in actions[-8:]],
+            '_prior_actions': [
+                {**self._audit_action_payload(action, step), 'status': 'completed'}
+                for action in actions[-8:]
+            ],
             'description': (
                 f"{step['description']}\n"
                 'The state-changing action completed. Inspect the current page and return assert with complete '
-                'discovered locator bindings for every required DOM assertion. Do not perform another UI action.'
+                'discovered locator bindings for every required DOM assertion. Do not perform another UI action. '
+                'For an assertion whose target.visual_content is image, bind the discovered element whose '
+                'has_visual_content is true and that displays the rendered image, video, or canvas introduced by '
+                'this step; never bind a text label, an empty container, or a loading placeholder.'
             ),
         }
         try:
@@ -1546,6 +1663,241 @@ class PyUICompatAgent:
         )
         return [{'assertion_index': assertion_index, 'locator': candidates.pop()}]
 
+    async def _selected_value_binding_from_completed_click(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """After choosing an option, bind the value assertion to the control that now displays the choice."""
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select'}:
+            return []
+        assertion = unresolved[0]
+        if assertion.get('assert_kind') != 'field_value' or assertion.get('operator') not in {'starts_with', 'equals', 'contains'}:
+            return []
+        expected = str((assertion.get('expected') or {}).get('value') or '').strip().casefold()
+        if not expected:
+            return []
+        choice_roles = {'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio'}
+        candidates: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        seen_rects: set[tuple] = set()
+        discovered = [*await self._build_actionable_controls(page), *await self._build_observable_elements(page)]
+        for element in discovered:
+            if not isinstance(element, dict):
+                continue
+            selector = str(element.get('selector') or '').strip()
+            shown = str(element.get('name') or element.get('text') or '').strip().casefold()
+            if not selector or selector in seen or not shown:
+                continue
+            rect = element.get('rect') if isinstance(element.get('rect'), dict) else None
+            rect_key = tuple(int(rect.get(key) or 0) for key in ('x', 'y', 'width', 'height')) if rect else None
+            if rect_key is not None and rect_key in seen_rects:
+                # The same DOM node discovered twice (attribute selector vs structural selector).
+                continue
+            matched = shown == expected if assertion.get('operator') == 'equals' else shown.startswith(expected)
+            if not matched:
+                continue
+            role = str(element.get('role') or '').strip().casefold()
+            tag = str(element.get('tag') or '').strip().casefold()
+            if role in choice_roles or tag == 'option' or (element.get('top_layer') and int(element.get('group_size') or 0) > 1):
+                continue
+            seen.add(selector)
+            if rect_key is not None:
+                seen_rects.add(rect_key)
+            priority = 2 if tag in {'select', 'input'} or role in {'combobox', 'textbox'} else 1 if not element.get('top_layer') else 0
+            candidates.append((priority, selector))
+        if not candidates:
+            return []
+        best_priority = max(priority for priority, _ in candidates)
+        best = [selector for priority, selector in candidates if priority == best_priority]
+        if len(best) != 1:
+            logger.info('planner_v2 selected-value binder declined: %s equally ranked candidates', len(best))
+            return []
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 selected-value binder chose %s', best[0])
+        return [{'assertion_index': assertion_index, 'locator': best[0]}]
+
+    async def _visible_element_binding_from_completed_click(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        if len(unresolved) != 1 or action.get('action') != 'click':
+            return []
+        assertion = unresolved[0]
+        if (
+            assertion.get('assert_kind') != 'element_state'
+            or assertion.get('operator') != 'exists'
+            or (assertion.get('expected') or {}).get('value') is not True
+        ):
+            return []
+
+        target = assertion.get('target') or {}
+        target_text = str(target.get('text') or '').strip().casefold()
+        intent = str(target.get('intent') or '')
+        ignored_tokens = {'a', 'an', 'the', 'in', 'on', 'of', 'open', 'role', 'option', 'dropdown', 'menu'}
+        intent_tokens = {
+            token for token in re.findall(r'\w+', intent.casefold())
+            if token not in ignored_tokens
+        }
+        if not target_text and not intent_tokens:
+            return []
+
+        candidates_by_name: dict[str, dict[str, Any]] = {}
+        for control in await self._build_actionable_controls(page):
+            if not isinstance(control, dict) or control.get('top_layer') is not True:
+                continue
+            name = str(control.get('name') or '').strip()
+            selector = str(control.get('selector') or '').strip()
+            normalized_name = name.casefold()
+            name_tokens = set(re.findall(r'\w+', normalized_name))
+            target_matches = (
+                normalized_name == target_text
+                or normalized_name.startswith(f'{target_text} ')
+                or normalized_name.startswith(f'{target_text}(')
+                or normalized_name.startswith(f'{target_text}（')
+            ) if target_text else intent_tokens.issubset(name_tokens)
+            if not name or not selector or not target_matches:
+                continue
+            candidate = candidates_by_name.setdefault(
+                normalized_name,
+                {'extra_token_count': len(name_tokens - intent_tokens) if not target_text else len(normalized_name) - len(target_text), 'selectors': []},
+            )
+            candidate['selectors'].append(selector)
+        if not candidates_by_name:
+            return []
+
+        minimum_extra_tokens = min(candidate['extra_token_count'] for candidate in candidates_by_name.values())
+        best_candidates = [
+            candidate
+            for candidate in candidates_by_name.values()
+            if candidate['extra_token_count'] == minimum_extra_tokens
+        ]
+        if len(best_candidates) != 1:
+            return []
+        selectors = best_candidates[0]['selectors']
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        return [{'assertion_index': assertion_index, 'locator': min(selectors, key=len)}]
+
+    @staticmethod
+    def _image_assertions(step: dict) -> list[dict]:
+        return [
+            assertion
+            for assertion in step.get('assertions') or []
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') in {'element_state', 'popup'}
+                and assertion.get('operator') == 'exists'
+                and assertion.get('required', True) is not False
+                and isinstance(assertion.get('target'), dict)
+                and assertion['target'].get('visual_content') == 'image'
+            )
+        ]
+
+    @staticmethod
+    def _media_bindable_assertions(step: dict) -> list[dict]:
+        """Assertions that a rendered media surface introduced by the step can objectively satisfy."""
+        result = []
+        for assertion in step.get('assertions') or []:
+            if not (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') in {'element_state', 'popup'}
+                and assertion.get('operator') == 'exists'
+                and assertion.get('required', True) is not False
+                and isinstance(assertion.get('target'), dict)
+            ):
+                continue
+            target = assertion['target']
+            if target.get('visual_content') == 'image':
+                result.append(assertion)
+            elif not str(target.get('text') or '').strip() and not str(target.get('locator') or '').strip():
+                result.append(assertion)
+        return result
+
+    async def _rendered_visual_elements(self, page) -> list[dict]:
+        try:
+            elements = await page.evaluate(RENDERED_VISUAL_ELEMENTS_JS)
+        except Exception as error:
+            logger.info('planner_v2 rendered visual inventory failed: %s', error)
+            return []
+        return [element for element in elements if isinstance(element, dict) and element.get('selector')]
+
+    async def _capture_rendered_visual_baseline(self, page, step):
+        """Remember which rendered media existed before the step acts, so new media can be attributed to it."""
+        if not self._media_bindable_assertions(step):
+            return None
+        return {element['selector'] for element in await self._rendered_visual_elements(page)}
+
+    async def _rendered_visual_binding_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'fill', 'navigate'}:
+            return []
+        assertion = unresolved[0]
+        if assertion not in self._media_bindable_assertions(step):
+            return []
+        baseline = self._rendered_visual_baseline
+        if baseline is None:
+            return []
+        fresh = [
+            element
+            for element in await self._rendered_visual_elements(page)
+            if element.get('selector') not in baseline
+        ]
+        if not fresh:
+            return []
+        is_image = (assertion.get('target') or {}).get('visual_content') == 'image'
+
+        def area(element):
+            return int(element.get('area') or 0)
+
+        def ratio(element):
+            return float(element.get('viewport_ratio') or 0)
+
+        # A layer introduced by the action (dialog, popover, detail pane) is the strongest signal;
+        # for intent-only assertions a tiny layered thumbnail (e.g. a toast) is not enough.
+        top_layer = [element for element in fresh if element.get('top_layer') and (is_image or area(element) >= 40000)]
+        dominant = [element for element in fresh if ratio(element) >= 0.2]
+        if top_layer:
+            chosen = max(top_layer, key=area)
+        elif dominant:
+            chosen = max(dominant, key=area)
+        elif is_image and len(fresh) == 1:
+            chosen = fresh[0]
+        else:
+            # Several small in-page media surfaces and no layer introduced by the action: ambiguous.
+            logger.info(
+                'planner_v2 media binder declined: fresh=%s top_layer=%s dominant=%s image=%s',
+                len(fresh), len(top_layer), len(dominant), is_image,
+            )
+            return []
+        logger.info(
+            'planner_v2 media binder chose %s (fresh=%s top_layer=%s dominant=%s image=%s)',
+            chosen.get('selector'), len(fresh), len(top_layer), len(dominant), is_image,
+        )
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        return [{'assertion_index': assertion_index, 'locator': str(chosen['selector'])}]
+
     async def _evaluate_persisted_assertions(self, step_index):
         from apps.ai_testing.execution.assertion_persistence import evaluate_step_assertions
 
@@ -1584,8 +1936,7 @@ class PyUICompatAgent:
             step.get('verification_required', True) is not False
             and action_completed
             and not assertions_verified
-            and action_source == 'model'
-            and 'failed' not in assertion_statuses
+            and action_source in {'model', 'cache', 'experience'}
         )
 
     @staticmethod
@@ -1598,8 +1949,87 @@ class PyUICompatAgent:
             return 'inconclusive'
         return action_status
 
+    def _latest_assertion_actuals(self, step_index):
+        """Observed values from the most recent evaluation of this step, aligned to its assertions."""
+        from apps.ai_testing.models import AIExecutionAssertionResult, AIExecutionStep
+
+        if self.execution_record_id is None:
+            return []
+        try:
+            step = (
+                AIExecutionStep.objects.filter(
+                    plan_revision__execution_record_id=self.execution_record_id,
+                    display_order=step_index,
+                )
+                .order_by('-plan_revision__revision_number')
+                .first()
+            )
+            if step is None or not isinstance(step.assertions, list) or not step.assertions:
+                return []
+            rows = list(
+                AIExecutionAssertionResult.objects.filter(
+                    step__plan_revision__execution_record_id=self.execution_record_id,
+                    step__display_order=step_index,
+                ).order_by('-id')[:len(step.assertions)]
+            )[::-1]
+        except Exception as error:  # diagnostic enrichment only; never block the retry loop
+            logger.info('planner_v2 could not load observed assertion values: %s', error)
+            return []
+        return [row.actual if isinstance(row.actual, dict) else {} for row in rows]
+
+    @staticmethod
+    def _describe_assertion_shortfall(step, statuses, max_length=500, actuals=None):
+        """Summarize which assertion contracts remained unverified, for planner feedback."""
+        assertions = step.get('assertions', []) if isinstance(step, dict) else []
+        lines = []
+        for index, (assertion, status) in enumerate(zip(assertions, statuses), start=1):
+            if not isinstance(assertion, dict) or status == 'passed':
+                continue
+            observed = actuals[index - 1] if isinstance(actuals, list) and len(actuals) >= index else None
+            kind = str(assertion.get('assert_kind') or '').strip() or 'assertion'
+            operator = str(assertion.get('operator') or '').strip()
+            expected_value = assertion.get('expected')
+            expected = expected_value.get('value') if isinstance(expected_value, dict) else expected_value
+            target = assertion.get('target')
+            label = ''
+            if isinstance(target, dict):
+                label = str(target.get('text') or '').strip() or str(target.get('intent') or '').strip()
+                if isinstance(label, dict):
+                    label = str(label.get('intent') or '').strip()
+            if len(label) > 60:
+                label = f'{label[:57]}...'
+            expected_text = 'None' if expected is None else str(expected)
+            line = f'#{index} {kind}({operator}) expected={expected_text} -> {status}'
+            if isinstance(observed, dict):
+                facts = {key: value for key, value in observed.items() if key != 'reason' and value is not None}
+                summary = json.dumps(facts, ensure_ascii=False, default=str) if facts else str(observed.get('reason') or '')
+                if summary:
+                    line = f'{line} observed={summary[:160]}'
+            if label:
+                line = f'{line} target={label!r}'
+            lines.append(line)
+        detail = ' | '.join(lines)
+        if len(detail) > max_length:
+            detail = f'{detail[:max_length - 3]}...'
+        return detail
+
     async def _wait_for_assertion_observation(self, page, step):
         assertions = step.get('assertions') or []
+        image_assertions = [
+            assertion
+            for assertion in assertions
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') in {'element_state', 'popup'}
+                and assertion.get('operator') == 'exists'
+                and assertion.get('required', True) is not False
+                and isinstance(assertion.get('target'), dict)
+                and assertion['target'].get('visual_content') == 'image'
+            )
+        ]
+        media_assertions = self._media_bindable_assertions(step)
+        if image_assertions or (media_assertions and self._rendered_visual_baseline is not None):
+            await self._wait_for_rendered_visual_content(page, step, image_assertions or media_assertions)
         download_assertions = [
             assertion
             for assertion in assertions
@@ -1684,10 +2114,59 @@ class PyUICompatAgent:
     def _current_step_download_events(self):
         return self._recent_download_events[self._download_event_baseline:]
 
+    async def _wait_for_rendered_visual_content(self, page, step, image_assertions):
+        """Give lazily loaded images and media a bounded chance to render before evidence capture."""
+        timeout_ms = min(15000, max(
+            int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
+            for assertion in image_assertions
+        ))
+        locators = [
+            locator
+            for assertion in image_assertions
+            for locator in [str((assertion.get('target') or {}).get('locator') or '').strip()]
+            if locator
+        ]
+        is_image_wait = bool(self._image_assertions(step))
+        baseline = self._rendered_visual_baseline if not locators else None
+        if not locators and not is_image_wait:
+            timeout_ms = min(timeout_ms, 5000)
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while True:
+            try:
+                if locators or baseline is None:
+                    settled = await page.evaluate(VISUAL_CONTENT_SETTLED_JS, locators)
+                else:
+                    # Unbound media assertion with a pre-action baseline: wait for the surface the
+                    # action introduces, not merely for already-present media to finish loading.
+                    settled = any(
+                        element.get('selector') not in baseline
+                        for element in await self._rendered_visual_elements(page)
+                    )
+            except Exception as error:
+                logger.info('planner_v2 visual content settle probe failed: %s', error)
+                return
+            if settled:
+                return
+            remaining_ms = round((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                logger.info(
+                    'planner_v2 visual content did not settle within %sms; continue with strict evidence capture',
+                    timeout_ms,
+                )
+                return
+            await page.wait_for_timeout(min(500, remaining_ms))
+
     async def _retry_assertion_failure(self, page, step, step_index, actions, assertion_statuses, step_callback, timeout_error, history, artifact_dir):
         if self.execution_record_id is None:
             return None
-        failure = f'Required assertions were not verified: {", ".join(assertion_statuses)}.'
+        await self._clear_vanished_assertion_bindings(page, step, step_index)
+        shortfall = PyUICompatAgent._describe_assertion_shortfall(
+            step, assertion_statuses, actuals=await sync_to_async(self._latest_assertion_actuals)(step_index),
+        )
+        failure = (
+            f'Required assertions were not verified: {", ".join(assertion_statuses)}.'
+            + (f' {shortfall}' if shortfall else '')
+        )
         replan_limit = self._assertion_replan_limit()
         persisted_actions = await sync_to_async(self._persisted_step_action_history)(step_index)
         prior_actions = persisted_actions or [self._audit_action_payload(action, step) for action in actions[-8:]]
@@ -1752,7 +2231,13 @@ class PyUICompatAgent:
             status = self._status_after_assertions(action_status, required_statuses)
             if self._step_assertions_are_verified(step, required_statuses) or action_status != 'completed':
                 return status, error_message, replan_actions[-1].get('action') if replan_actions else '', replan_actions, persisted_attempt, screenshot_path
-            failure = f'Required assertions were not verified: {", ".join(required_statuses)}.'
+            shortfall = PyUICompatAgent._describe_assertion_shortfall(
+                step, required_statuses, actuals=await sync_to_async(self._latest_assertion_actuals)(step_index),
+            )
+            failure = (
+                f'Required assertions were not verified: {", ".join(required_statuses)}.'
+                + (f' {shortfall}' if shortfall else '')
+            )
             actions = replan_actions
             persisted_actions = await sync_to_async(self._persisted_step_action_history)(step_index)
             if persisted_actions:
@@ -1765,6 +2250,40 @@ class PyUICompatAgent:
                     else self._audit_action_payload(replan_actions[-1], step)
                 )
         return status, failure, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
+
+    async def _clear_vanished_assertion_bindings(self, page, step, step_index):
+        stale_indexes = []
+        for assertion_index, assertion in enumerate(step.get('assertions') or [], start=1):
+            if not isinstance(assertion, dict) or assertion.get('operator') != 'exists':
+                continue
+            target = assertion.get('target') or {}
+            locator = str(target.get('locator') or '').strip()
+            if not locator:
+                continue
+            try:
+                handle = page.locator(locator)
+                if await handle.count() == 0:
+                    stale_indexes.append(assertion_index)
+                elif target.get('visual_content') == 'image' and not await handle.first.is_visible():
+                    # Portal-level structural selectors drift when sibling layers appear or close;
+                    # an invisible image target is no longer evidence for this assertion.
+                    stale_indexes.append(assertion_index)
+            except Exception:
+                continue
+        if not stale_indexes:
+            return
+        from apps.ai_testing.execution.plan_persistence import _semantic_target_intent
+
+        for assertion_index in stale_indexes:
+            assertion = step['assertions'][assertion_index - 1]
+            target = assertion.get('target')
+            unbound_target = dict(target) if isinstance(target, dict) else {}
+            unbound_target.pop('locator', None)
+            unbound_target['intent'] = _semantic_target_intent(unbound_target)
+            assertion['target'] = unbound_target
+        from apps.ai_testing.execution.plan_persistence import persist_unbound_step
+
+        await sync_to_async(persist_unbound_step)(self.execution_record_id, step_index, stale_indexes)
 
     def _persisted_step_action_history(self, step_index):
         from apps.ai_testing.models import AIExecutionStepAttempt
@@ -1783,7 +2302,7 @@ class PyUICompatAgent:
         for attempt in attempts:
             if not isinstance(attempt.action, dict):
                 continue
-            history.append(dict(attempt.action))
+            history.append({**attempt.action, 'status': attempt.status})
         return history
 
     def _assertion_replan_limit(self):
@@ -1893,6 +2412,7 @@ class PyUICompatAgent:
             'description': description,
             'allowed_capabilities': raw_step.get('allowed_capabilities') or self._direct_action_capabilities(action),
             'assertions': raw_step.get('assertions') or [],
+            'transition': raw_step.get('transition'),
             'verification_required': raw_step.get('verification_required', True) is not False,
             'selector': selector,
             'role': raw_step.get('role'),
@@ -1972,11 +2492,15 @@ class PyUICompatAgent:
                 observation_handler=lambda: self._collect_planner_observation(page, step),
             )
             mcp_client = MCPInProcessClient(MCPInProcessTransport(MCPJsonRpcDispatcher(browser_tools)))
-        tool_result = await mcp_client.call_tool('browser.observe', {})
-        actions = await VisualStepReplanner().create_actions(
-            step['description'],
-            tool_result['structuredContent'],
-        )
+        self._active_planning_step = step
+        try:
+            tool_result = await mcp_client.call_tool('browser.observe', {})
+            actions = await VisualStepReplanner().create_actions(
+                step['description'],
+                tool_result['structuredContent'],
+            )
+        finally:
+            self._active_planning_step = None
         normalized_actions = []
         for offset, action in enumerate(actions, start=1):
             normalized_action = self._normalize_step(
@@ -2019,7 +2543,7 @@ class PyUICompatAgent:
         self._last_actionable_controls = [
             {
                 key: control.get(key)
-                for key in ('selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'z_index', 'container_text')
+                for key in ('selector', 'group_selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'has_visual_content', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'dialog_layer', 'z_index', 'container_text')
             }
             for control in actionable_controls[:300]
             if isinstance(control, dict)
@@ -2068,6 +2592,7 @@ class PyUICompatAgent:
             'page_metrics': page_metrics,
             'allowed_capabilities': step.get('allowed_capabilities') or [],
             'assertions': step.get('assertions') or [],
+            'transition': step.get('transition'),
             'correlates_resource': step.get('correlates_resource') or '',
             'execution_resources': self._execution_resources,
             'prior_actions': step.get('_prior_actions') or [],
@@ -2083,6 +2608,7 @@ class PyUICompatAgent:
                 elements => elements.filter(element => {
                     const style = getComputedStyle(element);
                     const rect = element.getBoundingClientRect();
+                    const disabledAncestor = element.closest('[aria-disabled="true"], [disabled], [inert]');
                     const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
                     const interactiveRole = ['button', 'link', 'option', 'menuitem', 'row'].includes(element.getAttribute('role'));
                     const frameworkListener = Object.getOwnPropertySymbols(element).some(symbol => {
@@ -2099,7 +2625,7 @@ class PyUICompatAgent:
                         rect.left + rect.width / 2,
                         rect.top + rect.height / 2,
                     );
-                    return interactive && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && (hitTarget === element || element.contains(hitTarget));
+                    return interactive && !disabledAncestor && style.pointerEvents !== 'none' && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0 && (hitTarget === element || element.contains(hitTarget));
                 }).filter(element => {
                     const rect = element.getBoundingClientRect();
                     const containsInteractive = Array.from(element.querySelectorAll('*')).some(child => {
@@ -2161,7 +2687,21 @@ class PyUICompatAgent:
                     const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
                     const containerText = (element.parentElement?.innerText || '').trim().slice(0, 240);
                     const className = typeof element.className === 'string' ? element.className.trim() : '';
-                    const group = className ? Array.from(element.parentElement.children).filter(sibling => sibling.tagName === element.tagName && sibling.className === element.className) : [element];
+                    const sameTagSiblings = element.parentElement ? Array.from(element.parentElement.children).filter(sibling => sibling.tagName === element.tagName) : [];
+                    const classSiblings = className ? sameTagSiblings.filter(sibling => sibling.className === element.className) : [];
+                    const grouped = classSiblings.length >= 1 ? classSiblings : (sameTagSiblings.length > 1 ? sameTagSiblings : []);
+                    const parentSelector = element.parentElement ? structuralSelector(element.parentElement) : '';
+                    const groupClass = classSiblings.length >= 1 && className ? className.split(/\\s+/).filter(Boolean).map(token => `.${CSS.escape(token)}`).join('') : '';
+                    const groupSelector = grouped.length >= 1 && parentSelector
+                        ? `${parentSelector} > ${element.tagName.toLowerCase()}${groupClass}`
+                        : '';
+                    const hasRenderedVisual = element.tagName === 'IMG'
+                        ? (element.complete && element.naturalWidth > 1 && element.naturalHeight > 1)
+                        : (getComputedStyle(element).backgroundImage !== 'none' || Array.from(element.querySelectorAll('img, canvas, video')).some(candidate => (
+                            candidate instanceof HTMLImageElement ? (candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1)
+                                : candidate instanceof HTMLCanvasElement ? (candidate.width > 1 && candidate.height > 1)
+                                : (candidate.readyState >= 2 && candidate.videoWidth > 1)
+                        )));
                     const dialog = element.closest('[role="dialog"], dialog, [aria-modal="true"]');
                     const positioned = (() => { let current = element; while (current && current !== document.body) { const style = getComputedStyle(current); const zIndex = Number.parseInt(style.zIndex, 10) || 0; if (['fixed', 'sticky'].includes(style.position) || zIndex > 0) return current; current = current.parentElement; } return null; })();
                     const positionedRect = positioned?.getBoundingClientRect();
@@ -2179,7 +2719,7 @@ class PyUICompatAgent:
                         : element.tagName === 'INPUT' && inputType === 'checkbox' ? 'checkbox'
                         : element.tagName === 'INPUT' && inputType === 'radio' ? 'radio'
                         : element.tagName === 'INPUT' ? 'textbox' : '';
-                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || implicitRole, name, selector, url, described_by: element.getAttribute('aria-describedby') || '', native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: group.length, group_ordinal: group.indexOf(element), top_layer: topLayer, blocking_layer: blockingLayer, blocking_layer_id: blockingLayerId, z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || implicitRole, name, selector, group_selector: groupSelector, url, described_by: element.getAttribute('aria-describedby') || '', native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: grouped.length, group_ordinal: grouped.indexOf(element), has_visual_content: hasRenderedVisual, top_layer: topLayer, blocking_layer: blockingLayer, blocking_layer_id: blockingLayerId, dialog_layer: Boolean(dialog), z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
                 }).filter(control => control.selector || control.name).sort((left, right) => {
                     const blockingLayerRank = Number(right.blocking_layer) - Number(left.blocking_layer);
                     const namedRank = Number(Boolean(right.name)) - Number(Boolean(left.name));
@@ -2209,18 +2749,26 @@ class PyUICompatAgent:
 
     async def _build_observable_elements(self, page):
         try:
-            return await page.locator('body *').evaluate_all(
+            elements = await page.locator('body *').evaluate_all(
                 """
                 elements => elements.filter(element => {
                     const style = getComputedStyle(element);
                     const rect = element.getBoundingClientRect();
                     const text = (element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('alt') || element.innerText || element.value || '').trim();
                     const ratio = (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight);
-                    return element.parentElement !== document.body && text && text.length <= 240 && ratio < 0.25 && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-                }).slice(0, 200).map((element, index) => {
-                    const structuralSelector = () => {
+                    const ownVisual = (element instanceof HTMLImageElement && element.complete && element.naturalWidth > 1 && element.naturalHeight > 1)
+                        || (element instanceof HTMLCanvasElement && element.width > 1 && element.height > 1)
+                        || (element instanceof HTMLVideoElement && element.readyState >= 2 && element.videoWidth > 1)
+                        || (style.backgroundImage !== 'none' && rect.width >= 24 && rect.height >= 24);
+                    return element.parentElement !== document.body && (text || ownVisual) && text.length <= 240 && ratio < 0.25 && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                }).map((element, order) => {
+                    const rect = element.getBoundingClientRect();
+                    const offscreen = (rect.y + rect.height <= 0 || rect.y >= window.innerHeight || rect.x + rect.width <= 0 || rect.x >= window.innerWidth) ? 1 : 0;
+                    return { element, order, offscreen };
+                }).sort((left, right) => left.offscreen - right.offscreen || left.order - right.order).slice(0, 200).map(({ element }, index) => {
+                    const structuralSelector = (target = element) => {
                         const parts = [];
-                        let current = element;
+                        let current = target;
                         while (current && current !== document.body) {
                             const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
                             parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
@@ -2234,10 +2782,51 @@ class PyUICompatAgent:
                     };
                     const text = (element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('alt') || element.innerText || element.value || '').trim().slice(0, 240);
                     const rect = element.getBoundingClientRect();
-                    return { index, tag: element.tagName.toLowerCase(), text, selector: structuralSelector(), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                    const className = typeof element.className === 'string' ? element.className.trim() : '';
+                    const sameTagSiblings = element.parentElement ? Array.from(element.parentElement.children).filter(sibling => sibling.tagName === element.tagName) : [];
+                    const classSiblings = className ? sameTagSiblings.filter(sibling => sibling.className === element.className) : [];
+                    const grouped = classSiblings.length >= 1 ? classSiblings : (sameTagSiblings.length > 1 ? sameTagSiblings : []);
+                    const parentSelector = structuralSelector(element.parentElement);
+                    const groupClass = classSiblings.length >= 1 && className ? className.split(/\\s+/).filter(Boolean).map(token => `.${CSS.escape(token)}`).join('') : '';
+                    const groupSelector = grouped.length >= 1 && parentSelector
+                        ? `${parentSelector} > ${element.tagName.toLowerCase()}${groupClass}`
+                        : '';
+                    const visualElements = [element, ...element.querySelectorAll('img, canvas, video, [style]')];
+                    const hasVisualContent = visualElements.some(candidate => {
+                        if (candidate instanceof HTMLImageElement) return candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
+                        if (candidate instanceof HTMLCanvasElement) return candidate.width > 1 && candidate.height > 1;
+                        if (candidate instanceof HTMLVideoElement) return candidate.readyState >= 2 && candidate.videoWidth > 1 && candidate.videoHeight > 1;
+                        return getComputedStyle(candidate).backgroundImage !== 'none';
+                    });
+                    return { index, tag: element.tagName.toLowerCase(), text, selector: structuralSelector(), group_selector: groupSelector, group_size: grouped.length, group_ordinal: grouped.indexOf(element), has_visual_content: hasVisualContent, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
                 }).filter(element => element.selector);
                 """
             )
+            from apps.ai_testing.execution.browser_observers import measure_visual_signal
+
+            viewport = getattr(page, 'viewport_size', None) or {}
+            viewport_height = int(viewport.get('height') or 0) if isinstance(viewport, dict) else 0
+            viewport_width = int(viewport.get('width') or 0) if isinstance(viewport, dict) else 0
+            for element in elements:
+                if not element.get('has_visual_content'):
+                    continue
+                rect = element.get('rect') or {}
+                offscreen = (
+                    int(rect.get('y') or 0) + int(rect.get('height') or 0) <= 0
+                    or (viewport_height and int(rect.get('y') or 0) >= viewport_height)
+                    or int(rect.get('x') or 0) + int(rect.get('width') or 0) <= 0
+                    or (viewport_width and int(rect.get('x') or 0) >= viewport_width)
+                )
+                if offscreen:
+                    # Screenshotting scrolls the element into view; never move the page during observation.
+                    element['visual_signal'] = None
+                    continue
+                try:
+                    frame = await page.locator(element['selector']).first.screenshot(type='png', timeout=3000)
+                    element['visual_signal'] = measure_visual_signal(frame)
+                except Exception:
+                    element['visual_signal'] = False
+            return elements
         except Exception:
             return []
 
@@ -2596,6 +3185,7 @@ class PyUICompatAgent:
             point = self._parse_point(loc)
             if locator is not None:
                 await locator.fill(value, timeout=timeout_ms)
+                await self._repair_fill_if_mismatched(locator, value, timeout_ms)
             elif point is not None:
                 await page.mouse.click(point[0], point[1])
                 await page.keyboard.type(value)
@@ -2816,7 +3406,7 @@ class PyUICompatAgent:
 
                                 const parseRgb = (raw) => {
                                     if (!raw) return null;
-                                    const match = String(raw).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+                                    const match = String(raw).match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/i);
                                     if (!match) return null;
                                     return [Number(match[1]), Number(match[2]), Number(match[3])];
                                 };
@@ -2827,7 +3417,7 @@ class PyUICompatAgent:
                                     const rgb = parseRgb(c);
                                     if (!rgb) return null;
                                     const [r, g, b] = rgb;
-                                    const isTransparent = r === 0 && g === 0 && b === 0 && /rgba\(0,\s*0,\s*0,\s*0\)/i.test(String(c));
+                                    const isTransparent = r === 0 && g === 0 && b === 0 && /rgba\\(0,\\s*0,\\s*0,\\s*0\\)/i.test(String(c));
                                     return isTransparent ? null : rgb;
                                 };
 
@@ -2861,6 +3451,51 @@ class PyUICompatAgent:
             raise ValueError(f'unsupported assert kind: {assert_kind}')
 
         raise ValueError(f"unsupported planner_v2 action: {action}")
+
+    @staticmethod
+    def _fill_matches(expected: str, observed: object) -> bool:
+        """Compare a typed value with what the input actually holds, tolerating display masks."""
+        expected_text = str(expected or '').strip()
+        observed_text = str(observed or '')
+        if not expected_text:
+            return True
+        expected_digits = ''.join(ch for ch in expected_text if ch.isdigit())
+        phone_like = len(expected_digits) >= 7 and all(ch.isdigit() or ch in '+ -()' for ch in expected_text)
+        if phone_like:
+            return ''.join(ch for ch in observed_text if ch.isdigit()) == expected_digits
+
+        def normalize(text: str) -> str:
+            return ' '.join(text.split()).casefold()
+
+        return normalize(expected_text) in normalize(observed_text)
+
+    async def _repair_fill_if_mismatched(self, locator, value: str, timeout_ms: int) -> None:
+        """Masked or controlled inputs may re-format a programmatic fill; re-type through the keyboard when it did not land."""
+        if not value:
+            return
+        try:
+            observed = await locator.input_value(timeout=2000)
+        except Exception:
+            return
+        if self._fill_matches(value, observed):
+            return
+        logger.info('planner_v2 fill mismatch expected=%r observed=%r; retyping through keyboard', value, observed)
+        try:
+            await locator.click(timeout=timeout_ms)
+            await locator.press('Control+A')
+            await locator.press('Backspace')
+            residual = str(await locator.input_value(timeout=2000) or '').strip()
+            to_type = value
+            if residual and value.startswith(residual):
+                # The field keeps a fixed prefix (e.g. a country code); do not type it twice.
+                to_type = value[len(residual):].strip()
+            await locator.press_sequentially(to_type, delay=25, timeout=timeout_ms)
+            observed = await locator.input_value(timeout=2000)
+        except Exception as error:
+            logger.info('planner_v2 fill repair failed: %s', error)
+            return
+        if not self._fill_matches(value, observed):
+            logger.info('planner_v2 fill still mismatched after keyboard retype: expected=%r observed=%r', value, observed)
 
     async def _assert_stream_active(self, page, timeout_ms):
         loading_markers = ['Loading streaming...', 'No Signal', 'Reconnect', 'Stream unavailable']
@@ -3058,6 +3693,11 @@ class PyUICompatAgent:
                     break
                 except Exception as exc:
                     last_login_error = exc
+                    await self._capture_bootstrap_debug(
+                        page,
+                        step_callback,
+                        f'login_attempt_{login_attempt}_failed',
+                    )
                     if login_attempt < 3:
                         logger.warning('planner_v2 bootstrap login attempt %s/3 did not reach dashboard', login_attempt)
                         await page.goto(login.login_url, wait_until='commit', timeout=60000)

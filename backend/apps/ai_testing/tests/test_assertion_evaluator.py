@@ -21,6 +21,38 @@ class AssertionEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(result.status, 'passed')
 
+    def test_not_contains_passes_when_text_is_absent(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert',
+            'assert_kind': 'text',
+            'target': {'page': 'current'},
+            'operator': 'not_contains',
+            'expected': {'value': 'removed record'},
+            'evidence_requirements': ['dom_snapshot'],
+        })
+
+        result = evaluate_assertion(assertion, [
+            {'type': 'dom_snapshot', 'text': 'No matching results'},
+        ])
+
+        self.assertEqual(result.status, 'passed')
+
+    def test_starts_with_rejects_label_with_different_prefix(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert',
+            'assert_kind': 'field_value',
+            'target': {'locator': '#role'},
+            'operator': 'starts_with',
+            'expected': {'value': 'Admin'},
+            'evidence_requirements': ['structured_value'],
+        })
+
+        result = evaluate_assertion(assertion, [
+            {'type': 'structured_value', 'locator': '#role', 'value': 'Super Admin'},
+        ])
+
+        self.assertEqual(result.status, 'failed')
+
     def test_url_assertion_passes_with_current_url_evidence(self) -> None:
         assertion = parse_assertion({
             'action': 'assert',
@@ -87,6 +119,40 @@ class AssertionEvaluatorTests(unittest.TestCase):
         result = evaluate_assertion(assertion, [{'type': 'structured_value', 'value': 'created'}])
 
         self.assertEqual(result.status, 'passed')
+
+    def test_phone_field_value_ignores_display_formatting(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert',
+            'assert_kind': 'field_value',
+            'target': {'field': 'phone_number'},
+            'operator': 'phone_digits_equals',
+            'expected': {'value': '+1 6465180948'},
+            'evidence_requirements': ['structured_value'],
+        })
+
+        result = evaluate_assertion(
+            assertion,
+            [{'type': 'structured_value', 'value': '+1 (646) 518-0948'}],
+        )
+
+        self.assertEqual(result.status, 'passed')
+
+    def test_phone_field_value_rejects_different_digits(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert',
+            'assert_kind': 'field_value',
+            'target': {'field': 'phone_number'},
+            'operator': 'phone_digits_equals',
+            'expected': {'value': '+1 6465180948'},
+            'evidence_requirements': ['structured_value'],
+        })
+
+        result = evaluate_assertion(
+            assertion,
+            [{'type': 'structured_value', 'value': '+1 (646) 518-0949'}],
+        )
+
+        self.assertEqual(result.status, 'failed')
 
     def test_field_value_assertion_uses_only_bound_target_evidence(self) -> None:
         assertion = parse_assertion({
@@ -219,6 +285,37 @@ class AssertionEvaluatorTests(unittest.TestCase):
 
         self.assertEqual(result.status, 'failed')
 
+    def test_image_element_state_requires_rendered_visual_content(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'element_state', 'target': {'locator': '#thumbnail', 'visual_content': 'image'}, 'operator': 'exists', 'expected': {'value': True}, 'evidence_requirements': ['element_state']})
+
+        placeholder = evaluate_assertion(assertion, [{'type': 'element_state', 'locator': '#thumbnail', 'visible': True, 'has_visual_content': False}])
+        loaded = evaluate_assertion(assertion, [{'type': 'element_state', 'locator': '#thumbnail', 'visible': True, 'has_visual_content': True, 'visual_signal': True}])
+
+        self.assertEqual(placeholder.status, 'failed')
+        self.assertEqual(loaded.status, 'passed')
+
+    def test_playback_assertion_accepts_high_confidence_visual_progress(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'playback', 'target': {'locator': 'video'}, 'operator': 'greater_than', 'expected': {'minimum_advanced_seconds': 10}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'type': 'media_state_before', 'elements': [{'paused': False}]},
+            {'type': 'media_state_after', 'elements': [{'paused': False}]},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0},
+            {'type': 'playback_visual_progress', 'advanced_seconds': 10, 'confidence': 0.95},
+        ])
+
+        self.assertEqual(result.status, 'passed')
+
+    def test_playback_assertion_rejects_low_confidence_visual_progress(self) -> None:
+        assertion = parse_assertion({'action': 'assert', 'assert_kind': 'playback', 'target': {'locator': 'video'}, 'operator': 'greater_than', 'expected': {'minimum_advanced_seconds': 10}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
+        result = evaluate_assertion(assertion, [
+            {'type': 'media_state_before', 'elements': [{'paused': False}]},
+            {'type': 'media_state_after', 'elements': [{'paused': False}]},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0},
+            {'type': 'playback_visual_progress', 'advanced_seconds': 10, 'confidence': 0.79},
+        ])
+
+        self.assertEqual(result.status, 'failed')
+
     def test_playback_assertion_is_inconclusive_without_progress_evidence(self) -> None:
         assertion = parse_assertion({'action': 'assert', 'assert_kind': 'playback', 'target': {'locator': 'video'}, 'operator': 'greater_than', 'expected': {'minimum_advanced_seconds': 2}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
         result = evaluate_assertion(assertion, [{'type': 'media_state_before', 'elements': []}, {'type': 'media_state_after', 'elements': []}])
@@ -323,8 +420,8 @@ class AssertionEvaluatorTests(unittest.TestCase):
             {'type': 'media_state_before', 'elements': [{'tag': 'video', 'paused': True, 'currentTime': 0}]},
             {'type': 'media_state_after', 'elements': [{'tag': 'video', 'paused': True, 'currentTime': 0}]},
             {'type': 'playback_time_progress', 'advanced_seconds': 0},
-            {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before'},
-            {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after'},
+            {'type': 'canvas_frame_before', 'index': 0, 'content_hash': 'before', 'visual_signal': True},
+            {'type': 'canvas_frame_after', 'index': 0, 'content_hash': 'after', 'visual_signal': True},
         ])
 
         self.assertEqual(result.status, 'passed')
@@ -347,8 +444,8 @@ class AssertionEvaluatorTests(unittest.TestCase):
             {'artifact_type': 'media_state_before', 'metadata': {'elements': []}},
             {'artifact_type': 'media_state_after', 'metadata': {'elements': []}},
             {'artifact_type': 'playback_time_progress', 'metadata': {'advanced_seconds': 0}},
-            {'artifact_type': 'canvas_frame_before', 'metadata': {'index': 0, 'content_hash': 'before'}},
-            {'artifact_type': 'canvas_frame_after', 'metadata': {'index': 0, 'content_hash': 'after'}},
+            {'artifact_type': 'canvas_frame_before', 'metadata': {'index': 0, 'content_hash': 'before', 'visual_signal': True}},
+            {'artifact_type': 'canvas_frame_after', 'metadata': {'index': 0, 'content_hash': 'after', 'visual_signal': True}},
         ])
 
         self.assertEqual(result.status, 'passed')

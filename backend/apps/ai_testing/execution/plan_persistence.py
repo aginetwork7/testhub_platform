@@ -117,8 +117,11 @@ def persist_bound_step(
         assertions = [dict(item) for item in target.get('assertions', [])]
         for binding in bindings:
             assertion = assertions[int(binding['assertion_index']) - 1]
-            semantic_intent = _semantic_target_intent(assertion.get('target', {}))
-            assertion['target'] = {'locator': binding['locator'], 'intent': semantic_intent}
+            original_target = assertion.get('target', {})
+            semantic_intent = _semantic_target_intent(original_target)
+            bound_target = dict(original_target) if isinstance(original_target, Mapping) else {}
+            bound_target.update({'locator': binding['locator'], 'intent': semantic_intent})
+            assertion['target'] = bound_target
         target['assertions'] = assertions
         target['assertion_bindings'] = [dict(binding) for binding in bindings]
         tasks[step_order - 1] = target
@@ -127,6 +130,47 @@ def persist_bound_step(
             previous_revision.source_goal,
             tasks,
             reason=f'binding_step_{step_order}_from_{previous_revision.revision_number}',
+        )
+        if revision.id != previous_revision.id:
+            _copy_verified_predecessors(previous_revision, revision, step_order)
+        return revision
+
+
+def persist_unbound_step(
+    execution_record_id: int,
+    step_order: int,
+    assertion_indexes: Sequence[int],
+) -> AIExecutionPlanRevision:
+    """Append a revision that removes locators which vanished from the current DOM."""
+    with transaction.atomic():
+        previous_revision = AIExecutionPlanRevision.objects.select_for_update().filter(
+            execution_record_id=execution_record_id,
+        ).prefetch_related('steps__attempts__evidence_artifacts', 'steps__assertion_results__evidence_artifacts').order_by('-revision_number').first()
+        if previous_revision is None:
+            raise ValueError('Execution plan revision does not exist.')
+        tasks = [dict(item.get('source') or item) for item in previous_revision.plan.get('steps', [])]
+        target = dict(tasks[step_order - 1])
+        assertions = [dict(item) for item in target.get('assertions', [])]
+        for assertion_index in assertion_indexes:
+            assertion = assertions[assertion_index - 1]
+            original_target = assertion.get('target', {})
+            semantic_intent = _semantic_target_intent(original_target)
+            unbound_target = dict(original_target) if isinstance(original_target, Mapping) else {}
+            unbound_target.pop('locator', None)
+            unbound_target['intent'] = semantic_intent
+            assertion['target'] = unbound_target
+        target['assertions'] = assertions
+        target['assertion_bindings'] = [
+            dict(binding)
+            for binding in target.get('assertion_bindings', [])
+            if binding.get('assertion_index') not in assertion_indexes
+        ]
+        tasks[step_order - 1] = target
+        revision = persist_execution_plan(
+            execution_record_id,
+            previous_revision.source_goal,
+            tasks,
+            reason=f'unbinding_step_{step_order}_from_{previous_revision.revision_number}',
         )
         if revision.id != previous_revision.id:
             _copy_verified_predecessors(previous_revision, revision, step_order)
@@ -256,7 +300,7 @@ def _semantic_target_intent(target: object) -> object:
     current = target
     while isinstance(current, Mapping) and 'intent' in current:
         current = current['intent']
-    if isinstance(current, Mapping) and set(current) == {'locator'}:
+    if isinstance(current, Mapping) and 'locator' in current:
         return current['locator']
     return current
 
