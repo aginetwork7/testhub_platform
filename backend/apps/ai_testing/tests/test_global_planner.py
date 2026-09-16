@@ -1,7 +1,7 @@
 import inspect
 import json
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TransactionTestCase
 from types import SimpleNamespace
 
 from apps.core.browser_auth import resolve_browser_login
@@ -793,6 +793,23 @@ class GlobalTestPlannerTests(SimpleTestCase):
                 bindings, assertions, prior, 'Select the Site Manager option from the role dropdown.', {'kind': 'select_option'}, [],
             )
 
+    def test_blocking_layer_accepts_assert_binding_to_layer_member_control(self) -> None:
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        controls = [
+            {'selector': '#dialog-confirm', 'blocking_layer': True, 'blocking_layer_id': 'body > div.ant-modal-root', 'dialog_layer': True, 'z_index': 1000},
+            {'selector': '#dialog-title', 'blocking_layer': True, 'blocking_layer_id': 'body > div.ant-modal-root', 'dialog_layer': True, 'z_index': 1000},
+        ]
+        state = build_blocking_state(controls)
+
+        VisualStepReplanner._validate_blocking_layer_action(
+            [{'action': 'assert'}],
+            controls,
+            bindings=[{'assertion_index': 1, 'locator': '#dialog-title'}],
+            blocking_state=state,
+        )
+
     def test_popup_absence_reuses_unique_verified_popup_locator(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
@@ -824,6 +841,121 @@ class GlobalTestPlannerTests(SimpleTestCase):
             {'assertion_index': 1, 'locator': '#reason-dialog'},
         ])
 
+    def test_verify_only_step_inherits_verified_collection_locator(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        camera_group = '#root > div:nth-of-type(4) > div.cursor-grab'
+        assertions = [{
+            'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0},
+            'target': {'intent': 'online camera entries in the site camera list'},
+        }]
+        predecessors = [
+            {'assertions': [{'assert_kind': 'collection', 'operator': 'greater_than', 'target': {'intent': 'site search result rows matching the target site', 'locator': '#sites > div.site-item'}}]},
+            {'assertions': [{'assert_kind': 'collection', 'operator': 'greater_than', 'target': {'intent': 'camera items listed for the selected site', 'locator': camera_group}}]},
+        ]
+        discovered = [
+            {'selector': '#sites > div:nth-of-type(1)', 'group_selector': '#sites > div.site-item', 'group_size': 1},
+            {'selector': '#root > div:nth-of-type(4) > div:nth-of-type(1)', 'group_selector': camera_group, 'group_size': 6},
+        ]
+
+        bindings = VisualStepReplanner._bind_verified_collection_continuation([], assertions, predecessors, [{'action': 'wait', 'status': 'completed'}], discovered)
+        self.assertEqual(bindings[0]['assertion_index'], 1)
+        self.assertEqual(bindings[0]['locator'], camera_group)
+
+        # A completed state change means the collection is expected to come from this step's own action.
+        self.assertEqual(
+            VisualStepReplanner._bind_verified_collection_continuation([], assertions, predecessors, [{'action': 'click', 'status': 'completed', 'selector': '#tab'}], discovered),
+            [],
+        )
+        # The predecessor group must still be a discovered repeated-item group on the current page.
+        self.assertEqual(VisualStepReplanner._bind_verified_collection_continuation([], assertions, predecessors, [], discovered[:1]), [])
+        # Two unbound collection assertions are ambiguous; leave them to the model.
+        doubled = [*assertions, {'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0}, 'target': {'intent': 'camera thumbnails'}}]
+        self.assertEqual(VisualStepReplanner._bind_verified_collection_continuation([], doubled, predecessors, [], discovered), [])
+        # Existing bindings are kept.
+        existing = [{'assertion_index': 1, 'locator': camera_group}]
+        self.assertEqual(VisualStepReplanner._bind_verified_collection_continuation(existing, assertions, predecessors, [], discovered), existing)
+
+    def test_visual_planner_binds_verify_only_collection_from_verified_predecessor(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        camera_group = '#root > div:nth-of-type(4) > div.cursor-grab'
+        # The model asserts but never names the group (the observed degenerate reply).
+        model_reply = {'choices': [{'message': {'tool_calls': [{'function': {
+            'name': 'submit_browser_actions',
+            'arguments': json.dumps({'actions': [{'action': 'assert', 'assert_kind': 'collection', 'expected': {}}]}),
+        }}]}}]}
+        evidence = {
+            'url': 'https://app.example.com/cameras',
+            'visible_text': 'Site A Camera 13 Camera 14',
+            'actionable_controls': [
+                {'selector': '#search', 'name': 'Search site name...', 'role': 'textbox', 'tag': 'input', 'rect': {'x': 10, 'y': 10, 'width': 200, 'height': 24}},
+            ],
+            'observable_elements': [
+                {'selector': '#root > div:nth-of-type(4) > div:nth-of-type(1)', 'group_selector': camera_group, 'group_size': 6, 'text': 'Camera 13', 'rect': {'x': 10, 'y': 80, 'width': 300, 'height': 60}},
+            ],
+            'accessibility_snapshot': {'snapshot_id': '', 'page_version': '', 'nodes': []},
+            'blocking_state': {},
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0}, 'target': {'intent': 'online camera entries in the site camera list'}}],
+            'transition': None,
+            'prior_actions': [],
+            'verified_predecessors': [
+                {'step_num': 3, 'description': 'Click the target site name in the search results.', 'assertions': [
+                    {'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0}, 'target': {'intent': 'camera items listed for the selected site', 'locator': camera_group}},
+                ]},
+            ],
+            'page_metrics': {},
+            'execution_resources': [],
+        }
+
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=SimpleNamespace(model='m'))), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=AsyncMock(return_value=model_reply)):
+            actions = asyncio.run(VisualStepReplanner().create_actions('Wait 20 seconds for the site camera list and previews to finish loading.', evidence))
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]['action'], 'assert')
+        self.assertEqual([binding['locator'] for binding in actions[0]['assertion_bindings']], [camera_group])
+
+    def test_create_plan_reports_whether_the_plan_came_from_cache(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import GlobalTestPlanner
+
+        cached_steps = [{'executor': 'browser', 'description': 'Open the page'}]
+        with patch.object(GlobalTestPlanner, '_load_active_prompt_content', staticmethod(lambda prompt_type: 'prompt')), \
+                patch.object(GlobalTestPlanner, '_load_environment_devices', staticmethod(lambda configuration_id: [])), \
+                patch.object(GlobalTestPlanner, '_load_cached_plan_steps', staticmethod(lambda *args, **kwargs: cached_steps)), \
+                patch.object(GlobalTestPlanner, 'normalize_response', lambda self, *args, **kwargs: cached_steps):
+            planner = GlobalTestPlanner()
+            steps = asyncio.run(planner.create_plan('Open the page and check it', 1, use_cache=True))
+            self.assertEqual(steps, cached_steps)
+            self.assertEqual(planner.last_plan_source, 'cache')
+
+            bypass = GlobalTestPlanner()
+            with patch.object(GlobalTestPlanner, '_get_active_model_configs', new=AsyncMock(return_value=[])):
+                with self.assertRaises(GlobalPlanError):
+                    asyncio.run(bypass.create_plan('Open the page and check it', 1, use_cache=False))
+            self.assertEqual(bypass.last_plan_source, 'model')
+
+    def test_bare_assert_is_rejected_on_an_unperformed_action_step(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        self.assertTrue(VisualStepReplanner._bare_assert_on_action_step('Click the Deactivate button for the selected user.', []))
+        self.assertTrue(VisualStepReplanner._bare_assert_on_action_step('Select the Other option in the open reason dialog', [{'action': 'assert', 'status': 'completed'}]))
+        self.assertFalse(VisualStepReplanner._bare_assert_on_action_step('Click the Deactivate button', [{'action': 'click', 'selector': '#x', 'status': 'completed'}]))
+        self.assertFalse(VisualStepReplanner._bare_assert_on_action_step('Locate camera 5003_D13 and verify its thumbnail', []))
+        self.assertFalse(VisualStepReplanner._bare_assert_on_action_step('Open the Magic dropdown control', []))
+        self.assertFalse(VisualStepReplanner._bare_assert_on_action_step('In the left-side search box, search for ai@test.com.', []))
+        source = inspect.getsource(VisualStepReplanner.create_actions)
+        self.assertIn('_bare_assert_on_action_step(step_description', source)
+
     def test_exact_text_binding_prefers_unique_semantic_control(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
@@ -843,10 +975,121 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '#option'}])
 
+    def test_exact_text_binding_derives_the_value_from_an_intent_and_prefers_the_anchored_control(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{
+            'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True},
+            'target': {'intent': 'monitoring view status control showing To Do'},
+        }]
+        elements = [
+            {'name': 'To Do', 'selector': '#root > div:nth-of-type(1) > p:nth-of-type(1)', 'tag': 'p'},
+            {'name': 'To Do', 'selector': '#root > div:nth-of-type(2) > p:nth-of-type(1)', 'tag': 'p'},
+            {'name': 'To Do', 'selector': '[title="To Do"]', 'tag': 'span'},
+        ]
+
+        bindings = VisualStepReplanner._bind_exact_text_assertions([], assertions, elements)
+
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': '[title="To Do"]'}])
+
+    def test_exact_text_binding_leaves_value_display_assertions_to_the_runtime(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{
+            'assert_kind': 'element_state', 'operator': 'contains', 'expected': {'value': 'Close'},
+            'target': {'intent': 'status control displaying the selected value'},
+        }]
+        elements = [
+            {'name': 'close', 'selector': '[aria-label="close"]', 'tag': 'button', 'role': 'button'},
+            {'name': 'Close', 'selector': '[title="Close"]', 'tag': 'span', 'role': ''},
+        ]
+
+        self.assertEqual(VisualStepReplanner._bind_exact_text_assertions([], assertions, elements), [])
+
+    def test_exact_text_binding_collapses_nested_menu_wrappers_to_the_innermost_element(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'text': 'Magic Search V2', 'intent': 'Magic Search V2 option'}}]
+        base = 'body > div:nth-of-type(2) > div:nth-of-type(1)'
+        elements = [
+            {'name': 'Magic Search V2', 'selector': base, 'tag': 'div', 'role': ''},
+            {'name': 'Magic Search V2', 'selector': f'{base} > ul:nth-of-type(1)', 'tag': 'ul', 'role': ''},
+            {'name': 'Magic Search V2', 'selector': f'{base} > ul:nth-of-type(1) > li:nth-of-type(1)', 'tag': 'div', 'role': ''},
+            {'name': 'Magic Search V2', 'selector': f'{base} > ul:nth-of-type(1) > li:nth-of-type(1) > span:nth-of-type(1)', 'tag': 'span', 'role': ''},
+        ]
+
+        bindings = VisualStepReplanner._bind_exact_text_assertions([], assertions, elements)
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': f'{base} > ul:nth-of-type(1) > li:nth-of-type(1) > span:nth-of-type(1)'}])
+
+        # Two unrelated exact matches stay ambiguous, but a model binding nested with one of them is accepted.
+        elements.append({'name': 'Magic Search V2', 'selector': '#root > div:nth-of-type(9) > p:nth-of-type(1)', 'tag': 'p', 'role': ''})
+        model = [{'assertion_index': 1, 'locator': f'{base} > ul:nth-of-type(1)'}]
+        self.assertEqual(VisualStepReplanner._bind_exact_text_assertions(model, assertions, elements), model)
+        with self.assertRaises(GlobalPlanError):
+            VisualStepReplanner._bind_exact_text_assertions([{'assertion_index': 1, 'locator': '#elsewhere'}], assertions, elements)
+
+    def test_plan_context_fingerprint_changes_with_prompt_or_devices(self) -> None:
+        devices = [{'resource_type': 'environment_device', 'resource': {'role': 'main_device', 'camera_names': ['5003_D13'], 'site': '萧山区'}}]
+        base = GlobalTestPlanner._plan_context_fingerprint('prompt', devices)
+
+        self.assertEqual(base, GlobalTestPlanner._plan_context_fingerprint('prompt', devices))
+        self.assertNotEqual(base, GlobalTestPlanner._plan_context_fingerprint('prompt v2', devices))
+        self.assertNotEqual(base, GlobalTestPlanner._plan_context_fingerprint('prompt', []))
+        self.assertEqual(len(base), 32)
+        from unittest.mock import patch
+        with patch('apps.ai_testing.global_planner.PLAN_CONTRACT_VERSION', 99):
+            self.assertNotEqual(base, GlobalTestPlanner._plan_context_fingerprint('prompt', devices))
+
+    def test_exact_text_mismatch_error_names_the_text_and_the_matching_elements(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': 'true'}, 'target': {'text': 'Magic Search V2', 'intent': 'option'}}]
+        elements = [
+            {'name': 'Magic Search V2', 'selector': '#menu > li:nth-of-type(1)', 'tag': 'li', 'role': 'menuitem'},
+            {'name': 'Magic Search V2', 'selector': '#other > p:nth-of-type(1)', 'tag': 'li', 'role': 'menuitem'},
+        ]
+        with self.assertRaises(GlobalPlanError) as raised:
+            VisualStepReplanner._bind_exact_text_assertions([{'assertion_index': 1, 'locator': '#search-box'}], assertions, elements)
+        self.assertIn('Magic Search V2', str(raised.exception))
+        self.assertIn('#menu > li:nth-of-type(1)', str(raised.exception))
+
+        with self.assertRaises(GlobalPlanError) as raised:
+            VisualStepReplanner._bind_exact_text_assertions([{'assertion_index': 1, 'locator': '#search-box'}], assertions, [{'name': 'Magic V2', 'selector': '#trigger', 'tag': 'button', 'role': 'button'}])
+        self.assertIn('no discovered element shows it', str(raised.exception))
+
+    def test_popup_resolution_accepts_a_serialised_true_expectation(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        layer = 'body > div:nth-of-type(3)'
+        assertions = [{'assert_kind': 'popup', 'operator': 'exists', 'expected': {'value': 'true'}, 'target': {'intent': 'download confirmation dialog'}}]
+        prior = [{'action': 'click', 'selector': '#download', 'status': 'completed'}]
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            [{'action': 'assert'}], [], assertions, prior, 'Open the download dialog', None,
+            {'active_layer_ids': [layer], 'dialog_layer_ids': [layer]}, [{'selector': f'{layer} > h2:nth-of-type(1)', 'name': 'Download Clip', 'blocking_layer_id': layer}],
+        )
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': layer}])
+
+    def test_exact_text_binding_keeps_model_binding_when_intent_value_is_ambiguous(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{
+            'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True},
+            'target': {'intent': 'status control showing To Do'},
+        }]
+        elements = [
+            {'name': 'To Do', 'selector': '[title="To Do"]', 'tag': 'span'},
+            {'name': 'To Do', 'selector': '#status-chip', 'tag': 'span'},
+        ]
+        model_bindings = [{'assertion_index': 1, 'locator': '#other'}]
+
+        bindings = VisualStepReplanner._bind_exact_text_assertions(model_bindings, assertions, elements)
+
+        self.assertEqual(bindings, model_bindings)
+
     def test_exact_text_binding_rejects_existing_mismatched_control(self) -> None:
         from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
 
-        with self.assertRaisesRegex(GlobalPlanError, 'does not uniquely match'):
+        with self.assertRaisesRegex(GlobalPlanError, 'assertion target text'):
             VisualStepReplanner._bind_exact_text_assertions(
                 [{'assertion_index': 1, 'locator': '#wrong-control'}],
                 [{
@@ -904,6 +1147,398 @@ class GlobalTestPlannerTests(SimpleTestCase):
         self.assertGreater(
             source.index('_validate_accessible_action'),
             source.index('_resolve_completed_bound_assertion'),
+        )
+
+    def test_visual_planner_drops_premature_bindings_instead_of_rejecting_the_action(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        model_reply = {'choices': [{'message': {'tool_calls': [{'function': {
+            'name': 'submit_browser_actions',
+            'arguments': json.dumps({
+                'actions': [{'action': 'click', 'selector': '#site-manager-option'}],
+                'assertion_bindings': [{'assertion_index': 1, 'locator': '#role-display'}],
+            }),
+        }}]}}]}
+        evidence = {
+            'url': 'https://app.example.com/team',
+            'visible_text': 'Role Org Admin Site Manager',
+            'actionable_controls': [
+                {'selector': '#site-manager-option', 'name': 'Site Manager', 'role': 'option', 'tag': 'div', 'rect': {'x': 10, 'y': 10, 'width': 100, 'height': 20}},
+                {'selector': '#role-display', 'name': 'Org Admin', 'role': '', 'tag': 'div', 'rect': {'x': 10, 'y': 60, 'width': 100, 'height': 20}},
+            ],
+            'observable_elements': [],
+            'accessibility_snapshot': {'snapshot_id': '', 'page_version': '', 'nodes': []},
+            'blocking_state': {},
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{'assert_kind': 'field_value', 'operator': 'starts_with', 'expected': {'value': 'Site Manager'}, 'target': {'intent': 'role dropdown'}}],
+            'transition': {'kind': 'select_option', 'value': 'Site Manager'},
+            'prior_actions': [],
+            'verified_predecessors': [],
+            'page_metrics': {},
+            'execution_resources': [],
+        }
+
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=SimpleNamespace(model='m'))), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=AsyncMock(return_value=model_reply)):
+            actions = asyncio.run(VisualStepReplanner().create_actions('Select the Site Manager option from the role dropdown.', evidence))
+
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]['action'], 'click')
+        self.assertEqual(actions[0]['selector'], '#site-manager-option')
+        self.assertNotIn('assertion_bindings', actions[0])
+
+    def test_visible_dialog_resolution_never_rejects_but_respects_a_model_action_on_a_mismatching_dialog(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        layer = 'body > div:nth-of-type(3) > div:nth-of-type(1)'
+        assertions = [{'assert_kind': 'popup', 'operator': 'exists', 'expected': {'value': True}, 'target': {'intent': 'download confirmation dialog'}}]
+        prior = [{'action': 'click', 'selector': '#toolbar > button:nth-of-type(13)', 'status': 'completed'}]
+        blocking = {'active_layer_ids': [layer], 'dialog_layer_ids': [layer]}
+        case_dialog = [
+            {'selector': f'{layer} > div:nth-of-type(1) > h2:nth-of-type(1)', 'name': 'Create Case from Playback', 'blocking_layer_id': layer},
+            {'selector': f'{layer} > div:nth-of-type(2) > button:nth-of-type(1)', 'name': 'Cancel', 'blocking_layer_id': layer},
+        ]
+        download_dialog = [
+            {'selector': f'{layer} > div:nth-of-type(1) > h2:nth-of-type(1)', 'name': 'Download Clip', 'blocking_layer_id': layer},
+        ]
+
+        for dialog in (download_dialog, case_dialog):
+            actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+                [{'action': 'assert'}], [], assertions, prior, 'Open the download dialog', None, blocking, dialog,
+            )
+            self.assertEqual((actions, bindings), ([{'action': 'assert'}], [{'assertion_index': 1, 'locator': layer}]))
+
+        cancel = [{'action': 'click', 'selector': f'{layer} > div:nth-of-type(2) > button:nth-of-type(1)'}]
+        self.assertEqual(
+            VisualStepReplanner._resolve_visible_popup_assertion(cancel, [], assertions, prior, 'Open the download dialog', None, blocking, case_dialog),
+            (cancel, []),
+        )
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            cancel, [], assertions, prior, 'Open the download dialog', None, blocking, download_dialog,
+        )
+        self.assertEqual(actions, [{'action': 'assert'}])
+
+        # A reason picker that only lists reasons must still verify a "reason selection dialog".
+        reasons = [{'selector': f'{layer} > div:nth-of-type(1) > button:nth-of-type({n})', 'name': name, 'blocking_layer_id': layer} for n, name in enumerate(['Arson', 'Brawling', 'Other', 'Confirm'], start=1)]
+        reason_assertion = [{'assert_kind': 'popup', 'operator': 'exists', 'expected': {'value': True}, 'target': {'intent': 'reason selection dialog opened after choosing Investigate'}}]
+        actions, bindings = VisualStepReplanner._resolve_visible_popup_assertion(
+            [{'action': 'assert'}], [], reason_assertion, prior, 'Select the Investigate option', None, blocking, reasons,
+        )
+        self.assertEqual(bindings, [{'assertion_index': 1, 'locator': layer}])
+
+    def test_layer_text_collects_names_inside_the_layer_only(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        layer = 'body > div:nth-of-type(3)'
+        text = VisualStepReplanner._layer_text(layer, [
+            {'selector': f'{layer} > h2:nth-of-type(1)', 'name': 'Download Clip'},
+            {'selector': '#root > button:nth-of-type(1)', 'name': 'Go Live'},
+            {'selector': '#confirm', 'name': 'Download', 'blocking_layer_id': layer},
+            {'selector': f'{layer} > p:nth-of-type(1)', 'text': 'Select a clip'},
+        ])
+
+        self.assertEqual(text, 'Download Clip Download Select a clip')
+        self.assertEqual(VisualStepReplanner._layer_text('', []), '')
+
+    def test_camera_click_is_redirected_to_the_configured_test_camera_when_visible(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        resources = [{'resource_type': 'environment_device', 'resource_id': 'nvr_5003', 'resource': {'role': 'main_device', 'device_id': 'nvr_5003', 'camera_names': ['5003_D13']}}]
+        parent = '#root > div:nth-of-type(1) > div:nth-of-type(16) > div:nth-of-type(1) > div:nth-of-type(1)'
+        cards = [
+            {'selector': f'{parent} > div:nth-of-type({n})', 'group_selector': f'{parent} > div', 'name': name, 'tag': 'div'}
+            for n, name in enumerate(['5003_D03', '5003_D08', '5003_D09', '5003_D13'], start=1)
+        ]
+        click = [{'action': 'click', 'selector': cards[1]['selector']}]
+
+        redirected = VisualStepReplanner._prefer_environment_device_control(click, cards, resources, 'Click the target camera thumbnail to open the live view')
+        self.assertEqual(redirected[0]['selector'], cards[3]['selector'])
+
+        # Wording that does not name the default/target device leaves the choice to the model.
+        self.assertEqual(VisualStepReplanner._prefer_environment_device_control(click, cards, resources, 'Click the preview image of the first online camera'), click)
+        # Already the configured camera, or target not visible, or no configured device: unchanged.
+        right = [{'action': 'click', 'selector': cards[3]['selector']}]
+        self.assertEqual(VisualStepReplanner._prefer_environment_device_control(right, cards, resources, 'Click the target camera thumbnail'), right)
+        self.assertEqual(VisualStepReplanner._prefer_environment_device_control(click, cards[:3], resources, 'Click the target camera thumbnail'), click)
+        self.assertEqual(VisualStepReplanner._prefer_environment_device_control(click, cards, [], 'Click the target camera thumbnail'), click)
+
+    def test_field_value_binding_must_expose_the_expected_selected_value(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'field_value', 'operator': 'starts_with', 'expected': {'value': 'Close'}, 'target': {'intent': 'Investigate dropdown selected value'}}]
+        prior = [{'action': 'click', 'selector': '[title="Close"]', 'status': 'completed'}]
+        elements = [
+            {'selector': '[title="Investigate"]', 'name': 'Investigate', 'tag': 'span'},
+            {'selector': '#status-display', 'name': 'Close', 'tag': 'span'},
+        ]
+
+        with self.assertRaises(GlobalPlanError):
+            VisualStepReplanner._validate_dropdown_value_binding(
+                [{'assertion_index': 1, 'locator': '[title="Investigate"]'}], assertions, prior, 'Select the Close option', None, elements,
+            )
+        VisualStepReplanner._validate_dropdown_value_binding(
+            [{'assertion_index': 1, 'locator': '#status-display'}], assertions, prior, 'Select the Close option', None, elements,
+        )
+
+    def test_plan_prompt_lists_environment_test_devices(self) -> None:
+        devices = [{'resource_type': 'environment_device', 'resource': {'role': 'main_device', 'device_id': 'nvr_5003', 'camera_names': ['5003_D13']}}]
+
+        messages = GlobalTestPlanner._build_messages('goal', 1, 'prompt', [], devices)
+
+        self.assertIn('5003_D13', messages[1]['content'])
+        self.assertIn('Environment test devices', messages[1]['content'])
+        self.assertIn('Prefer the search box', messages[1]['content'])
+        self.assertIn('placeholder text', messages[0]['content'])
+        self.assertNotIn('Environment test devices', GlobalTestPlanner._build_messages('goal', 1, 'prompt', [])[1]['content'])
+
+    def test_missing_target_camera_hint_explains_how_to_reach_the_card(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        resources = [{'resource_type': 'environment_device', 'resource': {'role': 'main_device', 'camera_names': ['5003_D13']}}]
+        hint = VisualStepReplanner._missing_target_camera_hint('Locate the camera for the default test device', resources, [{'name': '5003_D03'}, {'name': 'starred'}])
+        self.assertIn('5003_D13', hint)
+        self.assertIn('clear any search text', hint)
+        # A search box echoing the camera name is not the camera card.
+        self.assertIn('5003_D13', VisualStepReplanner._missing_target_camera_hint('Locate the camera for the default test device', resources, [{'name': '5003_D13', 'tag': 'input'}]))
+        sited = [{'resource_type': 'environment_device', 'resource': {'role': 'main_device', 'camera_names': ['5003_D13'], 'site': '萧山区'}}]
+        self.assertIn('萧山区', VisualStepReplanner._missing_target_camera_hint('Locate the camera for the default test device', sited, [{'name': 'starred'}]))
+        self.assertEqual(VisualStepReplanner._missing_target_camera_hint('Locate the camera for the default test device', resources, [{'name': '5003_D13'}]), '')
+        self.assertEqual(VisualStepReplanner._missing_target_camera_hint('Click the first online camera', resources, [{'name': 'x'}]), '')
+        self.assertEqual(VisualStepReplanner._missing_target_camera_hint('Locate the default test device', [], [{'name': 'x'}]), '')
+
+    def test_no_completed_action_hint_fires_only_for_unperformed_action_steps(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        hint = VisualStepReplanner._no_completed_action_hint('Click the target site name in the search results', [])
+        self.assertIn('No action has been completed in this step yet', hint)
+        self.assertEqual(VisualStepReplanner._no_completed_action_hint('Click the target site name', [{'action': 'click', 'status': 'completed'}]), '')
+        self.assertEqual(VisualStepReplanner._no_completed_action_hint('Wait 20 seconds for previews to load', []), '')
+
+    def test_visual_planner_accepts_assert_when_the_assertion_is_already_bound(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        model_reply = {'choices': [{'message': {'tool_calls': [{'function': {
+            'name': 'submit_browser_actions',
+            'arguments': json.dumps({'actions': [{'action': 'assert'}]}),
+        }}]}}]}
+        evidence = {
+            'url': 'https://app.example.com/dashboard/streaming',
+            'visible_text': 'cameras',
+            'actionable_controls': [{'selector': '#cards > div:nth-of-type(1)', 'group_selector': '#cards > div', 'name': '5028/D1', 'tag': 'div', 'rect': {'x': 1, 'y': 1, 'width': 100, 'height': 60}}],
+            'observable_elements': [],
+            'accessibility_snapshot': {'snapshot_id': '', 'page_version': '', 'nodes': []},
+            'blocking_state': {},
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0}, 'target': {'intent': 'camera items', 'locator': '#cards > div'}}],
+            'transition': {'kind': 'generic'},
+            'prior_actions': [{'action': 'click', 'selector': '#btnSite', 'status': 'completed'}],
+            'verified_predecessors': [],
+            'page_metrics': {},
+            'execution_resources': [],
+        }
+
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=SimpleNamespace(model='m'))), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=AsyncMock(return_value=model_reply)):
+            actions = asyncio.run(VisualStepReplanner().create_actions('Click the target site name', evidence))
+
+        self.assertEqual(actions[0]['action'], 'assert')
+
+    def test_dropdown_selection_accepts_a_display_text_declared_in_the_step_description(self) -> None:
+        transition = {'kind': 'select_option', 'value': 'Magic Search V2'}
+        declared = [{'assert_kind': 'element_state', 'operator': 'equals', 'expected': {'value': 'Magic V2'}, 'target': {'intent': 'Magic dropdown label', 'text': 'Magic V2'}}]
+
+        GlobalTestPlanner._validate_dropdown_selection_assertion(
+            "Select the 'Magic Search V2' option; the Magic dropdown label then shows 'Magic V2'", declared, 2, transition,
+        )
+        GlobalTestPlanner._validate_dropdown_selection_assertion(
+            "Select the 'Magic Search V2' option", [{'assert_kind': 'field_value', 'operator': 'starts_with', 'expected': {'value': 'Magic Search V2'}, 'target': {'intent': 'dropdown'}}], 2, transition,
+        )
+        with self.assertRaises(GlobalPlanError):
+            GlobalTestPlanner._validate_dropdown_selection_assertion(
+                "Select the 'Magic Search V2' option", declared, 2, transition,
+            )
+
+    def test_target_camera_thumbnail_is_bound_deterministically_when_rendered(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        resources = [{'resource_type': 'environment_device', 'resource': {'role': 'main_device', 'camera_names': ['5003_D13']}}]
+        assertions = [{'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'intent': 'thumbnail on camera 5003_D13', 'text': '5003_D13', 'visual_content': 'image'}}]
+        rendered = [{'selector': '#cards > div:nth-of-type(5)', 'name': '5003_D13', 'tag': 'div', 'has_visual_content': True}]
+        placeholder = [{'selector': '#cards > div:nth-of-type(5)', 'name': '5003_D13', 'tag': 'div', 'has_visual_content': False}]
+        search_box = [{'selector': '#search', 'name': '5003_D13', 'tag': 'input', 'has_visual_content': True}]
+
+        self.assertEqual(
+            VisualStepReplanner._bind_target_camera_thumbnail([], assertions, rendered, resources, 'Locate camera 5003_D13 among the results'),
+            [{'assertion_index': 1, 'locator': '#cards > div:nth-of-type(5)', 'selection_basis': 'configured target camera card with rendered thumbnail'}],
+        )
+        self.assertEqual(VisualStepReplanner._bind_target_camera_thumbnail([], assertions, placeholder, resources, 'Locate camera 5003_D13'), [])
+        self.assertEqual(VisualStepReplanner._bind_target_camera_thumbnail([], assertions, search_box, resources, 'Locate camera 5003_D13'), [])
+        self.assertEqual(VisualStepReplanner._bind_target_camera_thumbnail([], assertions, rendered, resources, 'Click the first online camera'), [])
+        existing = [{'assertion_index': 1, 'locator': '#other'}]
+        self.assertEqual(VisualStepReplanner._bind_target_camera_thumbnail(existing, assertions, rendered, resources, 'Locate camera 5003_D13'), existing)
+
+    def test_clicked_control_label_assertion_is_dropped_when_other_evidence_exists(self) -> None:
+        assertions = [
+            {'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'text': 'View Playback', 'intent': 'View Playback control'}},
+            {'assert_kind': 'playback', 'operator': 'equals', 'expected': {'minimum_advanced_seconds': 2}, 'target': {'intent': 'recorded playback player'}},
+        ]
+        GlobalTestPlanner._remove_clicked_control_label_assertion('Click the View Playback button above the live view', assertions)
+        self.assertEqual([a['assert_kind'] for a in assertions], ['playback'])
+
+        only = [{'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'text': 'Team', 'intent': 'Team page header'}}]
+        GlobalTestPlanner._remove_clicked_control_label_assertion('Click the Team option in the submenu', only)
+        self.assertEqual(len(only), 1)
+
+        hover = [
+            {'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'text': 'Team', 'intent': 'Team submenu option'}},
+            {'assert_kind': 'collection', 'operator': 'greater_than', 'expected': {'value': 0}, 'target': {'intent': 'submenu items'}},
+        ]
+        GlobalTestPlanner._remove_clicked_control_label_assertion('Hover the organization control to reveal the Team submenu', hover)
+        self.assertEqual(len(hover), 2)
+
+    def test_vision_planning_fails_over_to_another_active_model_on_provider_outage(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import VisualStepReplanner
+        from apps.core.llm.client import LLMClientError
+
+        model_reply = {'choices': [{'message': {'tool_calls': [{'function': {
+            'name': 'submit_browser_actions',
+            'arguments': json.dumps({'actions': [{'action': 'click', 'selector': '#go'}]}),
+        }}]}}]}
+        primary, backup = SimpleNamespace(id=1, name='primary'), SimpleNamespace(id=2, name='backup')
+        complete = AsyncMock(side_effect=[LLMClientError('Google Gemini API返回错误 503: high demand'), model_reply])
+        evidence = {
+            'url': 'https://app.example.com/x', 'visible_text': '', 'actionable_controls': [{'selector': '#go', 'name': 'Go', 'tag': 'button', 'role': 'button', 'rect': {'x': 1, 'y': 1, 'width': 40, 'height': 20}}],
+            'observable_elements': [], 'accessibility_snapshot': {'snapshot_id': '', 'page_version': '', 'nodes': []}, 'blocking_state': {},
+            'allowed_capabilities': ['browser.act', 'browser.inspect'], 'assertions': [], 'transition': {'kind': 'generic'},
+            'prior_actions': [], 'verified_predecessors': [], 'page_metrics': {}, 'execution_resources': [],
+        }
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=primary)), \
+                patch.object(VisualStepReplanner, '_get_fallback_model_configs', new=AsyncMock(return_value=[backup])), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=complete):
+            actions = asyncio.run(VisualStepReplanner().create_actions('Click go', evidence))
+
+        self.assertEqual(actions[0]['selector'], '#go')
+        self.assertEqual([call.args[0] for call in complete.await_args_list], [primary, backup])
+
+        # Without a backup the outage propagates so the runtime's transient back-off can handle it.
+        complete = AsyncMock(side_effect=LLMClientError('Google Gemini API返回错误 503: high demand'))
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=primary)), \
+                patch.object(VisualStepReplanner, '_get_fallback_model_configs', new=AsyncMock(return_value=[])), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=complete):
+            with self.assertRaises(LLMClientError):
+                asyncio.run(VisualStepReplanner().create_actions('Click go', evidence))
+
+    def test_repeated_scroll_is_allowed_only_while_content_remains_to_scroll(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        scroll = [{'action': 'scroll', 'selector': '#alert-list'}]
+        prior = [{'action': 'scroll', 'selector': '#alert-list', 'status': 'completed'}]
+        more_below = {'scroll_containers': [{'selector': '#alert-list', 'remaining': 640, 'scroll_top': 300}]}
+        VisualStepReplanner._validate_non_repeating_action(scroll, prior, [], '', None, more_below)
+        exhausted = {'scroll_containers': [{'selector': '#alert-list', 'remaining': 0, 'scroll_top': 940}]}
+        with self.assertRaises(GlobalPlanError):
+            VisualStepReplanner._validate_non_repeating_action(scroll, prior, [], '', None, exhausted)
+        with self.assertRaises(GlobalPlanError):
+            VisualStepReplanner._validate_non_repeating_action(scroll, prior)
+
+    def test_binding_collection_accepts_action_level_lists_aliases_and_assert_selectors(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        assertions = [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'intent': 'status control showing To Do'}}]
+
+        action_level = [{'action': 'assert', 'assertion_bindings': [{'assertion_index': 1, 'locator': '[title="To Do"]'}]}]
+        self.assertEqual(
+            VisualStepReplanner._collect_assertion_bindings({'actions': action_level}, action_level, assertions),
+            [{'assertion_index': 1, 'locator': '[title="To Do"]'}],
+        )
+        self.assertNotIn('assertion_bindings', action_level[0])
+
+        alias = [{'action': 'assert'}]
+        self.assertEqual(
+            VisualStepReplanner._collect_assertion_bindings({'bindings': [{'assertion_index': 1, 'locator': '#status'}]}, alias, assertions),
+            [{'assertion_index': 1, 'locator': '#status'}],
+        )
+
+        selector_only = [{'action': 'assert', 'selector': '[title="To Do"]', 'assert_kind': 'element_state'}]
+        self.assertEqual(
+            VisualStepReplanner._collect_assertion_bindings({'actions': selector_only}, selector_only, assertions),
+            [{'assertion_index': 1, 'locator': '[title="To Do"]', 'selection_basis': 'assert action selector'}],
+        )
+
+        two_assertions = assertions + [{'assert_kind': 'field_value', 'operator': 'equals', 'target': {'intent': 'role'}}]
+        self.assertEqual(VisualStepReplanner._collect_assertion_bindings({'actions': selector_only}, selector_only, two_assertions), [])
+
+        click = [{'action': 'click', 'selector': '#row'}]
+        self.assertEqual(VisualStepReplanner._collect_assertion_bindings({'actions': click}, click, assertions), [])
+
+        duplicated = {'assertion_bindings': [{'assertion_index': 1, 'locator': '#a'}, {'assertion_index': 1, 'locator': '#a'}]}
+        self.assertEqual(len(VisualStepReplanner._collect_assertion_bindings(duplicated, [{'action': 'assert'}], assertions)), 1)
+
+        with self.assertRaises(GlobalPlanError):
+            VisualStepReplanner._collect_assertion_bindings({'assertion_bindings': 'bad'}, [{'action': 'assert'}], assertions)
+
+    def test_visual_planner_binds_assert_action_selector_when_top_level_bindings_are_missing(self) -> None:
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        model_reply = {'choices': [{'message': {'tool_calls': [{'function': {
+            'name': 'submit_browser_actions',
+            'arguments': json.dumps({
+                'actions': [{'action': 'assert', 'selector': '[title="To Do"]', 'assert_kind': 'element_state'}],
+            }),
+        }}]}}]}
+        evidence = {
+            'url': 'https://app.example.com/dashboard/alerts/basic',
+            'visible_text': 'Alert To Do Critical',
+            'actionable_controls': [
+                {'selector': '[title="To Do"]', 'name': 'To Do', 'role': '', 'tag': 'span', 'rect': {'x': 520, 'y': 819, 'width': 104, 'height': 30}},
+                {'selector': '#root > div:nth-of-type(1) > p:nth-of-type(1)', 'name': 'To Do', 'role': '', 'tag': 'p', 'rect': {'x': 274, 'y': 274, 'width': 55, 'height': 20}},
+            ],
+            'observable_elements': [],
+            'accessibility_snapshot': {'snapshot_id': '', 'page_version': '', 'nodes': []},
+            'blocking_state': {},
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'assertions': [{'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True}, 'target': {'intent': 'monitoring view status control showing To Do'}}],
+            'transition': {'kind': 'generic'},
+            'prior_actions': [{'action': 'click', 'selector': '#row-1', 'status': 'completed'}],
+            'verified_predecessors': [],
+            'page_metrics': {},
+            'execution_resources': [],
+        }
+
+        with patch.object(VisualStepReplanner, '_get_active_model_config', new=AsyncMock(return_value=SimpleNamespace(model='m'))), \
+                patch.object(VisualStepReplanner, '_get_active_prompt_content', new=AsyncMock(return_value='prompt')), \
+                patch('apps.ai_testing.global_planner.OpenAICompatibleClient.complete', new=AsyncMock(return_value=model_reply)):
+            actions = asyncio.run(VisualStepReplanner().create_actions('Click the first result in the alerts list to open its monitoring detail view', evidence))
+
+        self.assertEqual(actions[0]['action'], 'assert')
+        self.assertEqual([b['locator'] for b in actions[0]['assertion_bindings']], ['[title="To Do"]'])
+
+    def test_non_repeating_rule_allows_retrying_a_selector_that_did_not_resolve(self) -> None:
+        from apps.ai_testing.global_planner import VisualStepReplanner
+
+        VisualStepReplanner._validate_non_repeating_action(
+            [{'action': 'click', 'selector': '#toolbar > button:nth-of-type(15)'}],
+            [{'action': 'click', 'selector': '#toolbar > button:nth-of-type(15)', 'status': 'failed', 'error': 'ValueError: click selector did not resolve on the current page: #toolbar > button:nth-of-type(15)'}],
         )
 
     def test_visual_planner_rejects_repeating_failed_state_change(self) -> None:
@@ -1188,7 +1823,7 @@ class GlobalTestPlannerTests(SimpleTestCase):
     def test_exact_text_binding_still_rejects_unrelated_model_binding(self) -> None:
         from apps.ai_testing.global_planner import GlobalPlanError, VisualStepReplanner
 
-        with self.assertRaisesRegex(GlobalPlanError, 'does not uniquely match'):
+        with self.assertRaisesRegex(GlobalPlanError, 'assertion target text'):
             VisualStepReplanner._bind_exact_text_assertions(
                 [{'assertion_index': 1, 'locator': '#other'}],
                 [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'text': 'camera'}}],
@@ -1282,11 +1917,12 @@ class GlobalTestPlannerTests(SimpleTestCase):
     def test_visual_planner_uses_platform_ai_request_timeout(self) -> None:
         from apps.ai_testing.global_planner import VisualStepReplanner
 
-        source = inspect.getsource(VisualStepReplanner.create_actions)
+        source = inspect.getsource(VisualStepReplanner._complete_with_failover)
 
         self.assertIn('asyncio.wait_for', source)
         self.assertIn('settings.TIMEOUTS_AI_REQUEST', source)
         self.assertNotIn('max_tokens=', source)
+        self.assertIn('self._complete_with_failover(config, messages, len(assertions))', inspect.getsource(VisualStepReplanner.create_actions))
 
     def test_sync_planner_database_loaders_close_old_connections(self) -> None:
         from apps.ai_testing.global_planner import GlobalTestPlanner, VisualStepReplanner
@@ -1815,3 +2451,46 @@ class GlobalTestPlannerTests(SimpleTestCase):
 
         self.assertEqual([step['executor'] for step in steps], ['browser'])
         self.assertEqual(steps[0]['description'], '使用事件构造工具产生真实 Vehicle 事件，并在 Alert 页面验证')
+
+class PlanCacheFingerprintTests(TransactionTestCase):
+    serialized_rollback = True
+
+    def test_cached_plan_is_reused_only_under_the_same_planning_context(self) -> None:
+        from apps.ai_testing.execution.plan_persistence import persist_execution_plan
+        from apps.ai_testing.models import AIExecutionRecord
+
+        record = AIExecutionRecord.objects.create(case_name='Cache fingerprint')
+        persist_execution_plan(record.id, 'goal text', [{'description': 'step one', 'executor': 'browser'}], context_fingerprint='ctx-a')
+
+        self.assertEqual(len(GlobalTestPlanner._load_cached_plan_steps('goal text', None, 'ctx-a')), 1)
+        self.assertEqual(GlobalTestPlanner._load_cached_plan_steps('goal text', None, 'ctx-b'), [])
+        # Legacy callers without a fingerprint keep the latest plan.
+        self.assertEqual(len(GlobalTestPlanner._load_cached_plan_steps('goal text', None)), 1)
+
+        legacy = AIExecutionRecord.objects.create(case_name='Legacy plan')
+        persist_execution_plan(legacy.id, 'legacy goal', [{'description': 'old step', 'executor': 'browser'}])
+        # Proven plans without a fingerprint stay valid for ordinary goals but not for device goals.
+        self.assertEqual(len(GlobalTestPlanner._load_cached_plan_steps('legacy goal', None, 'ctx-a')), 1)
+        self.assertEqual(GlobalTestPlanner._load_cached_plan_steps('legacy goal', None, 'ctx-a', allow_legacy=False), [])
+
+    def test_passed_plan_is_preferred_over_a_newer_failed_regeneration(self) -> None:
+        from apps.ai_testing.execution.plan_persistence import persist_execution_plan
+        from apps.ai_testing.models import AIExecutionRecord
+
+        passed = AIExecutionRecord.objects.create(case_name='Passed run', status='passed')
+        persist_execution_plan(passed.id, 'stable goal', [{'description': 'proven step', 'executor': 'browser'}], context_fingerprint='ctx-old')
+        failed = AIExecutionRecord.objects.create(case_name='Failed run', status='failed')
+        persist_execution_plan(failed.id, 'stable goal', [{'description': 'regenerated step', 'executor': 'browser'}], context_fingerprint='ctx-new')
+
+        steps = GlobalTestPlanner._load_cached_plan_steps('stable goal', None, 'ctx-new')
+        self.assertEqual(steps[0]['description'], 'proven step')
+        # Device goals may not reuse a plan generated under another device configuration.
+        steps = GlobalTestPlanner._load_cached_plan_steps('stable goal', None, 'ctx-new', allow_legacy=False)
+        self.assertEqual(steps[0]['description'], 'regenerated step')
+
+    def test_create_plan_scopes_device_fingerprint_to_device_goals(self) -> None:
+        import inspect
+        source = inspect.getsource(GlobalTestPlanner.create_plan)
+        self.assertIn('device_goal = refers_to_target_device(task_description, default_device_camera_names(devices))', source)
+        self.assertIn('devices if device_goal else []', source)
+        self.assertIn('allow_legacy=not device_goal', source)

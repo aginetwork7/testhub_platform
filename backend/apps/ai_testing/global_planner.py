@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
+import logging
 import re
 from typing import Any
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import close_old_connections
+
+from apps.ai_testing.execution.intent_text import (
+    continuing_collection_locator,
+    display_value_from_target,
+    expects_true,
+    innermost_selectors,
+    is_anchored_selector,
+    popup_intent_mismatch,
+    selectors_are_nested,
+)
+from apps.ai_testing.execution.environment_resources import default_device_camera_names, default_device_site, environment_device_resources, is_text_input, refers_to_target_device
+from apps.ai_testing.execution.model_errors import is_transient_llm_error
 
 from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 
@@ -67,6 +81,10 @@ ACTION_SUBMISSION_TOOL = {
 }
 
 
+# Bump when the planning instructions in _build_messages change in a way that should invalidate cached plans.
+PLAN_CONTRACT_VERSION = 5
+
+
 class GlobalPlanError(ValueError):
     """Raised when a global test plan cannot be generated or validated."""
 
@@ -110,6 +128,8 @@ class VisualStepReplanner:
                     'If current evidence already satisfies the step after a prior action, return assert with complete discovered bindings; do not repeat the transition. '
                     'When current evidence shows loading after a prior state-changing action, use one bounded wait action; never resubmit the triggering action while loading. '
                     'If a blocking layer exists, resolve it before background actions. If prior actions failed verification, choose a distinct supported action. '
+                    'If the dialog that opened is not the one the step expects, close it and choose a different control instead of asserting. '
+                    'Execution-scoped resources of type environment_device name the default test device and its cameras; when the step refers to the default, target, or test device or camera, act on exactly those camera names and never on a neighbouring camera. '
                 ),
             },
             {
@@ -142,20 +162,7 @@ class VisualStepReplanner:
         if screenshot:
             messages[1]['content'].append({'type': 'image_url', 'image_url': {'url': screenshot}})
 
-        response = await asyncio.wait_for(
-            OpenAICompatibleClient.complete(
-                config,
-                messages,
-                context=LLMCallContext(
-                    component='ai_testing',
-                    operation='planner_vision',
-                ),
-                enable_thinking=True,
-                tools=[_action_submission_tool(len(assertions))],
-                tool_choice={'type': 'function', 'function': {'name': 'submit_browser_actions'}},
-            ),
-            timeout=settings.TIMEOUTS_AI_REQUEST,
-        )
+        response = await self._complete_with_failover(config, messages, len(assertions))
         try:
             payload = _response_payload(response, 'submit_browser_actions')
             actions = payload.get('actions') if isinstance(payload, dict) else None
@@ -165,9 +172,7 @@ class VisualStepReplanner:
             raise GlobalPlanError(
                 f'Planner Vision 动作计划为空或格式无效：{json.dumps(payload, ensure_ascii=True)[:1200]}。'
             )
-        bindings = payload.get('assertion_bindings', [])
-        if not isinstance(bindings, list) or not all(isinstance(item, dict) for item in bindings):
-            raise GlobalPlanError('Planner Vision assertion_bindings 格式无效。')
+        bindings = self._collect_assertion_bindings(payload, actions, assertions)
         bindings = [
             {
                 **binding,
@@ -183,6 +188,8 @@ class VisualStepReplanner:
             index
             for index, assertion in enumerate(assertions, start=1)
             if assertion.get('assert_kind') in {'field_value', 'popup', 'element_state', 'collection', 'absence'}
+            # A locator bound earlier in this step (by a binder or a previous attempt) is already evidence.
+            and not str(((assertion.get('target') or {}) if isinstance(assertion.get('target'), dict) else {}).get('locator') or '').strip()
         }
         completed_prior_action = any(
             isinstance(action, dict) and action.get('status') == 'completed'
@@ -193,6 +200,13 @@ class VisualStepReplanner:
                 bindings,
                 assertions,
                 [*actionable_controls, *observable_elements],
+            )
+            exact_bindings = self._bind_target_camera_thumbnail(
+                exact_bindings,
+                assertions,
+                actionable_controls,
+                execution_resources,
+                step_description,
             )
             resolved_actions = self._resolve_completed_bound_assertion(
                 actions,
@@ -206,6 +220,13 @@ class VisualStepReplanner:
         assertion_check = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
         if assertion_check:
             bindings = self._bind_verified_popup_absence(bindings, assertions, verified_predecessors)
+            bindings = self._bind_verified_collection_continuation(
+                bindings,
+                assertions,
+                verified_predecessors,
+                evidence.get('prior_actions') or [],
+                [*actionable_controls, *observable_elements],
+            )
         # early_popup_resolution: a dialog introduced by the completed action is objective evidence.
         actions, bindings = self._resolve_visible_popup_assertion(
             actions,
@@ -215,19 +236,32 @@ class VisualStepReplanner:
             step_description,
             evidence.get('transition'),
             blocking_state,
+            [*actionable_controls, *observable_elements],
         )
         assertion_check = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
         if not assertion_check:
-            invalid_indexes = {
+            structurally_invalid = {
                 binding.get('assertion_index')
                 for binding in bindings
                 if not isinstance(binding.get('assertion_index'), int)
                 or binding['assertion_index'] < 1
                 or binding['assertion_index'] > len(assertions)
-                or assertions[binding['assertion_index'] - 1].get('assert_kind') not in {'absence', 'collection'}
             }
-            if invalid_indexes:
+            if structurally_invalid:
                 raise GlobalPlanError('Only absence or discovered collection assertions may be bound before a state-changing action.')
+            premature_indexes = {
+                binding['assertion_index']
+                for binding in bindings
+                if assertions[binding['assertion_index'] - 1].get('assert_kind') not in {'absence', 'collection'}
+            }
+            if premature_indexes:
+                # A binding offered before the action is not evidence yet. Drop it and let the post-action
+                # binding pass rediscover the locator instead of rejecting an otherwise valid action.
+                logging.getLogger(__name__).info(
+                    'planner_v2 dropped %s premature assertion binding(s) attached to a state-changing action',
+                    len(premature_indexes),
+                )
+                bindings = [binding for binding in bindings if binding.get('assertion_index') not in premature_indexes]
         bindings = self._filter_non_dom_assertion_bindings(bindings, assertions)
         raw_indexes = [binding.get('assertion_index') for binding in bindings]
         if bindable_indexes and set(raw_indexes) == {index - 1 for index in bindable_indexes}:
@@ -281,6 +315,12 @@ class VisualStepReplanner:
         )
         self._validate_discovered_navigation(actions, actionable_controls)
         self._validate_absence_recovery(actions, actionable_controls, assertions)
+        actions = self._prefer_environment_device_control(
+            actions,
+            actionable_controls,
+            evidence.get('execution_resources') or [],
+            step_description,
+        )
         actions = self._resolve_visible_record_action(
             actions,
             actionable_controls,
@@ -298,6 +338,7 @@ class VisualStepReplanner:
             step_description,
             evidence.get('transition'),
             blocking_state,
+            [*actionable_controls, *observable_elements],
         )
         self._validate_accessible_action(actions, accessibility_snapshot, actionable_controls)
         self._validate_non_repeating_action(
@@ -306,17 +347,78 @@ class VisualStepReplanner:
             actionable_controls,
             step_description,
             evidence.get('transition'),
+            evidence.get('page_metrics') or {},
         )
         self._validate_blocking_layer_action(actions, actionable_controls, bindings, blocking_state)
         assertion_check = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
+        if assertion_check and self._bare_assert_on_action_step(step_description, evidence.get('prior_actions') or []):
+            raise GlobalPlanError(
+                'The step describes an action that has not been performed yet; return that state-changing action '
+                f'("{str(step_description or "").strip()[:80]}") instead of assert. An assertion cannot stand in for the action.'
+            )
         if assertion_check and {binding['assertion_index'] for binding in bindings} != bindable_indexes:
             raise GlobalPlanError(
                 'Planner Vision returned assert without complete locator bindings. If the required state is not currently visible, return one state-changing action using a current actionable selector instead of assert. If it is visible, return assert with every required DOM binding. '
-                f'Bindings: {json.dumps(bindings, ensure_ascii=True)}.'
+                f'Bindings: {json.dumps(bindings, ensure_ascii=True)}. '
+                f'Returned action: {json.dumps(actions[0], ensure_ascii=True)[:400]}.'
+                + self._no_completed_action_hint(step_description, evidence.get('prior_actions') or [])
+                + self._missing_target_camera_hint(step_description, execution_resources, [*actionable_controls, *observable_elements])
             )
         if bindings:
             actions[0]['assertion_bindings'] = bindings
         return actions
+
+    @staticmethod
+    def _collect_assertion_bindings(
+        payload: dict[str, Any],
+        actions: list[dict[str, Any]],
+        assertions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Gather locator bindings wherever the model placed them.
+
+        The contract asks for a top-level ``assertion_bindings`` list, but models regularly attach the
+        list to the action, alias it as ``bindings``, or put the locator straight on the assert action.
+        All of those carry the same evidence, so accept them instead of failing the attempt.
+        """
+        collected: list[Any] = []
+        for container in (payload, *(action for action in actions if isinstance(action, dict))):
+            for key in ('assertion_bindings', 'bindings'):
+                value = container.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+                    raise GlobalPlanError('Planner Vision assertion_bindings 格式无效。')
+                collected.extend(value)
+        for action in actions:
+            if not isinstance(action, dict) or str(action.get('action') or '') != 'assert':
+                continue
+            action.pop('assertion_bindings', None)
+            action.pop('bindings', None)
+        bindable_indexes = [
+            index
+            for index, assertion in enumerate(assertions, start=1)
+            if isinstance(assertion, dict)
+            and assertion.get('assert_kind') in {'field_value', 'popup', 'element_state', 'collection', 'absence'}
+            and not str((assertion.get('target') or {}).get('locator') or '').strip()
+        ]
+        if not collected and len(bindable_indexes) == 1:
+            for action in actions:
+                if not isinstance(action, dict) or str(action.get('action') or '') != 'assert':
+                    continue
+                target = action.get('target') if isinstance(action.get('target'), dict) else {}
+                locator = str(action.get('selector') or action.get('locator') or target.get('locator') or '').strip()
+                if locator:
+                    collected.append({'assertion_index': bindable_indexes[0], 'locator': locator, 'selection_basis': 'assert action selector'})
+                break
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[Any, str]] = set()
+        for binding in collected:
+            key = (binding.get('assertion_index'), str(binding.get('locator') or ''))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(binding)
+        return deduped
 
     @staticmethod
     def _resolve_completed_bound_assertion(
@@ -353,10 +455,14 @@ class VisualStepReplanner:
         semantic_roles = {'button', 'link', 'menuitem', 'option', 'tab', 'checkbox', 'radio'}
         for index, assertion in enumerate(assertions, start=1):
             target = assertion.get('target') or {}
-            expected_text = str(target.get('text') or '').strip().casefold()
+            operator = assertion.get('operator')
+            expected_value = (assertion.get('expected') or {}).get('value')
+            explicit_text = bool(str(target.get('text') or '').strip())
+            # An intent such as "status control showing To Do" names the displayed text as well. Value-display
+            # assertions (equals/contains) are left to the runtime binder, which knows the pre-action state.
+            expected_text = display_value_from_target(target).casefold() if operator == 'exists' else ''
             if (
                 assertion.get('assert_kind') != 'element_state'
-                or assertion.get('operator') != 'exists'
                 or not expected_text
                 # Image assertions are proven by rendered content, not by label text;
                 # _validate_visual_content_bindings owns that check.
@@ -369,7 +475,7 @@ class VisualStepReplanner:
                 if not isinstance(element, dict):
                     continue
                 locator = str(element.get('selector') or '').strip()
-                visible_text = str(element.get('name') or element.get('text') or '').strip().casefold()
+                visible_text = ' '.join(str(element.get('name') or element.get('text') or '').split()).casefold()
                 if not locator or not visible_text:
                     continue
                 if expected_text in visible_text:
@@ -382,6 +488,17 @@ class VisualStepReplanner:
                 candidates.append((priority, locator))
             max_priority = max((priority for priority, _ in candidates), default=-1)
             best_locators = {locator for priority, locator in candidates if priority == max_priority}
+            if len(best_locators) > 1:
+                # Repeated list labels share structural selectors; the attribute-anchored element is the control.
+                anchored = {locator for locator in best_locators if is_anchored_selector(locator)}
+                if len(anchored) == 1:
+                    best_locators = anchored
+            if len(best_locators) > 1:
+                # A menu item rendered as div > ul > li > span repeats one text at every level: the innermost
+                # element is the text node the assertion is about.
+                innermost = innermost_selectors(sorted(best_locators))
+                if len(innermost) == 1:
+                    best_locators = set(innermost)
             model_locator = next((
                 str(binding.get('locator') or '').strip()
                 for binding in bindings
@@ -397,13 +514,22 @@ class VisualStepReplanner:
                     'assertion_index': index,
                     'locator': next(iter(best_locators)),
                 })
-            elif index in bound_indexes:
+            elif index in bound_indexes and explicit_text:
                 if model_locator in best_locators:
                     continue
                 if not best_locators and model_locator in containing_locators:
                     continue
+                if any(selectors_are_nested(model_locator, locator) for locator in best_locators):
+                    continue
+                shown_text = str(target.get('text') or '').strip()
+                if best_locators:
+                    raise GlobalPlanError(
+                        f'Planner Vision element-state binding does not show the assertion target text "{shown_text}". '
+                        f'Bind one of the discovered elements whose visible text is exactly that: {json.dumps(sorted(best_locators)[:3], ensure_ascii=True)}.'
+                    )
                 raise GlobalPlanError(
-                    'Planner Vision element-state binding does not uniquely match the assertion target text.'
+                    f'Planner Vision element-state binding does not match the assertion target text "{shown_text}", and no discovered element shows it. '
+                    'If the option list or panel that contains it is closed, open it first; otherwise the page does not show that text.'
                 )
         return resolved
 
@@ -449,6 +575,64 @@ class VisualStepReplanner:
         ]
 
     @staticmethod
+    def _bind_verified_collection_continuation(
+        bindings: list[dict[str, Any]],
+        assertions: list[dict[str, Any]],
+        verified_predecessors: list[dict[str, Any]],
+        prior_actions: list[dict[str, Any]],
+        discovered_elements: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Inherit a verified predecessor's collection locator for a verify-only step's unbound collection assertion.
+
+        "Wait for the site camera list to finish loading" asserts on the repeated items the previous step already
+        proved. While this step has changed no state (at most waited, scrolled or hovered), that group is still the
+        evidence whether or not the model managed to bind it. Applies only when exactly one collection assertion is
+        unbound and the predecessor group is still a discovered repeated-item group on the current page.
+        """
+        bound_indexes = {
+            binding.get('assertion_index')
+            for binding in bindings
+            if isinstance(binding.get('assertion_index'), int)
+        }
+        unbound_indexes = [
+            index
+            for index, assertion in enumerate(assertions, start=1)
+            if index not in bound_indexes
+            and isinstance(assertion, dict)
+            and assertion.get('assert_kind') == 'collection'
+            and not str(((assertion.get('target') or {}) if isinstance(assertion.get('target'), dict) else {}).get('locator') or '').strip()
+        ]
+        if len(unbound_indexes) != 1:
+            return bindings
+        state_changing = {'click', 'select', 'fill', 'type', 'press', 'navigate', 'upload', 'drag'}
+        if any(
+            isinstance(action, dict)
+            and action.get('status') == 'completed'
+            and str(action.get('action') or '').strip() in state_changing
+            for action in prior_actions
+        ):
+            return bindings
+        group_selectors = {
+            str(element.get('group_selector') or '').strip()
+            for element in discovered_elements
+            if isinstance(element, dict) and str(element.get('group_selector') or '').strip()
+        }
+        assertion = assertions[unbound_indexes[0] - 1]
+        target = assertion.get('target') if isinstance(assertion.get('target'), dict) else {}
+        locator = continuing_collection_locator(str(target.get('intent') or ''), verified_predecessors, group_selectors)
+        if not locator:
+            return bindings
+        logging.getLogger(__name__).info('planner_v2 verify-only step inherited verified collection %s', locator)
+        return [
+            *bindings,
+            {
+                'assertion_index': unbound_indexes[0],
+                'locator': locator,
+                'selection_basis': 'verified predecessor collection on an unchanged page',
+            },
+        ]
+
+    @staticmethod
     def _resolve_visible_popup_assertion(
         actions: list[dict[str, Any]],
         bindings: list[dict[str, Any]],
@@ -457,6 +641,7 @@ class VisualStepReplanner:
         step_description: str,
         transition: dict[str, Any] | None,
         blocking_state: dict[str, Any],
+        discovered_elements: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         active_layer_ids = blocking_state.get('active_layer_ids') or []
         completed_state_change = any(
@@ -469,7 +654,7 @@ class VisualStepReplanner:
             len(assertions) == 1
             and assertions[0].get('assert_kind') == 'popup'
             and assertions[0].get('operator') == 'exists'
-            and (assertions[0].get('expected') or {}).get('value') is True
+            and expects_true((assertions[0].get('expected') or {}).get('value'))
         )
         dialog_layer_ids = {
             str(layer_id).strip()
@@ -487,10 +672,47 @@ class VisualStepReplanner:
             )
         ):
             return actions, bindings
+        layer_id = str(active_layer_ids[0]).strip()
+        model_asserts = len(actions) == 1 and str(actions[0].get('action') or '') == 'assert'
+        if single_dialog_layer and discovered_elements is not None and not model_asserts:
+            # Dialog text is only a weak hint about which dialog opened (a reason picker lists reasons without
+            # saying "reason"), so it never rejects evidence. It only stops this resolution from overriding a
+            # model that has looked at the dialog and decided to act on it instead of asserting.
+            mismatch = popup_intent_mismatch(
+                str((assertions[0].get('target') or {}).get('intent') or ''),
+                VisualStepReplanner._layer_text(layer_id, discovered_elements),
+            )
+            if mismatch:
+                logging.getLogger(__name__).info('planner_v2 kept the model action over popup auto-resolution: %s', mismatch[:160])
+                return actions, bindings
         return (
             [{'action': 'assert'}],
-            [{'assertion_index': 1, 'locator': str(active_layer_ids[0])}],
+            [{'assertion_index': 1, 'locator': layer_id}],
         )
+
+    @staticmethod
+    def _layer_text(locator: str, discovered_elements: list[dict[str, Any]] | None) -> str:
+        """Visible text of the discovered elements that belong to a dialog layer or live under a locator."""
+        locator = str(locator or '').strip()
+        if not locator:
+            return ''
+        parts: list[str] = []
+        for element in discovered_elements or []:
+            if not isinstance(element, dict):
+                continue
+            selector = str(element.get('selector') or '').strip()
+            inside = (
+                selector == locator
+                or selector.startswith(f'{locator} > ')
+                or str(element.get('blocking_layer_id') or '').strip() == locator
+            )
+            if not inside:
+                continue
+            for key in ('name', 'text', 'container_text'):
+                value = str(element.get(key) or '').strip()
+                if value:
+                    parts.append(value)
+        return ' '.join(parts)[:3000]
 
     @staticmethod
     def _filter_non_dom_assertion_bindings(
@@ -568,11 +790,11 @@ class VisualStepReplanner:
                     'bind the control that displays the selected value.'
                 )
             expected_value = assertion.get('expected', {}).get('value')
-            if (
-                assertion.get('assert_kind') != 'element_state'
-                or assertion.get('operator') not in {'equals', 'contains'}
-                or not isinstance(expected_value, str)
-            ):
+            value_display = (
+                (assertion.get('assert_kind') == 'element_state' and assertion.get('operator') in {'equals', 'contains'})
+                or (assertion.get('assert_kind') == 'field_value' and assertion.get('operator') in {'equals', 'contains', 'starts_with'})
+            )
+            if not value_display or not isinstance(expected_value, str) or not expected_value.strip():
                 continue
             binding_locator = str(binding.get('locator') or '').strip()
             element = next((
@@ -794,6 +1016,7 @@ class VisualStepReplanner:
         actionable_controls: list[dict[str, Any]] | None = None,
         step_description: str = '',
         transition: dict[str, Any] | None = None,
+        page_metrics: dict[str, Any] | None = None,
     ) -> None:
         action = actions[0] if len(actions) == 1 else {}
         action_name = str(action.get('action') or '').strip()
@@ -827,16 +1050,22 @@ class VisualStepReplanner:
             prior_name = str(prior_action.get('accessible_name') or '').strip()
             return f'ax:{prior_role}:{prior_name}' if prior_role and prior_name else ''
 
-        previous_action = prior_actions[-1] if prior_actions and isinstance(prior_actions[-1], dict) else {}
+        # A selector that merely failed to resolve (auto-hidden or re-indexed control) is not a
+        # proven-wrong choice; retrying it after re-observation is legitimate.
+        repeatable_prior = [
+            prior_action
+            for prior_action in prior_actions
+            if isinstance(prior_action, dict) and 'did not resolve' not in str(prior_action.get('error') or '')
+        ]
+        previous_action = repeatable_prior[-1] if repeatable_prior else {}
         immediate_repeat = (
             str(previous_action.get('action') or '').strip() == action_name
             and prior_identity(previous_action) == locator_identity
         )
         repeated_earlier = any(
-            isinstance(prior_action, dict)
-            and str(prior_action.get('action') or '').strip() == action_name
+            str(prior_action.get('action') or '').strip() == action_name
             and prior_identity(prior_action) == locator_identity
-            for prior_action in prior_actions
+            for prior_action in repeatable_prior
         )
         selected_control = next(
             (
@@ -853,6 +1082,17 @@ class VisualStepReplanner:
             ),
             None,
         )
+        if action_name == 'scroll' and immediate_repeat:
+            # Paging through a list means scrolling the same container again; allow it while the page metrics
+            # still report content left to scroll, otherwise a repeated scroll is the loop this rule prevents.
+            containers = (page_metrics or {}).get('scroll_containers') or []
+            remaining = [
+                container for container in containers
+                if isinstance(container, dict) and float(container.get('remaining') or 0) > 1
+                and (not selector or str(container.get('selector') or '').strip() in {selector, ''} or selector.endswith(str(container.get('selector') or '').strip()[-40:]))
+            ]
+            if remaining or (not selector and containers):
+                return
         reusable_after_intervening_action = action_name == 'scroll' or bool(
             selected_control is not None and selected_control.get('blocking_layer') is True
         )
@@ -879,6 +1119,174 @@ class VisualStepReplanner:
             raise GlobalPlanError(
                 'Planner Vision navigate URL was not discovered from a current actionable link. Click a discovered link or use its exact resolved URL.'
             )
+
+    @staticmethod
+    def _bind_target_camera_thumbnail(
+        bindings: list[dict[str, Any]],
+        assertions: list[dict[str, Any]],
+        actionable_controls: list[dict[str, Any]],
+        execution_resources: list[dict[str, Any]],
+        step_description: str,
+    ) -> list[dict[str, Any]]:
+        """Bind an unbound image assertion about the configured target camera to its rendered card.
+
+        Verify-only steps never run the runtime binders, so the model has to pick the card itself and often
+        binds it before the thumbnail rendered. The card named after the camera with rendered visual content
+        is objective evidence and needs no model judgement.
+        """
+        names = default_device_camera_names(execution_resources)
+        if not names or not refers_to_target_device(step_description, names):
+            return bindings
+        bound_indexes = {binding.get('assertion_index') for binding in bindings if isinstance(binding, dict)}
+        resolved = list(bindings)
+        wanted = [name.casefold() for name in names]
+        for index, assertion in enumerate(assertions, start=1):
+            target = assertion.get('target') if isinstance(assertion.get('target'), dict) else {}
+            if (
+                index in bound_indexes
+                or assertion.get('assert_kind') != 'element_state'
+                or assertion.get('operator') != 'exists'
+                or target.get('visual_content') != 'image'
+                or str(target.get('locator') or '').strip()
+            ):
+                continue
+            cards = [
+                control for control in actionable_controls
+                if isinstance(control, dict)
+                and not is_text_input(control)
+                and control.get('has_visual_content') is True
+                and str(control.get('selector') or '').strip()
+                and any(name in ' '.join(str(control.get('name') or '').split()).casefold() for name in wanted)
+            ]
+            selectors = sorted({str(control.get('selector')).strip() for control in cards})
+            if len(selectors) != 1:
+                named = sum(
+                    1 for control in actionable_controls
+                    if isinstance(control, dict) and any(name in ' '.join(str(control.get('name') or '').split()).casefold() for name in wanted)
+                )
+                logging.getLogger(__name__).info(
+                    'planner_v2 target camera thumbnail rule declined: cameras=%s named_controls=%s rendered_cards=%s',
+                    names, named, len(selectors),
+                )
+                continue
+            resolved.append({'assertion_index': index, 'locator': selectors[0], 'selection_basis': 'configured target camera card with rendered thumbnail'})
+            logging.getLogger(__name__).info('planner_v2 bound the target camera thumbnail assertion to %s', selectors[0][-60:])
+        return resolved
+
+    @staticmethod
+    def _bare_assert_on_action_step(step_description: str, prior_actions: list[dict[str, Any]]) -> bool:
+        """True when a step that literally starts with a state-changing verb has performed no action yet.
+
+        "Click the Deactivate button" cannot be satisfied by observing the page: with a lenient assertion the
+        model (and later the action cache) would skip the click entirely. Verbs that describe idempotent
+        inspection or opening (open, expand, locate, verify) are left to the model's judgement.
+        """
+        if any(
+            isinstance(action, dict) and action.get('status') == 'completed' and str(action.get('action') or '') not in {'assert', ''}
+            for action in prior_actions
+        ):
+            return False
+        first_word = re.match(r'\s*([A-Za-z]+)', str(step_description or ''))
+        if not first_word:
+            return False
+        acting_verbs = {
+            'click', 'press', 'fill', 'type', 'enter', 'select', 'choose', 'navigate', 'search', 'toggle', 'switch',
+            'scroll', 'hover', 'confirm', 'submit', 'upload', 'delete', 'remove', 'deactivate', 'activate', 'drag', 'tap',
+        }
+        return first_word.group(1).casefold() in acting_verbs
+
+    @staticmethod
+    def _no_completed_action_hint(step_description: str, prior_actions: list[dict[str, Any]]) -> str:
+        """Remind the model that a step described as an action must perform it before asserting its outcome."""
+        if any(isinstance(action, dict) and action.get('status') == 'completed' for action in prior_actions):
+            return ''
+        first_word = re.match(r'\s*([A-Za-z]+)', str(step_description or ''))
+        action_verbs = {'click', 'select', 'fill', 'type', 'enter', 'open', 'expand', 'hover', 'press', 'choose', 'navigate', 'search', 'scroll', 'toggle', 'switch', 'confirm', 'submit', 'upload', 'drag'}
+        if not first_word or first_word.group(1).casefold() not in action_verbs:
+            return ''
+        return (
+            ' No action has been completed in this step yet: perform the action the step describes '
+            f'("{str(step_description or "").strip()[:80]}") before asserting its outcome.'
+        )
+
+    @staticmethod
+    def _missing_target_camera_hint(
+        step_description: str,
+        execution_resources: list[dict[str, Any]],
+        discovered_elements: list[dict[str, Any]],
+    ) -> str:
+        """Tell the model how to reach the configured target camera when no discovered element names it."""
+        names = default_device_camera_names(execution_resources)
+        if not names or not refers_to_target_device(step_description, names):
+            return ''
+        shown = ' '.join(
+            ' '.join(str(element.get('name') or element.get('text') or '').split()).casefold()
+            for element in discovered_elements
+            if isinstance(element, dict) and not is_text_input(element)
+        )
+        if any(name.casefold() in shown for name in names):
+            return ''
+        site = default_device_site(execution_resources)
+        where = (
+            f' Its cameras are listed under the site group "{site}": clear any search text, then search "{site}" or expand that group.'
+            if site else
+            ' The search box may filter by site rather than by camera name: clear any search text, then expand the site groups one at a time or scroll the camera list.'
+        )
+        return (
+            f' The target camera {", ".join(names)} is not among the discovered controls (a search box showing that text is not the camera).'
+            f'{where} When the camera card is visible, wait for its thumbnail to render before asserting.'
+        )
+
+    @staticmethod
+    def _prefer_environment_device_control(
+        actions: list[dict[str, Any]],
+        actionable_controls: list[dict[str, Any]],
+        execution_resources: list[dict[str, Any]],
+        step_description: str,
+    ) -> list[dict[str, Any]]:
+        """Redirect a click on a neighbouring camera card to the environment's default test camera.
+
+        Applies only when the step speaks of the default/target device or camera, the clicked control sits
+        in a repeated group (the camera list), and a card named after a configured camera is visible in that
+        same group. A hidden target camera is left to the model (it may need to search or expand a site).
+        """
+        camera_names = default_device_camera_names(execution_resources)
+        action = actions[0] if len(actions) == 1 else {}
+        selector = str(action.get('selector') or '').strip()
+        if not camera_names or str(action.get('action') or '') != 'click' or not selector or not refers_to_target_device(step_description, camera_names):
+            return actions
+        clicked = next((c for c in actionable_controls if isinstance(c, dict) and str(c.get('selector') or '').strip() == selector), None)
+        if clicked is None or is_text_input(clicked):
+            return actions
+        wanted = {name.casefold() for name in camera_names}
+        clicked_name = ' '.join(str(clicked.get('name') or '').split()).casefold()
+        if any(name in clicked_name for name in wanted):
+            return actions
+        group = str(clicked.get('group_selector') or '').strip()
+        parent = selector.rsplit(' > ', 1)[0] if ' > ' in selector else ''
+        siblings = [
+            control
+            for control in actionable_controls
+            if isinstance(control, dict)
+            and str(control.get('selector') or '').strip() != selector
+            and (
+                (group and str(control.get('group_selector') or '').strip() == group)
+                or (parent and str(control.get('selector') or '').startswith(f'{parent} > '))
+            )
+        ]
+        targets = [
+            control for control in siblings
+            if not is_text_input(control)
+            and any(name in ' '.join(str(control.get('name') or '').split()).casefold() for name in wanted)
+        ]
+        if len({str(control.get('selector') or '') for control in targets}) != 1:
+            return actions
+        target = targets[0]
+        logging.getLogger(__name__).info(
+            'planner_v2 redirected a camera click from %r to the configured test camera %r',
+            clicked_name[:40], str(target.get('name') or '')[:40],
+        )
+        return [{**action, 'selector': str(target.get('selector') or '').strip(), 'role': None, 'accessible_name': None}]
 
     @staticmethod
     def _resolve_visible_record_action(
@@ -930,7 +1338,7 @@ class VisualStepReplanner:
             len(assertions or []) == 1
             and assertions[0].get('assert_kind') == 'element_state'
             and assertions[0].get('operator') == 'exists'
-            and (assertions[0].get('expected') or {}).get('value') is True
+            and expects_true((assertions[0].get('expected') or {}).get('value'))
         )
         if (
             action_name == 'scroll'
@@ -1052,9 +1460,19 @@ class VisualStepReplanner:
             if str(layer_id).strip()
         ]
 
+        layer_member_locators = {
+            str(control.get('selector') or '').strip()
+            for control in actionable_controls
+            if isinstance(control, dict)
+            and str(control.get('blocking_layer_id') or '').strip() in active_layer_ids
+            and str(control.get('selector') or '').strip()
+        }
+
         def _binds_inside_active_layer(locator: str) -> bool:
-            return locator in blocking_assertion_locators or any(
-                locator.startswith(f'{layer_id} > ') for layer_id in active_layer_ids
+            return (
+                locator in blocking_assertion_locators
+                or locator in layer_member_locators
+                or any(locator.startswith(f'{layer_id} > ') for layer_id in active_layer_ids)
             )
 
         if (
@@ -1075,10 +1493,64 @@ class VisualStepReplanner:
         close_old_connections()
         from apps.ai_testing.models import AITestModelConfig
 
-        return AITestModelConfig.objects.filter(role='planner_vision', is_active=True).first()
+        return AITestModelConfig.objects.filter(role='planner_vision', is_active=True).order_by('id').first()
 
     async def _get_active_model_config(self):
         return await sync_to_async(self._load_active_model_config)()
+
+    @staticmethod
+    def _load_fallback_model_configs(primary) -> list:
+        close_old_connections()
+        from apps.ai_testing.models import AITestModelConfig
+
+        primary_id = getattr(primary, 'id', None)
+        return [
+            config
+            for config in AITestModelConfig.objects.filter(role='planner_vision', is_active=True).order_by('id')
+            if config.id != primary_id
+        ]
+
+    async def _get_fallback_model_configs(self, primary) -> list:
+        """Other active planner_vision models, in configuration order; [] when none or when no database is reachable."""
+        try:
+            return await sync_to_async(self._load_fallback_model_configs)(primary)
+        except Exception as error:
+            logging.getLogger(__name__).info('planner_v2 fallback vision models unavailable: %s', type(error).__name__)
+            return []
+
+    async def _complete_with_failover(self, config, messages, assertion_count: int):
+        """Call the primary vision model and, on a provider outage, each other active planner_vision model in turn.
+
+        Enabling a second planner_vision model in the AI model configuration is what turns this on; with a single
+        active model the behaviour is unchanged and the runtime's transient back-off still applies.
+        """
+        candidates = [config, *await self._get_fallback_model_configs(config)]
+        last_error: BaseException | None = None
+        for index, candidate in enumerate(candidates):
+            try:
+                return await asyncio.wait_for(
+                    OpenAICompatibleClient.complete(
+                        candidate,
+                        messages,
+                        context=LLMCallContext(
+                            component='ai_testing',
+                            operation='planner_vision',
+                        ),
+                        enable_thinking=True,
+                        tools=[_action_submission_tool(assertion_count)],
+                        tool_choice={'type': 'function', 'function': {'name': 'submit_browser_actions'}},
+                    ),
+                    timeout=settings.TIMEOUTS_AI_REQUEST,
+                )
+            except Exception as error:  # noqa: BLE001 - classified below
+                last_error = error
+                if index + 1 >= len(candidates) or not is_transient_llm_error(error):
+                    raise
+                logging.getLogger(__name__).warning(
+                    'planner_v2 vision model %s unavailable (%s); failing over to %s',
+                    getattr(candidate, 'name', '?'), type(error).__name__, getattr(candidates[index + 1], 'name', '?'),
+                )
+        raise last_error  # pragma: no cover - loop always returns or raises
 
     @staticmethod
     def _load_active_prompt_content() -> str:
@@ -1101,10 +1573,18 @@ class GlobalTestPlanner:
         environment_configuration_id: int | None,
         use_cache: bool = False,
     ) -> list[dict[str, Any]]:
+        prompt_content = await sync_to_async(self._load_active_prompt_content)('planner_text')
+        devices = await sync_to_async(self._load_environment_devices)(environment_configuration_id)
+        device_goal = refers_to_target_device(task_description, default_device_camera_names(devices))
+        context_fingerprint = self._plan_context_fingerprint(prompt_content, devices if device_goal else [])
+        self.last_context_fingerprint = context_fingerprint
+        self.last_plan_source = 'model'
         if use_cache:
             cached_steps = await sync_to_async(self._load_cached_plan_steps)(
                 task_description,
                 environment_configuration_id,
+                context_fingerprint,
+                allow_legacy=not device_goal,
             )
             if cached_steps:
                 cached_response = {
@@ -1114,7 +1594,7 @@ class GlobalTestPlanner:
                     }}]}}],
                 }
                 try:
-                    return self.normalize_response(
+                    normalized = self.normalize_response(
                         cached_response,
                         environment_configuration_id,
                         task_description,
@@ -1122,16 +1602,18 @@ class GlobalTestPlanner:
                     )
                 except GlobalPlanError:
                     pass
+                else:
+                    self.last_plan_source = 'cache'
+                    return normalized
 
         configs = await self._get_active_model_configs()
         if not configs:
             raise GlobalPlanError('未配置可用的 Planner 模型。')
 
-        prompt_content = await sync_to_async(self._load_active_prompt_content)('planner_text')
         if not prompt_content:
             raise GlobalPlanError('未配置可用的 Planner 文本提示词。')
         resources = await sync_to_async(self._load_data_factory_resources)(environment_configuration_id)
-        messages = self._build_messages(task_description, environment_configuration_id, prompt_content, resources)
+        messages = self._build_messages(task_description, environment_configuration_id, prompt_content, resources, devices)
         last_error: GlobalPlanError | None = None
         for config in configs:
             retry_messages = list(messages)
@@ -1185,6 +1667,7 @@ class GlobalTestPlanner:
         configuration_id: int | None,
         prompt_content: str,
         data_factory_resources: list[dict[str, object]] | None = None,
+        environment_devices: list[dict[str, object]] | None = None,
     ) -> list[dict[str, Any]]:
         device_context = (
             '设备 CLI 环境已配置，可以输出 device_cli 步骤。'
@@ -1217,6 +1700,7 @@ class GlobalTestPlanner:
                     'popup, media, video, stream_state, playback, element_state, url, network, '
                     'api_resource, command_result, download_task, collection, absence, theme. '
                     'For phone-number field_value assertions, use operator="phone_digits_equals" so UI formatting such as spaces, parentheses, or hyphens does not change the verified number. Use equals for non-phone field values. '
+                    'field_value compares the value a user entered or selected and is empty for an untouched input; verify an input\'s placeholder text or a control\'s visible label with element_state equals/contains instead. '
                     'Do not treat names from the user goal as exact rendered UI text unless the goal explicitly requires that wording. After selecting a mode or option, assert the newly introduced control or panel needed by the next transition instead of repeating the selected label as a text assertion. '
                     'Use element_state or collection for static UI elements such as images, thumbnails, cards, and controls. For an image or thumbnail that must be loaded and displayed normally, use element_state exists and set target.visual_content="image"; visibility alone does not prove image content loaded. element_state otherwise supports objective visibility through exists/not_exists and visible text through equals/contains/matches; never assert inferred CSS states such as selected, active, highlighted, or focused. After selecting a record, assert an objectively observable detail element, dialog, text, or URL introduced by that transition. '
                     'Collection assertions compare the observed item count: use exists/not_exists or a numeric expected.value with equals/greater_than/less_than; never use contains or descriptive count text. The target intent must describe the repeated items, not their parent container, summary, loading element, or empty-state placeholder. '
@@ -1248,6 +1732,14 @@ class GlobalTestPlanner:
                 'content': (
                     f'{str(task_description or "").strip()}\n\n'
                     f'Environment-authorized data_factory resources:\n{json.dumps(data_factory_resources or [], ensure_ascii=True)}'
+                    + (
+                        '\n\nEnvironment test devices (the goal\'s "default test device" / "target camera" means these). '
+                        'Name the camera and, when given, its site group explicitly in the step descriptions. Prefer the '
+                        'search box: "type the site name X into the camera list search box, then locate camera Y among the '
+                        'results"; expand the site group only when the list has no search box. Never leave the camera unnamed:\n'
+                        + json.dumps([resource.get('resource') for resource in environment_devices if isinstance(resource, dict)], ensure_ascii=True)
+                        if environment_devices else ''
+                    )
                 ),
             },
         ]
@@ -1288,6 +1780,12 @@ class GlobalTestPlanner:
                     raw_step.get('allowed_capabilities'),
                     index,
                 )
+                # A "locate and verify" step still has to be able to act (expand a group, dismiss a stray layer):
+                # inspect-only steps dead-end whenever the state is not already on screen. Runtime validators,
+                # not missing capabilities, keep actions in check.
+                for required_capability in ('browser.inspect', 'browser.act'):
+                    if required_capability not in allowed_capabilities:
+                        allowed_capabilities.append(required_capability)
                 if raw_step.get('verification_required', True) is False:
                     raise GlobalPlanError(
                         f'Planner 浏览器步骤 {index} 禁止关闭验证；每个状态转换都必须声明立即后置断言。'
@@ -1299,6 +1797,7 @@ class GlobalTestPlanner:
                         f'Planner 浏览器步骤 {index} 缺少结构化 transition。'
                     )
                 GlobalTestPlanner._remove_redundant_selection_label_assertion(assertions, transition)
+                GlobalTestPlanner._remove_clicked_control_label_assertion(description, assertions)
                 GlobalTestPlanner._normalize_dropdown_selection_operator(description, assertions, transition)
                 GlobalTestPlanner._validate_dropdown_selection_assertion(
                     description,
@@ -1408,6 +1907,32 @@ class GlobalTestPlanner:
                 assertion['operator'] = 'starts_with'
 
     @staticmethod
+    def _remove_clicked_control_label_assertion(description: str, assertions: list[dict[str, Any]]) -> None:
+        """Drop an existence assertion on the very control the step clicks.
+
+        "Click the View Playback button" followed by asserting that "View Playback" exists proves nothing about
+        the transition and is impossible once the click navigates away. Kept only when it is the sole assertion.
+        """
+        text = str(description or '')
+        if not re.match(r'\s*(click|tap|press|double[- ]?click)\b', text, flags=re.IGNORECASE):
+            return
+        lowered = text.casefold()
+        redundant = [
+            assertion
+            for assertion in assertions
+            if assertion.get('assert_kind') == 'element_state'
+            and assertion.get('operator') == 'exists'
+            and str(((assertion.get('target') or {}) if isinstance(assertion.get('target'), dict) else {}).get('text') or '').strip()
+            and str(assertion['target']['text']).strip().casefold() in lowered
+        ]
+        if redundant and len(redundant) < len(assertions):
+            for assertion in redundant:
+                logging.getLogger(__name__).info(
+                    'planner_v2 dropped an assertion on the clicked control label %r', str(assertion['target']['text'])[:40],
+                )
+            assertions[:] = [assertion for assertion in assertions if assertion not in redundant]
+
+    @staticmethod
     def _remove_redundant_selection_label_assertion(
         assertions: list[dict[str, Any]],
         transition: dict[str, Any] | None,
@@ -1420,7 +1945,7 @@ class GlobalTestPlanner:
         introduced_control_exists = any(
             assertion.get('assert_kind') in {'element_state', 'popup'}
             and assertion.get('operator') == 'exists'
-            and (assertion.get('expected') or {}).get('value') is True
+            and expects_true((assertion.get('expected') or {}).get('value'))
             and selected_value in str((assertion.get('target') or {}).get('intent') or '').casefold()
             for assertion in assertions
         )
@@ -1470,19 +1995,21 @@ class GlobalTestPlanner:
 
         expected_selection = str((transition or {}).get('value') or '').strip().casefold()
 
-        proves_selected_value = any(
-            assertion.get('assert_kind') in {'field_value', 'element_state'}
-            and assertion.get('operator') in {'equals', 'contains', 'starts_with', 'matches'}
-            and isinstance((assertion.get('expected') or {}).get('value'), str)
-            and (
-                str((assertion.get('expected') or {}).get('value') or '').strip().casefold()
-                == expected_selection
-                if expected_selection
-                else str((assertion.get('expected') or {}).get('value') or '').strip().casefold()
-                in description_text
-            )
-            for assertion in assertions
-        )
+        def _proves(assertion: dict[str, Any]) -> bool:
+            if (
+                assertion.get('assert_kind') not in {'field_value', 'element_state'}
+                or assertion.get('operator') not in {'equals', 'contains', 'starts_with', 'matches'}
+                or not isinstance((assertion.get('expected') or {}).get('value'), str)
+            ):
+                return False
+            expected_text = str((assertion.get('expected') or {}).get('value') or '').strip().casefold()
+            if not expected_text:
+                return False
+            # The requested option itself, or a display text the step description declares (a control may
+            # abbreviate the chosen option, e.g. "Magic Search V2" shown as "Magic V2").
+            return expected_text == expected_selection or expected_text in description_text
+
+        proves_selected_value = any(_proves(assertion) for assertion in assertions)
         proves_transaction_dialog = any(
             assertion.get('assert_kind') == 'popup'
             or (
@@ -1539,11 +2066,16 @@ class GlobalTestPlanner:
         if transition is not None:
             return transition.get('kind') == 'select_option'
         description_text = description.casefold()
-        return (
+        inferred = (
             any(verb in description_text for verb in ('select', 'choose'))
             and 'option' in description_text
             and any(control in description_text for control in ('dropdown', 'menu'))
         )
+        if inferred:
+            logging.getLogger(__name__).info(
+                'planner keyword fallback: select_option inferred from description without a structured transition'
+            )
+        return inferred
 
     @staticmethod
     def _validate_status_control_preconditions(steps: list[dict[str, Any]]) -> None:
@@ -1755,22 +2287,61 @@ class GlobalTestPlanner:
         return unique_configs
 
     @staticmethod
+    def _plan_context_fingerprint(prompt_content: str, environment_devices: list[dict[str, object]] | None) -> str:
+        """Identify the planning context a cached plan was generated under.
+
+        The prompt text always participates; environment devices participate only for goals that speak of the
+        default/target device, so a device configuration change regenerates exactly the plans that depend on it
+        and leaves proven plans for unrelated goals untouched.
+        """
+        payload = {
+            'contract_version': PLAN_CONTRACT_VERSION,
+            'prompt': hashlib.sha256(str(prompt_content or '').encode('utf-8')).hexdigest(),
+            'devices': [resource.get('resource') for resource in environment_devices or [] if isinstance(resource, dict)],
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode('utf-8')).hexdigest()[:32]
+
+    @staticmethod
     def _load_cached_plan_steps(
         task_description: str,
         environment_configuration_id: int | None,
+        context_fingerprint: str = '',
+        allow_legacy: bool = True,
     ) -> list[dict[str, Any]]:
+        """Latest initial plan for this goal and environment, generated under the same planning context.
+
+        Plans persisted before fingerprints existed carry none; they stay valid for ordinary goals
+        (``allow_legacy``) but a goal about the target device must be replanned once with the device names.
+        """
         close_old_connections()
         from apps.ai_testing.models import AIExecutionPlanRevision
 
-        revision = (
+        revisions = list(
             AIExecutionPlanRevision.objects.filter(
                 source_goal=task_description,
                 reason='initial',
                 execution_record__environment_configuration_id=environment_configuration_id,
             )
-            .order_by('-created_at', '-id')
-            .first()
+            .select_related('execution_record')
+            .order_by('-created_at', '-id')[:25]
         )
+
+        def proven(candidate) -> bool:
+            return str(getattr(candidate.execution_record, 'status', '') or '') == 'passed'
+
+        def acceptable(candidate) -> bool:
+            if not isinstance(candidate.plan, dict):
+                return False
+            stored = str(candidate.plan.get('context_fingerprint') or '')
+            if not context_fingerprint or stored == context_fingerprint:
+                return True
+            # A plan whose execution passed is proven for an ordinary goal even if the planning contract has
+            # moved on; device goals must replan so the plan reflects the current device configuration.
+            return allow_legacy and (not stored or proven(candidate))
+
+        candidates = [candidate for candidate in revisions if acceptable(candidate)]
+        # Prefer the newest proven plan; a freshly generated plan that failed must not shadow one that passed.
+        revision = next((candidate for candidate in candidates if proven(candidate)), None) or (candidates[0] if candidates else None)
         if revision is None or not isinstance(revision.plan, dict):
             return []
         steps = revision.plan.get('steps')
@@ -1789,6 +2360,16 @@ class GlobalTestPlanner:
 
         config = AITestPromptConfig.get_active_config(prompt_type)
         return config.content.strip() if config and config.content else ''
+
+    @staticmethod
+    def _load_environment_devices(configuration_id: int | None) -> list[dict[str, object]]:
+        close_old_connections()
+        if configuration_id is None:
+            return []
+        from apps.core.models import EnvironmentConfiguration
+
+        configuration = EnvironmentConfiguration.objects.filter(id=configuration_id).first()
+        return environment_device_resources(configuration) if configuration is not None else []
 
     @staticmethod
     def _load_data_factory_resources(configuration_id: int | None) -> list[dict[str, object]]:

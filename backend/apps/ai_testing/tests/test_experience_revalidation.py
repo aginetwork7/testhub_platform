@@ -7,6 +7,7 @@ from apps.ai_testing.runtime.pyui_compat import PyUICompatAgent
 
 
 class ExperienceRevalidationTests(TransactionTestCase):
+    serialized_rollback = True  # keep migration-seeded prompt/model rows for later test classes (keepdb runs)
     def test_successful_revalidation_persists_current_audit(self) -> None:
         project = AiProject.objects.create(name='Experience Project')
         agent = PyUICompatAgent(ai_project_id=project.id, execution_user_id=1)

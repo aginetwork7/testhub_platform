@@ -49,6 +49,8 @@ def evaluate_step_assertions(execution_record_id: int, step_order: int) -> list[
                 assertion=dict(raw_assertion) if isinstance(raw_assertion, Mapping) else {'raw': str(raw_assertion)},
                 status=status,
                 actual=actual,
+                attempt_number=attempt.attempt_number,
+                plan_revision_number=revision.revision_number,
             )
             result.evidence_artifacts.add(*[artifact for artifact in evidence if artifact.id in evidence_ids])
             statuses.append(status)

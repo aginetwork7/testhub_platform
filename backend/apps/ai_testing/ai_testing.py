@@ -52,7 +52,7 @@ def analyze_task_sync(task_description: str, execution_mode='text', case_mode='f
     return asyncio.run(agent.analyze_task(task_description, case_mode=case_mode, task_steps=task_steps))
 
 
-def run_full_process_sync(task_description: str, analysis_callback=None, step_callback=None, should_stop=None, execution_mode='text', enable_gif=True, case_name=None, case_mode='freeform', task_steps=None, use_cache=True, execution_user_id=None, environment_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
+def run_full_process_sync(task_description: str, analysis_callback=None, step_callback=None, should_stop=None, execution_mode='text', enable_gif=True, case_name=None, case_mode='freeform', task_steps=None, use_cache=True, execution_user_id=None, environment_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None, force_replan=False):
     logger.info(f'DEBUG: Entering run_full_process_sync with execution_mode={execution_mode}, enable_gif={enable_gif}')
 
     agent_class = get_agent_class(execution_mode, case_mode=case_mode, task_steps=task_steps)
@@ -70,6 +70,8 @@ def run_full_process_sync(task_description: str, analysis_callback=None, step_ca
     agent = agent_class(**agent_kwargs)
     if hasattr(agent, 'use_cache'):
         agent.use_cache = bool(use_cache)
+    if hasattr(agent, 'force_replan'):
+        agent.force_replan = bool(force_replan)
 
     logger.info(f'DEBUG: Agent created successfully ({type(agent).__name__}), starting asyncio.run')
     return asyncio.run(

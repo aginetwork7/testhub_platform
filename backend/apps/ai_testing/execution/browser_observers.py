@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import time
 from io import BytesIO
 from typing import Any, Protocol
 
@@ -163,8 +164,11 @@ class DOMStateObserver:
                 if assert_kind == 'field_value':
                     value = await locator.first.evaluate(
                         """element => {
-                            if ('value' in element && element.value != null) return String(element.value);
-                            return String(element.getAttribute('aria-valuetext') || element.getAttribute('aria-label') || element.textContent || '').trim();
+                            // Only form fields carry a meaningful .value; a <button> also has one (always '') and
+                            // must report its visible label instead, e.g. a dropdown trigger showing "Magic V2".
+                            const formField = ['INPUT', 'TEXTAREA', 'SELECT', 'OUTPUT', 'METER', 'PROGRESS'].includes(element.tagName);
+                            if (formField && 'value' in element && element.value != null) return String(element.value);
+                            return String(element.getAttribute('aria-valuetext') || element.getAttribute('aria-label') || element.innerText || element.textContent || '').trim();
                         }"""
                     ) if visible else None
                     artifacts.append({'type': 'structured_value', 'locator': locator_text, 'value': value})
@@ -190,7 +194,7 @@ class DOMStateObserver:
                 if visible and target_visual_content == 'image':
                     has_visual_content = bool(await locator.first.evaluate(
                         """element => [element, ...element.querySelectorAll('img, canvas, video, [style]')].some(candidate => {
-                            if (candidate instanceof HTMLImageElement) return candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
+                            if (candidate instanceof HTMLImageElement) return candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
                             if (candidate instanceof HTMLCanvasElement) return candidate.width > 1 && candidate.height > 1;
                             if (candidate instanceof HTMLVideoElement) return candidate.readyState >= 2 && candidate.videoWidth > 1 && candidate.videoHeight > 1;
                             return getComputedStyle(candidate).backgroundImage !== 'none';
@@ -229,6 +233,9 @@ class VisualFrameObserver:
             if not _native_playback_satisfies(assertions, context.native_media_before, native_after):
                 visual_progress = await compare_playback_timestamps(context.visual_frames_before, after)
             if visual_progress is not None:
+                elapsed = frames_elapsed_seconds(context.visual_frames_before, after)
+                if elapsed is not None:
+                    visual_progress = {**visual_progress, 'elapsed_seconds': elapsed}
                 artifacts.append({'type': 'playback_visual_progress', **visual_progress})
         return artifacts
 
@@ -302,6 +309,21 @@ async def collect_browser_observations(page: Any, assertions: Sequence[Mapping[s
     return artifacts
 
 
+def frames_elapsed_seconds(
+    before_frames: Sequence[Mapping[str, object]],
+    after_frames: Sequence[Mapping[str, object]],
+) -> float | None:
+    """Wall-clock seconds between the before and after frame captures, when both are stamped."""
+    try:
+        before_at = float(before_frames[0].get('captured_at')) if before_frames else None
+        after_at = float(after_frames[0].get('captured_at')) if after_frames else None
+    except (TypeError, ValueError):
+        return None
+    if before_at is None or after_at is None or after_at < before_at:
+        return None
+    return round(after_at - before_at, 3)
+
+
 async def capture_largest_media_frame(page: Any) -> bytes | None:
     """Screenshot the dominant visible player surface so only its burned-in clock is in view."""
     try:
@@ -335,6 +357,7 @@ async def capture_visual_frames(page: Any, assertions: Sequence[Mapping[str, obj
     return [{
         'content_hash': hashlib.sha256(frame).hexdigest(),
         'image_url': f'data:image/png;base64,{base64.b64encode(frame).decode("ascii")}',
+        'captured_at': time.time(),
     }]
 
 

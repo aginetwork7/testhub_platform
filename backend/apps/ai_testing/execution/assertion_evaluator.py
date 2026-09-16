@@ -150,6 +150,10 @@ def _has_conflicting_values(artifacts: Sequence[Mapping[str, Any]], key: str) ->
     return len(values.difference({None})) > 1
 
 
+def _is_case_specific(expected_text: str) -> bool:
+    return any(character.isupper() for character in str(expected_text or ''))
+
+
 def _compare(assertion: AssertionSpec, actual_value: object, actual_key: str) -> AssertionEvaluation:
     expected_value = assertion.expected.get('value')
     if actual_value is None:
@@ -164,9 +168,11 @@ def _compare(assertion: AssertionSpec, actual_value: object, actual_key: str) ->
         expected_digits = ''.join(character for character in expected_text if character.isdigit())
         passed = bool(expected_digits) and actual_digits == expected_digits
     elif assertion.operator == 'contains':
-        passed = expected_text.casefold() in actual_text.casefold()
+        # An expected value written with capitals ("Close") is a specific label and must match its casing, so
+        # an unrelated lower-case "close" icon cannot satisfy it; an all-lower-case expectation stays lenient.
+        passed = expected_text in actual_text if _is_case_specific(expected_text) else expected_text.casefold() in actual_text.casefold()
     elif assertion.operator == 'starts_with':
-        passed = actual_text.casefold().startswith(expected_text.casefold())
+        passed = actual_text.startswith(expected_text) if _is_case_specific(expected_text) else actual_text.casefold().startswith(expected_text.casefold())
     elif assertion.operator == 'not_contains':
         passed = expected_text.casefold() not in actual_text.casefold()
     elif assertion.operator == 'matches':
@@ -242,8 +248,13 @@ def _evaluate_playback_progress(
     native_playback_passed = advanced_seconds >= minimum and after_is_playing
     visual_progress = _first_value(artifacts_by_type.get('playback_visual_progress', []), 'advanced_seconds')
     visual_confidence = _first_value(artifacts_by_type.get('playback_visual_progress', []), 'confidence')
+    visual_elapsed = _first_value(artifacts_by_type.get('playback_visual_progress', []), 'elapsed_seconds')
     try:
         visual_playback_passed = float(visual_progress) >= minimum and float(visual_confidence) >= 0.8
+        if visual_playback_passed and visual_elapsed is not None:
+            # A clock cannot advance more than real time plus the requested seek (with slack);
+            # anything beyond that is a misread, not progress.
+            visual_playback_passed = float(visual_progress) <= float(visual_elapsed) + minimum + 30.0
     except (TypeError, ValueError):
         visual_playback_passed = False
     changed_canvas_indexes = _changed_canvas_indexes(artifacts_by_type) if assertion.assert_kind == 'stream_state' else []
@@ -255,6 +266,7 @@ def _evaluate_playback_progress(
             'after_is_playing': after_is_playing,
             'visual_advanced_seconds': visual_progress,
             'visual_confidence': visual_confidence,
+            'visual_elapsed_seconds': visual_elapsed,
             'changed_canvas_indexes': changed_canvas_indexes,
         },
         'Playback state advanced.' if native_playback_passed else

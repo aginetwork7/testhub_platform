@@ -177,9 +177,13 @@ class AIAgentRoutingTests(SimpleTestCase):
 
 class AIExecutionRecordViewSetQuerysetTests(TestCase):
     def test_run_adhoc_passes_execution_record_to_runtime(self) -> None:
-        source = inspect.getsource(AIExecutionRecordViewSet.run_adhoc)
+        from apps.ai_testing.execution import dispatch
 
-        self.assertIn('execution_record_id=execution_record.id', source)
+        view_source = inspect.getsource(AIExecutionRecordViewSet.run_adhoc)
+        execute_source = inspect.getsource(dispatch.execute_ai_record)
+
+        self.assertIn('dispatch_ai_execution(execution_record.id', view_source)
+        self.assertIn('execution_record_id=execution_record.id', execute_source)
 
     def test_resolve_environment_uses_longest_natural_language_alias(self) -> None:
         user = User.objects.create_user(username='planner_owner', password='pass123')
