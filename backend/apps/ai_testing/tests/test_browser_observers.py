@@ -206,6 +206,14 @@ class BrowserObserverTests(unittest.TestCase):
         self.assertEqual(asyncio.run(capture_largest_media_frame(page)), b'player')
         self.assertIsNone(asyncio.run(capture_largest_media_frame(SimpleNamespace())))
 
+    def test_frames_elapsed_seconds_requires_both_timestamps(self) -> None:
+        from apps.ai_testing.execution.browser_observers import frames_elapsed_seconds
+
+        self.assertEqual(frames_elapsed_seconds([{'captured_at': 100.0}], [{'captured_at': 112.5}]), 12.5)
+        self.assertIsNone(frames_elapsed_seconds([{'content_hash': 'x'}], [{'captured_at': 112.5}]))
+        self.assertIsNone(frames_elapsed_seconds([{'captured_at': 120.0}], [{'captured_at': 112.5}]))
+        self.assertIsNone(frames_elapsed_seconds([], [{'captured_at': 112.5}]))
+
     def test_native_media_observer_is_selected_for_playback_assertion(self) -> None:
         names = observer_names_for_assertions([{'assert_kind': 'playback'}])
 
@@ -350,3 +358,12 @@ class BrowserObserverTests(unittest.TestCase):
         }])
         self.assertIn('alpha <= 0.05', page.script)
         self.assertIn('document.elementFromPoint', page.script)
+
+class FieldValueCaptureSourceTests(__import__('django.test', fromlist=['SimpleTestCase']).SimpleTestCase):
+    def test_field_value_reads_value_only_from_form_fields(self) -> None:
+        import inspect
+        from apps.ai_testing.execution import browser_observers
+
+        source = inspect.getsource(browser_observers)
+        self.assertIn("['INPUT', 'TEXTAREA', 'SELECT', 'OUTPUT', 'METER', 'PROGRESS'].includes(element.tagName)", source)
+        self.assertIn('element.innerText || element.textContent', source)

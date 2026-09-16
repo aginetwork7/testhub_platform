@@ -7,25 +7,154 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from asgiref.sync import sync_to_async
 from django.db import DatabaseError, models, transaction
+from django.utils import timezone
+
+from apps.ai_testing.execution.intent_text import (
+    continuing_collection_locator,
+    display_value_from_target,
+    exact_text_locator,
+    expects_true,
+    popup_intent_mismatch,
+)
+from apps.ai_testing.execution.environment_resources import default_device_camera_names, environment_device_resources, is_text_input, refers_to_target_device
+from apps.ai_testing.execution.model_errors import is_transient_llm_error
 
 
 logger = logging.getLogger('django')
 
-ACTION_CACHE_SCHEMA_VERSION = 'v5'
+ACTION_CACHE_SCHEMA_VERSION = 'v6'
+ACTION_CACHE_TTL_DAYS = 30
+ACTION_CACHE_VARIANTS_PER_STEP = 8
+PAGE_SKELETON_JS = """() => {
+    // Structural signature of the rendered page: tags, roles, stable anchors and state attributes of visible
+    // elements, with repeated siblings collapsed. Text, counts and list lengths do not participate, so the same
+    // page state keeps one fingerprint while a data refresh, an opened dialog or an expanded panel is still told apart.
+    const MAX_NODES = 6000;
+    const MAX_DEPTH = 14;
+    const STATE_ATTRS = ['aria-expanded', 'aria-selected', 'aria-checked', 'aria-pressed', 'aria-disabled', 'aria-modal', 'data-state', 'disabled', 'open'];
+    const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META']);
+    let visited = 0;
+    const identity = (element) => {
+        const tag = element.tagName.toLowerCase();
+        let key = tag;
+        const role = element.getAttribute('role');
+        if (role) key += `[role=${role}]`;
+        if (element.id && !/\\d{3,}/.test(element.id)) key += `#${element.id}`;
+        const testId = element.getAttribute('data-testid');
+        if (testId) key += `[testid=${testId.slice(0, 40)}]`;
+        const label = element.getAttribute('aria-label');
+        if (label) key += `[label=${label.slice(0, 40)}]`;
+        if (tag === 'input') key += `[type=${element.getAttribute('type') || 'text'}]`;
+        for (const attr of STATE_ATTRS) {
+            const value = element.getAttribute(attr);
+            if (value !== null) key += `[${attr}=${String(value).slice(0, 20)}]`;
+        }
+        return key;
+    };
+    const visible = (element) => {
+        if (typeof element.checkVisibility === 'function') return element.checkVisibility();
+        return element.getClientRects().length > 0;
+    };
+    const walk = (element, depth) => {
+        if (depth > MAX_DEPTH) return '';
+        const parts = [];
+        const seen = new Map();
+        for (const child of element.children) {
+            if (visited++ > MAX_NODES) break;
+            if (SKIP.has(child.tagName)) continue;
+            const tag = child.tagName.toLowerCase();
+            if (tag === 'svg') {
+                if (!seen.has('svg')) { seen.set('svg', parts.length); parts.push('svg'); }
+                continue;
+            }
+            if (!visible(child)) continue;
+            const key = identity(child);
+            if (seen.has(key)) {
+                const index = seen.get(key);
+                if (!parts[index].endsWith('*')) parts[index] += '*';
+                continue;
+            }
+            seen.set(key, parts.length);
+            const inner = walk(child, depth + 1);
+            parts.push(inner ? `${key}(${inner})` : key);
+        }
+        return parts.join(',');
+    };
+    return `body(${walk(document.body, 0)})`;
+}"""
+EXPERIENCE_AUTO_VERIFY_SUCCESSES = 2
 
+# Provider spikes (429/5xx) commonly last a few minutes: ten exponential retries capped at 45s wait about
+# five minutes in total, still inside the default 600s step budget which is checked on every retry.
+TRANSIENT_MODEL_RETRIES = 20
+TRANSIENT_MODEL_BACKOFF_CAP_SECONDS = 45.0
+ICON_TOOLTIP_PROBE_LIMIT = 20
+IMAGE_RENDER_WAIT_MS = 45000
+STREAM_START_WAIT_MS = 20000
+PLANNER_CONTROL_KEYS = ('selector', 'group_selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'has_visual_content', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'dialog_layer', 'z_index', 'container_text')
+ICON_TOOLTIP_HOVER_MS = 350
+# Returns the tooltip an element is described by (aria-describedby) plus every short top-layer text, so a
+# hover can be attributed to the button that produced it even when the tooltip is a body-level portal.
+TOOLTIP_PROBE_JS = """(selector) => {
+    const texts = [];
+    const push = (value) => {
+        const text = String(value || '').replace(/\\s+/g, ' ').trim();
+        if (text && text.length <= 80 && !texts.includes(text)) texts.push(text);
+    };
+    for (const element of document.querySelectorAll('[role="tooltip"]')) push(element.innerText);
+    for (const element of document.body.children) {
+        if (element.id === 'root' || ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(element.tagName)) continue;
+        push(element.innerText);
+    }
+    let described = '';
+    if (selector) {
+        let element = null;
+        try { element = document.querySelector(selector); } catch (error) { element = null; }
+        const describedBy = element ? (element.getAttribute('aria-describedby') || '') : '';
+        for (const id of describedBy.split(/\\s+/).filter(Boolean)) {
+            const target = document.getElementById(id);
+            const text = target ? String(target.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+            if (text) { described = text.slice(0, 80); break; }
+        }
+    }
+    return { described, texts };
+}"""
+MEDIA_INTENT_PATTERN = re.compile(
+    r'\b(video|stream|streaming|player|playback|canvas|image|img|thumbnail|preview|picture|photo|snapshot|media|feed|frame|footage|live view|camera view)\b',
+    re.IGNORECASE,
+)
 RENDERED_VISUAL_ELEMENTS_JS = """
 () => {
     const structuralSelector = (target) => {
+        const uniqueAnchor = (node) => {
+            if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`;
+            const testId = node.getAttribute('data-testid');
+            if (testId && document.querySelectorAll(`[data-testid=${JSON.stringify(testId)}]`).length === 1) return `[data-testid=${JSON.stringify(testId)}]`;
+            if (node.parentElement === document.body) {
+                const classes = typeof node.className === 'string' ? node.className.split(/\\s+/).filter(Boolean) : [];
+                if (classes.length) {
+                    const candidate = `body > ${node.tagName.toLowerCase()}${classes.map(token => `.${CSS.escape(token)}`).join('')}`;
+                    if (document.querySelectorAll(candidate).length === 1) return candidate;
+                }
+            }
+            return '';
+        };
         const parts = [];
         let current = target;
         while (current && current !== document.body) {
+            const anchor = uniqueAnchor(current);
+            if (anchor) {
+                const anchored = parts.length ? `${anchor} > ${parts.join(' > ')}` : anchor;
+                if (document.querySelectorAll(anchored).length === 1) return anchored;
+            }
             const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
-            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
+            const position = siblings.indexOf(current) + 1;
+            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${position})`);
             if (current.parentElement === document.body) {
                 const candidate = `body > ${parts.join(' > ')}`;
                 if (document.querySelectorAll(candidate).length === 1) return candidate;
@@ -35,7 +164,7 @@ RENDERED_VISUAL_ELEMENTS_JS = """
         return '';
     };
     const rendered = (element) => {
-        if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 1 && element.naturalHeight > 1;
+        if (element instanceof HTMLImageElement) return element.naturalWidth > 1 && element.naturalHeight > 1;
         if (element instanceof HTMLCanvasElement) return element.width > 1 && element.height > 1;
         if (element instanceof HTMLVideoElement) return element.readyState >= 2 && element.videoWidth > 1;
         return false;
@@ -67,13 +196,13 @@ VISUAL_CONTENT_SETTLED_JS = """
         return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
     };
     const rendered = (element) => {
-        if (element instanceof HTMLImageElement) return element.complete && element.naturalWidth > 1 && element.naturalHeight > 1;
+        if (element instanceof HTMLImageElement) return element.naturalWidth > 1 && element.naturalHeight > 1;
         if (element instanceof HTMLCanvasElement) return element.width > 1 && element.height > 1;
         if (element instanceof HTMLVideoElement) return element.readyState >= 2 && element.videoWidth > 1;
         return getComputedStyle(element).backgroundImage !== 'none';
     };
     const pending = (element) => {
-        if (element instanceof HTMLImageElement) return !element.complete;
+        if (element instanceof HTMLImageElement) return !element.complete && !(element.naturalWidth > 1);
         if (element instanceof HTMLVideoElement) return element.readyState < 2 && !element.error && Boolean(element.currentSrc || element.src || element.srcObject);
         return false;
     };
@@ -88,6 +217,20 @@ VISUAL_CONTENT_SETTLED_JS = """
     return !Array.from(document.querySelectorAll('img, video')).filter(visible).some(pending);
 }
 """
+
+
+class _PointClickTarget:
+    """Minimal locator stand-in that clicks a page coordinate recovered from observed geometry."""
+
+    def __init__(self, page, x: float, y: float):
+        self._page, self.x, self.y = page, x, y
+
+    async def click(self, timeout=None, **kwargs):
+        await self._page.mouse.click(self.x, self.y)
+
+
+class EnvironmentBootstrapError(RuntimeError):
+    """The target application could not be reached or logged into before any step ran (an environment outage)."""
 
 
 class PlannerRetryExhaustedError(ValueError):
@@ -110,8 +253,9 @@ class PyUICompatHistory:
 class PyUICompatAgent:
     """Initial pyuitest-inspired runtime scaffold for AI intelligent mode."""
 
-    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, environment_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None):
+    def __init__(self, execution_mode='planner_v2', enable_gif=False, case_name=None, use_cache=True, execution_user_id=None, environment_configuration=None, ai_project_id=None, execution_record_id=None, ai_case_id=None, force_replan=False):
         self.execution_mode = execution_mode
+        self.force_replan = bool(force_replan)
         self.enable_gif = enable_gif
         self.case_name = case_name or 'Adhoc Task'
         self.use_cache = bool(use_cache)
@@ -121,12 +265,28 @@ class PyUICompatAgent:
         self.execution_record_id = execution_record_id
         self.ai_case_id = ai_case_id
         self._cache_context_by_step = {}
+        self._cache_key_by_step = {}
         self._recent_network_events = []
         self._recent_download_events = []
         self._download_event_baseline = 0
         self._execution_resources = []
         self._last_actionable_controls = []
         self._rendered_visual_baseline = None
+        self._rendered_visual_baseline_elements = None
+        self._tooltip_name_cache = {}
+        self._pre_action_url = ''
+        self._pre_action_control_names = set()
+        self._pre_action_blocking_layer = False
+        self._last_click_box = None
+        self._plan_context_fingerprint = ''
+        self._step_deadline = None
+        self._pre_action_visual_frames = None
+        self._observed_canvas_baseline = None
+        self._runtime_events = []
+        self._observable_baseline = None
+        self._binding_verified_predecessors = []
+        self._swallowed_action_retries = set()
+        self._last_action_effect_note = ''
         self._last_accessibility_snapshot = {'snapshot_id': '', 'page_version': '', 'nodes': []}
         self._mcp_client = None
         self._active_planning_step = None
@@ -177,17 +337,26 @@ class PyUICompatAgent:
     async def run_full_process(self, task_description, analysis_callback=None, step_callback=None, should_stop=None, case_mode='freeform', task_steps=None):
         execution_steps = task_steps
         resolved_case_mode = case_mode
+        plan_source = 'persisted'
+        self._seed_environment_resources()
         if case_mode == 'freeform':
             from apps.ai_testing.global_planner import GlobalTestPlanner
 
-            execution_steps = await GlobalTestPlanner().create_plan(
+            planner = GlobalTestPlanner()
+            execution_steps = await planner.create_plan(
                 self._freeform_planning_goal(task_description, task_steps),
                 getattr(self.environment_configuration, 'id', None),
-                use_cache=self.use_cache,
+                # force_replan bypasses only the plan cache; step action reuse stays governed by use_cache.
+                use_cache=self.use_cache and not self.force_replan,
             )
+            self._plan_context_fingerprint = str(getattr(planner, 'last_context_fingerprint', '') or '')
+            plan_source = str(getattr(planner, 'last_plan_source', '') or 'model')
             resolved_case_mode = 'hybrid'
 
         planned_tasks = self._build_planned_tasks(task_description, case_mode=resolved_case_mode, task_steps=execution_steps)
+        if self._plan_context_fingerprint:
+            # Lets the persistence layer tag the initial plan with the context it was generated under.
+            await self._emit(step_callback, {'type': 'plan_context', 'fingerprint': self._plan_context_fingerprint})
         if analysis_callback is not None:
             await self._emit(analysis_callback, planned_tasks)
 
@@ -196,6 +365,7 @@ class PyUICompatAgent:
                 'case_mode': resolved_case_mode,
                 'task_count': len(planned_tasks),
                 'source': 'global_planner' if case_mode == 'freeform' else ('planner_v2_bootstrap' if case_mode != 'hybrid' else 'planner_v2_hybrid'),
+                'plan_source': plan_source,
                 'step_retry_map': {},
                 'environment_configuration': self._planner_configuration_trace(),
                 'global_plan': self._planner_step_trace(execution_steps) if case_mode == 'freeform' else [],
@@ -211,6 +381,9 @@ class PyUICompatAgent:
                 'model_attempts': 0,
                 'experience_hit': 0,
                 'experience_write': 0,
+                'stale_skip': 0,
+                'plan_source': plan_source,
+                'plan_cache_hit': 1 if plan_source == 'cache' else 0,
             },
             case_report={
                 'case_id': self.case_name,
@@ -333,11 +506,14 @@ class PyUICompatAgent:
                     )
 
                     started_at = time.perf_counter()
+                    self._step_deadline = time.monotonic() + self._step_time_budget_seconds()
+                    self._pre_action_visual_frames = None
                     self._download_event_baseline = len(self._recent_download_events)
                     media_state_before = await self._capture_media_state(page)
                     from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
                     visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
                     canvas_frames_before = await capture_canvas_frames(page, step.get('assertions') or [])
+                    self._observed_canvas_baseline = None
                     status = 'completed'
                     error_message = None
                     last_executed_action = step.get('action')
@@ -489,7 +665,7 @@ class PyUICompatAgent:
                         screenshot_rel_path,
                         page,
                         media_state_before,
-                        visual_frames_before,
+                        self._pre_action_visual_frames or visual_frames_before,
                         canvas_frames_before,
                     )
                     assertion_statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
@@ -782,18 +958,32 @@ class PyUICompatAgent:
     async def _get_ai_actions_for_step(self, page, step, history, step_callback=None, step_index=None):
         page_context = await self._build_page_context(page)
         self._cache_context_by_step[self._step_context_key(step)] = page_context
+        self._cache_key_by_step[self._step_context_key(step)] = self._cache_key_for_step(step, page_context)
 
         if self.use_cache:
-            cached_actions = self._load_cached_ai_actions(step, page_context)
+            cached_actions = await self._load_cached_ai_actions(step, page_context)
             if cached_actions:
-                history.cache_stats['hit'] = history.cache_stats.get('hit', 0) + 1
-                history.cache_stats['miss'] = max(0, history.cache_stats.get('miss', 0) - 1)
-                return cached_actions, 'cache'
+                reason = await self._reused_actions_applicable(page, cached_actions)
+                if reason:
+                    # The page shape matched but the cached target is gone or covered: the entry is stale.
+                    history.cache_stats['stale_skip'] = history.cache_stats.get('stale_skip', 0) + 1
+                    logger.info('planner_v2 step %s cached actions skipped: %s', step_index, reason)
+                    await self._delete_cached_ai_actions(step, page_context)
+                else:
+                    history.cache_stats['hit'] = history.cache_stats.get('hit', 0) + 1
+                    history.cache_stats['miss'] = max(0, history.cache_stats.get('miss', 0) - 1)
+                    return cached_actions, 'cache'
 
-        experience_actions = await self._load_verified_experience(step, page_context)
-        if experience_actions:
-            history.cache_stats['experience_hit'] = history.cache_stats.get('experience_hit', 0) + 1
-            return experience_actions, 'experience'
+            # Experience reuse is part of the same opt-in; --no-cache means a fully fresh run.
+            experience_actions = await self._load_verified_experience(step, page_context)
+            if experience_actions:
+                reason = await self._reused_actions_applicable(page, experience_actions)
+                if reason:
+                    history.cache_stats['stale_skip'] = history.cache_stats.get('stale_skip', 0) + 1
+                    logger.info('planner_v2 step %s experience actions skipped: %s', step_index, reason)
+                else:
+                    history.cache_stats['experience_hit'] = history.cache_stats.get('experience_hit', 0) + 1
+                    return experience_actions, 'experience'
 
         planning_step = {
             **step,
@@ -827,9 +1017,17 @@ class PyUICompatAgent:
         history.cache_stats['ai_generated'] = history.cache_stats.get('ai_generated', 0) + len(ai_actions)
         return ai_actions
 
-    async def _plan_ai_step_with_retries(self, page, step, history, step_callback=None, step_index=None, max_attempts=4):
+    @staticmethod
+    def _is_transient_llm_error(error) -> bool:
+        """Provider overload, rate limiting and transport failures are retried; plan rejections are not."""
+        return is_transient_llm_error(error)
+
+    async def _plan_ai_step_with_retries(self, page, step, history, step_callback=None, step_index=None, max_attempts=4, max_transient_retries=TRANSIENT_MODEL_RETRIES):
         last_error = None
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        transient_retries = 0
+        while attempt < max_attempts:
+            attempt += 1
             history.cache_stats['model_attempts'] = history.cache_stats.get('model_attempts', 0) + 1
             try:
                 if attempt > 1:
@@ -853,6 +1051,32 @@ class PyUICompatAgent:
                 planned_actions = await self._plan_ai_step(page, planning_step)
                 return planned_actions
             except Exception as exc:
+                if self._is_transient_llm_error(exc):
+                    transient_retries += 1
+                    history.cache_stats['model_transient_retries'] = history.cache_stats.get('model_transient_retries', 0) + 1
+                    history.artifacts.append({
+                        'type': 'planner_attempt',
+                        'step': step_index,
+                        'attempt': attempt,
+                        'status': 'transient_error',
+                        'error': f'{type(exc).__name__}: {str(exc)[:300]}',
+                    })
+                    if transient_retries > max_transient_retries or self._step_budget_exhausted():
+                        raise PlannerRetryExhaustedError(
+                            f'Planner model unavailable after {transient_retries} transient errors: {str(exc)[:300]}'
+                        ) from exc
+                    delay = min(TRANSIENT_MODEL_BACKOFF_CAP_SECONDS, 2.0 ** transient_retries)
+                    await self._emit(
+                        step_callback,
+                        {'type': 'log', 'content': f"[planner_v2] Step {step_index} planner model temporarily unavailable; retrying in {delay:.0f}s.\n"},
+                    )
+                    await asyncio.sleep(delay)
+                    # Waiting out a provider outage is not test time: push the step deadline by the wait so the
+                    # budget still bounds the page work while the model recovers.
+                    if self._step_deadline is not None:
+                        self._step_deadline += delay
+                    attempt -= 1  # provider hiccups do not consume plan-quality attempts
+                    continue
                 last_error = exc
                 history.artifacts.append(
                     {
@@ -864,6 +1088,9 @@ class PyUICompatAgent:
                     }
                 )
                 if attempt >= max_attempts:
+                    break
+                if self._step_budget_exhausted():
+                    logger.info('planner_v2 step %s time budget exhausted during planning', step_index)
                     break
                 await asyncio.sleep(min(1.0, 0.2 * attempt))
 
@@ -881,6 +1108,27 @@ class PyUICompatAgent:
 
         await self._apply_assertion_bindings(index, step, ai_actions)
         self._rendered_visual_baseline = await self._capture_rendered_visual_baseline(page, step)
+        self._observable_baseline = await self._capture_observable_baseline(page, step)
+        self._pre_action_url = str(getattr(page, 'url', '') or '')
+        # Controls seen while planning this action, keyed by position and text. A committed value display must
+        # differ from them. Position, not selector, identifies a node: a menu option and the control that later
+        # shows the chosen value can share one attribute selector while occupying different places.
+        self._pre_action_control_names = set()
+        self._pre_action_blocking_layer = False
+        for control in self._last_actionable_controls:
+            if not isinstance(control, dict):
+                continue
+            if control.get('blocking_layer') is True:
+                self._pre_action_blocking_layer = True
+            rect = control.get('rect') if isinstance(control.get('rect'), dict) else None
+            if rect:
+                text = ' '.join(str(control.get('name') or '').split())
+                self._pre_action_control_names.add((PyUICompatAgent._rect_key(rect), text))
+        if any(isinstance(a, dict) and a.get('assert_kind') == 'playback' for a in step.get('assertions') or []):
+            from apps.ai_testing.execution.browser_observers import capture_visual_frames
+
+            # Planning can take tens of seconds; measure playback from the moment the action starts.
+            self._pre_action_visual_frames = await capture_visual_frames(page, step.get('assertions') or [])
         history_artifact = {
             'type': 'ai_plan',
             'step': index,
@@ -919,6 +1167,7 @@ class PyUICompatAgent:
                         {'instruction': ai_action},
                     )
                     action_result = tool_result['structuredContent']
+                self._drain_runtime_events(history, index)
                 if history is not None and isinstance(action_result, dict) and action_result.get('before_path'):
                     history.artifacts.extend([
                         {'type': 'playback_before_forward', 'step': index, 'path': action_result['before_path']},
@@ -930,6 +1179,7 @@ class PyUICompatAgent:
                         {'type': 'playback_download_completed', 'step': index, 'path': action_result['download_completed_path']},
                     ])
             except Exception as error:
+                self._drain_runtime_events(history, index)
                 if remaining_replans <= 0:
                     raise
 
@@ -984,6 +1234,15 @@ class PyUICompatAgent:
                 )
                 return
 
+    def _drain_runtime_events(self, history, step_index):
+        """Move runtime decisions (e.g. fill repairs) recorded during actions into the audited artifacts."""
+        if not self._runtime_events:
+            return
+        events, self._runtime_events = self._runtime_events, []
+        if history is None:
+            return
+        history.artifacts.extend({**event, 'step': step_index} for event in events)
+
     async def _persist_replan_failure(self, step_index, step, action, error, page):
         """Record the failed action in the prior immutable plan revision."""
         await self._persist_step_attempt(
@@ -998,17 +1257,46 @@ class PyUICompatAgent:
             None,
         )
 
-    def _cache_file_path(self):
+    def _browser_runtime_setting(self, key, default, minimum, maximum):
+        settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
+        browser = settings.get('ai_testing_browser', {}) if isinstance(settings, dict) else {}
         try:
-            from django.conf import settings
+            return max(minimum, min(maximum, int(browser.get(key, default))))
+        except (TypeError, ValueError):
+            return default
 
-            base_dir = Path(getattr(settings, 'BASE_DIR', Path.cwd())).resolve().parent
-            cache_dir = base_dir / 'Data' / 'Cache'
-        except Exception:
-            cache_dir = Path.cwd() / 'Data' / 'Cache'
+    def _action_cache_ttl(self):
+        return timedelta(days=self._browser_runtime_setting('action_cache_ttl_days', ACTION_CACHE_TTL_DAYS, 1, 365))
 
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        return cache_dir / 'action_cache.json'
+    def _action_cache_variant_limit(self):
+        return self._browser_runtime_setting('action_cache_variants_per_step', ACTION_CACHE_VARIANTS_PER_STEP, 1, 100)
+
+    @staticmethod
+    def _planned_assertion_contract(assertions):
+        """Assertions as the plan stated them, without runtime binding results.
+
+        Binding writes ``target.locator`` (and flattens a nested intent) into the step before the cache entry
+        is written, while the lookup happens before any binding. Hashing the planned contract on both sides is
+        what makes a lookup key equal to the key the entry was stored under.
+        """
+        contract = []
+        for assertion in assertions or []:
+            if not isinstance(assertion, dict):
+                continue
+            item = dict(assertion)
+            target = item.get('target')
+            if isinstance(target, dict):
+                cleaned = {key: value for key, value in target.items() if key not in {'locator', 'selection_basis'}}
+                intent = cleaned.get('intent')
+                while isinstance(intent, dict) and 'intent' in intent:
+                    intent = intent['intent']
+                if isinstance(intent, dict) and 'locator' in intent:
+                    intent = intent['locator']
+                if intent is not None:
+                    cleaned['intent'] = intent
+                item['target'] = cleaned
+            contract.append(item)
+        return contract
 
     def _cache_key_for_step(self, step, page_context=None):
         description = str(step.get('description') or '').strip()
@@ -1025,7 +1313,7 @@ class PyUICompatAgent:
                 ).hexdigest(),
                 'page_fingerprint': context.get('fingerprint', ''),
                 'application_version': context.get('application_version', ''),
-                'assertion_contract': step.get('assertions', []),
+                'assertion_contract': self._planned_assertion_contract(step.get('assertions', [])),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -1033,65 +1321,159 @@ class PyUICompatAgent:
         context_digest = hashlib.sha256(context_payload.encode('utf-8')).hexdigest()[:12]
         return f'{ACTION_CACHE_SCHEMA_VERSION}::{safe_case_name}::step{step_no}::{digest}::{context_digest}'
 
-    def _read_action_cache(self):
-        cache_file = self._cache_file_path()
-        if not cache_file.exists():
-            return {}
+    def _resolved_cache_key(self, step, context):
+        """The key used at lookup time for this step when known, so the entry is stored under the same key."""
+        return self._cache_key_by_step.get(self._step_context_key(step)) or self._cache_key_for_step(step, context)
 
+    def _find_cached_actions_sync(self, cache_key):
+        from django.db.models import F
+
+        from apps.ai_testing.models import AIActionCacheEntry
+
+        now = timezone.now()
+        entry = AIActionCacheEntry.objects.filter(cache_key=cache_key, expires_at__gt=now).first()
+        if entry is None or not self._reusable_action_sequence(entry.actions):
+            return None
+        # A hit keeps the entry alive (sliding expiry); entries nobody uses age out.
+        AIActionCacheEntry.objects.filter(pk=entry.pk).update(
+            hit_count=F('hit_count') + 1, last_hit_at=now, expires_at=now + self._action_cache_ttl(),
+        )
+        return [action for action in entry.actions if isinstance(action, dict)]
+
+    async def _load_cached_ai_actions(self, step, page_context=None):
+        context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
+        if not context.get('fingerprint'):
+            return None  # without a reliable page identity nothing may be reused
         try:
-            payload = json.loads(cache_file.read_text(encoding='utf-8'))
-            return payload if isinstance(payload, dict) else {}
-        except Exception as exc:
-            logger.warning('planner_v2 failed to read action cache: %s', exc)
-            return {}
-
-    def _write_action_cache(self, payload):
-        cache_file = self._cache_file_path()
-        try:
-            cache_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        except Exception as exc:
-            logger.warning('planner_v2 failed to write action cache: %s', exc)
-
-    def _load_cached_ai_actions(self, step, page_context=None):
-        cache = self._read_action_cache()
-        item = cache.get(self._cache_key_for_step(step, page_context))
-        if not isinstance(item, dict):
+            return await sync_to_async(self._find_cached_actions_sync, thread_sensitive=True)(
+                self._cache_key_for_step(step, context),
+            )
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to read action cache: %s', error)
             return None
 
-        actions = item.get('actions')
-        if not isinstance(actions, list) or not actions:
-            return None
+    def _upsert_cached_actions_sync(self, step, safe_actions, context):
+        from apps.ai_testing.models import AIActionCacheEntry
 
-        return [action for action in actions if isinstance(action, dict)]
+        now = timezone.now()
+        description = str(step.get('description') or '').strip()
+        step_no = int(step.get('index') or 0)
+        AIActionCacheEntry.objects.update_or_create(
+            cache_key=self._resolved_cache_key(step, context),
+            defaults={
+                'schema_version': ACTION_CACHE_SCHEMA_VERSION,
+                'project_id': self.ai_project_id,
+                'ai_case_id': self.ai_case_id,
+                'case_name': str(self.case_name or '')[:255],
+                'step_index': step_no,
+                'step_description': description,
+                'page_url': str(context.get('url', ''))[:1000],
+                'page_fingerprint': str(context.get('fingerprint', ''))[:64],
+                'environment_key': self._experience_environment_key()[:200],
+                'permission_fingerprint': self._permission_fingerprint(),
+                'actions': safe_actions,
+                'expires_at': now + self._action_cache_ttl(),
+            },
+        )
+        # Eviction: expired entries go, and one step keeps only its newest page-state variants.
+        AIActionCacheEntry.objects.filter(expires_at__lt=now).delete()
+        variants = AIActionCacheEntry.objects.filter(
+            case_name=str(self.case_name or '')[:255], step_index=step_no, step_description=description,
+        ).order_by('-updated_at').values_list('pk', flat=True)
+        stale = list(variants[self._action_cache_variant_limit():])
+        if stale:
+            AIActionCacheEntry.objects.filter(pk__in=stale).delete()
 
     async def _store_cached_ai_actions(self, step, actions, page_context=None):
         safe_actions = self._safe_experience_actions(actions)
         if not safe_actions:
             return
-
-        cache = self._read_action_cache()
         context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
-        cache[self._cache_key_for_step(step, context)] = {
-            'case_name': self.case_name,
-            'step_num': int(step.get('index') or 0),
-            'step_description': str(step.get('description') or '').strip(),
-            'page_url': context.get('url', ''),
-            'page_fingerprint': context.get('fingerprint', ''),
-            'environment_key': self._experience_environment_key(),
-            'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'actions': safe_actions,
-        }
-        self._write_action_cache(cache)
+        if not context.get('fingerprint'):
+            return
+        try:
+            await sync_to_async(self._upsert_cached_actions_sync, thread_sensitive=True)(step, safe_actions, context)
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to write action cache: %s', error)
 
-    def _delete_cached_ai_actions(self, step, page_context=None):
-        cache = self._read_action_cache()
-        removed = cache.pop(self._cache_key_for_step(step, page_context), None)
-        if removed is not None:
-            self._write_action_cache(cache)
+    def _delete_cached_actions_sync(self, cache_key):
+        from apps.ai_testing.models import AIActionCacheEntry
+
+        return AIActionCacheEntry.objects.filter(cache_key=cache_key).delete()[0]
+
+    async def _delete_cached_ai_actions(self, step, page_context=None):
+        context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
+        try:
+            return await sync_to_async(self._delete_cached_actions_sync, thread_sensitive=True)(
+                self._resolved_cache_key(step, context),
+            )
+        except DatabaseError as error:
+            logger.warning('planner_v2 failed to delete action cache entry: %s', error)
+            return 0
+
+    async def _reused_actions_applicable(self, page, actions) -> str:
+        """'' when reused actions can run on the current page, else why not (target missing or hidden, dialog open).
+
+        Cached and experience actions skip the planner's validators, so the first action's target is checked
+        against the live DOM before anything is clicked; a stale sequence falls through to a fresh plan instead
+        of acting on the wrong element.
+        """
+        if page is None or not isinstance(actions, list):
+            return ''
+        # A reused sequence skips the planner observation, so refresh the pre-action baselines the binders and
+        # effect detection rely on (control names/positions, accessibility snapshot) from the live page here.
+        try:
+            controls = await self._build_actionable_controls(page)
+        except Exception:
+            controls = None
+        if isinstance(controls, list):
+            self._last_actionable_controls = self._planner_control_baseline(controls)
+            try:
+                from apps.ai_testing.execution.page_observation import capture_accessibility_snapshot
+
+                self._last_accessibility_snapshot = await capture_accessibility_snapshot(page)
+            except Exception:
+                pass
+        first = next((action for action in actions if isinstance(action, dict) and action.get('action') != 'assert'), None)
+        if first is None:
+            return ''
+        selector = str(first.get('selector') or '').strip()
+        role = str(first.get('role') or '').strip()
+        accessible_name = str(first.get('accessible_name') or '').strip()
+        interactive = str(first.get('action') or '') in {'click', 'hover', 'fill', 'select', 'press', 'type', 'scroll'}
+        try:
+            if selector:
+                locator = page.locator(selector)
+                if await locator.count() == 0:
+                    return f'selector not on page: {selector[:120]}'
+                if interactive and not await locator.first.is_visible():
+                    return f'selector hidden: {selector[:120]}'
+            elif role and accessible_name:
+                if await page.get_by_role(role, name=accessible_name, exact=True).count() == 0:
+                    return f'role target not on page: {role} {accessible_name[:60]}'
+            else:
+                return ''
+        except Exception as error:
+            return f'target probe failed: {str(error)[:120]}'
+        if not isinstance(controls, list):
+            return ''
+        from apps.ai_testing.execution.blocking_state import build_blocking_state
+
+        blocking_state = build_blocking_state(controls)
+        if blocking_state.get('active_layer_ids'):
+            inside_layer = any(
+                isinstance(control, dict)
+                and control.get('blocking_layer') is True
+                and str(control.get('selector') or '').strip() == selector
+                for control in controls
+            )
+            if not inside_layer:
+                return 'a blocking dialog is open and the reused target is outside it'
+        return ''
 
     async def _invalidate_reused_actions(self, step, action_source):
         if action_source == 'cache':
-            self._delete_cached_ai_actions(step)
+            await self._delete_cached_ai_actions(step)
         elif action_source == 'experience':
             await self._invalidate_verified_experience(step)
 
@@ -1104,17 +1486,25 @@ class PyUICompatAgent:
         return str(getattr(configuration, 'environment', '') or '').strip()
 
     async def _build_page_context(self, page):
+        """Identity of the current page state for action reuse: URL path, masked title and the DOM skeleton.
+
+        Body text used to be part of the fingerprint, which made every data refresh (new alert, another camera
+        name, a clock) a cache miss and piled up dozens of variants per step. The skeleton ignores text, counts
+        and list lengths while still separating an opened dialog or an expanded panel from the base page. When
+        the skeleton cannot be captured the fingerprint is empty and nothing is reused for this step.
+        """
         if page is None:
             return {}
         raw_url = str(getattr(page, 'url', '') or '').strip()
         parsed_url = urlsplit(raw_url)
         normalized_url = urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, '', ''))
         page_title = ''
-        page_text = ''
         application_version = ''
         try:
             page_title = str(await page.title()).strip()
-            page_text = str(await page.locator('body').inner_text(timeout=1000)).strip()
+        except Exception:
+            page_title = ''
+        try:
             version_meta = page.locator('meta[name="application-version"]')
             version_node = page.locator('[data-app-version]')
             if await version_meta.count():
@@ -1127,16 +1517,28 @@ class PyUICompatAgent:
                 ).strip()
         except (AttributeError, RuntimeError, TypeError, TimeoutError):
             pass
+        skeleton = ''
+        try:
+            skeleton = str(await page.evaluate(PAGE_SKELETON_JS) or '').strip()
+        except Exception as error:
+            logger.info('planner_v2 page skeleton unavailable: %s', error)
+        context = {'url': normalized_url[:1000], 'fingerprint': '', 'application_version': application_version}
+        if not skeleton:
+            return context
         fingerprint_source = json.dumps(
-            {'url': normalized_url, 'title': page_title, 'text': re.sub(r'\s+', ' ', page_text)[:4000]},
+            {'url': normalized_url, 'title': self._structural_text(page_title, limit=200), 'skeleton': skeleton},
             ensure_ascii=True,
             sort_keys=True,
         )
-        return {
-            'url': normalized_url[:1000],
-            'fingerprint': hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest(),
-            'application_version': application_version,
-        }
+        context['fingerprint'] = hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()
+        context['skeleton_size'] = len(skeleton)
+        return context
+
+    @staticmethod
+    def _structural_text(page_text, limit=4000):
+        """Page text with volatile digit runs masked, so live counters and clocks keep the same fingerprint."""
+        collapsed = re.sub(r'\s+', ' ', str(page_text or '')).strip()
+        return re.sub(r'\d+', '#', collapsed)[:limit]
 
     @staticmethod
     def _intent_hash(step):
@@ -1148,7 +1550,7 @@ class PyUICompatAgent:
 
     @staticmethod
     def _assertion_contract_hash(step):
-        contract = step.get('assertions', []) if isinstance(step, dict) else []
+        contract = PyUICompatAgent._planned_assertion_contract(step.get('assertions', []) if isinstance(step, dict) else [])
         serialized = json.dumps(contract, ensure_ascii=True, separators=(',', ':'), sort_keys=True)
         return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
@@ -1161,37 +1563,111 @@ class PyUICompatAgent:
             selector = str(action.get('selector') or '').lower()
             if action.get('action') == 'fill' and any(token in selector for token in ('password', 'secret', 'token')):
                 return []
-        return [action for action in serialized if isinstance(action, dict)]
+        safe = [action for action in serialized if isinstance(action, dict)]
+        # An assert-only outcome depends on the page state of that moment; replaying it would skip the step's
+        # action altogether (a cached "assert" for "Click Deactivate" deactivated nobody).
+        if not PyUICompatAgent._reusable_action_sequence(safe):
+            return []
+        return safe
+
+    @staticmethod
+    def _reusable_action_sequence(actions) -> bool:
+        """A stored sequence is worth replaying only if it performs something; assert/wait alone is not an action."""
+        return isinstance(actions, list) and any(
+            isinstance(action, dict) and str(action.get('action') or '') not in {'assert', 'wait', ''}
+            for action in actions
+        )
+
+    def _experience_lookup(self, step, page_context):
+        return {
+            'project_id': self.ai_project_id,
+            'intent_hash': self._intent_hash(step),
+            'page_fingerprint': page_context.get('fingerprint', ''),
+            'environment_key': self._experience_environment_key(),
+            'permission_fingerprint': self._permission_fingerprint(),
+            'assertion_contract_hash': self._assertion_contract_hash(step),
+        }
+
+    def _experience_reuse_policy(self):
+        """'auto_verified' (default) reuses any verified experience; 'confirmed_only' requires a human confirmation."""
+        settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
+        browser = settings.get('ai_testing_browser', {}) if isinstance(settings, dict) else {}
+        policy = str(browser.get('experience_reuse_policy') or '').strip().lower()
+        return policy if policy in {'auto_verified', 'confirmed_only'} else 'auto_verified'
+
+    def _find_experience_actions(self, step, page_context):
+        from apps.ai_testing.models import AIExecutionExperience
+
+        queryset = AIExecutionExperience.objects.filter(
+            project_id=self.ai_project_id,
+            intent_hash=self._intent_hash(step),
+            permission_fingerprint=self._permission_fingerprint(),
+            assertion_contract_hash=self._assertion_contract_hash(step),
+            status='verified',
+            confidence__gte=0.7,
+        )
+        if self._experience_reuse_policy() == 'confirmed_only':
+            queryset = queryset.filter(review_status='confirmed')
+        if page_context.get('fingerprint'):
+            queryset = queryset.filter(page_fingerprint=page_context['fingerprint'])
+        environment_key = self._experience_environment_key()
+        if environment_key:
+            queryset = queryset.filter(environment_key=environment_key)
+        experience = queryset.order_by('-confidence', '-last_verified_at').first()
+        if experience is None or not self._reusable_action_sequence(experience.action_sequence):
+            return None
+        return experience.action_sequence
 
     async def _load_verified_experience(self, step, page_context):
         if not self.ai_project_id:
             return None
-
-        def find_experience():
-            from apps.ai_testing.models import AIExecutionExperience
-
-            queryset = AIExecutionExperience.objects.filter(
-                project_id=self.ai_project_id,
-                intent_hash=self._intent_hash(step),
-                permission_fingerprint=self._permission_fingerprint(),
-                assertion_contract_hash=self._assertion_contract_hash(step),
-                status='verified',
-                confidence__gte=0.7,
-            )
-            if page_context.get('fingerprint'):
-                queryset = queryset.filter(page_fingerprint=page_context['fingerprint'])
-            environment_key = self._experience_environment_key()
-            if environment_key:
-                queryset = queryset.filter(environment_key=environment_key)
-            experience = queryset.order_by('-confidence', '-last_verified_at').first()
-            return experience.action_sequence if experience is not None else None
-
         try:
-            actions = await sync_to_async(find_experience, thread_sensitive=True)()
+            actions = await sync_to_async(self._find_experience_actions, thread_sensitive=True)(step, page_context)
         except DatabaseError as error:
             logger.warning('planner_v2 failed to load verified experience: %s', error)
             return None
         return actions if isinstance(actions, list) and actions else None
+
+    def _upsert_experience(self, step, safe_actions, page_context):
+        """Record a verified action sequence; repeated independent verification promotes it to reusable."""
+        from apps.ai_testing.models import AIExecutionExperience
+
+        lookup = self._experience_lookup(step, page_context)
+        with transaction.atomic():
+            experience = AIExecutionExperience.objects.select_for_update().filter(**lookup).first()
+            if experience is None:
+                AIExecutionExperience.objects.create(
+                    **lookup,
+                    ai_case_id=self.ai_case_id,
+                    execution_record_id=self.execution_record_id,
+                    step_description=str(step.get('description') or '').strip(),
+                    page_url=page_context.get('url', ''),
+                    action_sequence=safe_actions,
+                    status='pending',
+                    review_status='pending',
+                )
+                return True
+            experience.ai_case_id = self.ai_case_id
+            experience.execution_record_id = self.execution_record_id
+            experience.page_url = page_context.get('url', '')
+            same_actions = experience.action_sequence == safe_actions
+            experience.action_sequence = safe_actions
+            if experience.status == 'verified':
+                experience.success_count += 1
+                experience.confidence = min(0.95, 0.7 + experience.success_count * 0.05)
+            elif experience.status == 'pending' and same_actions:
+                # The model independently re-derived the same actions and the evidence verified again.
+                experience.success_count += 1
+                if experience.success_count >= EXPERIENCE_AUTO_VERIFY_SUCCESSES:
+                    experience.status = 'verified'
+                    experience.confidence = max(experience.confidence, 0.8)
+            else:
+                # New or previously invalidated sequence: start counting again.
+                experience.status = 'pending'
+                experience.success_count = 1
+                experience.confidence = 0.7
+            experience.save()
+            return True
 
     async def _store_verified_experience(self, step, actions):
         if not self.ai_project_id:
@@ -1200,44 +1676,8 @@ class PyUICompatAgent:
         if not safe_actions:
             return False
         page_context = self._cache_context_by_step.get(self._step_context_key(step), {})
-
-        def save_experience():
-            from apps.ai_testing.models import AIExecutionExperience
-
-            lookup = {
-                'project_id': self.ai_project_id,
-                'intent_hash': self._intent_hash(step),
-                'page_fingerprint': page_context.get('fingerprint', ''),
-                'environment_key': self._experience_environment_key(),
-                'permission_fingerprint': self._permission_fingerprint(),
-                'assertion_contract_hash': self._assertion_contract_hash(step),
-            }
-            with transaction.atomic():
-                experience = AIExecutionExperience.objects.select_for_update().filter(**lookup).first()
-                if experience is None:
-                    AIExecutionExperience.objects.create(
-                        **lookup,
-                        ai_case_id=self.ai_case_id,
-                        execution_record_id=self.execution_record_id,
-                        step_description=str(step.get('description') or '').strip(),
-                        page_url=page_context.get('url', ''),
-                        action_sequence=safe_actions,
-                        status='pending',
-                        review_status='pending',
-                    )
-                    return True
-                experience.ai_case_id = self.ai_case_id
-                experience.execution_record_id = self.execution_record_id
-                experience.page_url = page_context.get('url', '')
-                experience.action_sequence = safe_actions
-                if experience.status == 'verified':
-                    experience.success_count += 1
-                    experience.confidence = min(0.95, 0.7 + experience.success_count * 0.05)
-                experience.save()
-                return True
-
         try:
-            return await sync_to_async(save_experience, thread_sensitive=True)()
+            return await sync_to_async(self._upsert_experience, thread_sensitive=True)(step, safe_actions, page_context)
         except DatabaseError as error:
             logger.warning('planner_v2 failed to store verified experience: %s', error)
             return False
@@ -1266,33 +1706,27 @@ class PyUICompatAgent:
 
         await sync_to_async(update_experience, thread_sensitive=True)()
 
+    def _invalidate_experience_sync(self, step, page_context):
+        from apps.ai_testing.models import AIExecutionExperience
+
+        experience = AIExecutionExperience.objects.select_for_update().filter(
+            **self._experience_lookup(step, page_context),
+            status='verified',
+        ).first()
+        if experience is None:
+            return 0
+        experience.status = 'invalid'
+        experience.failure_count += 1
+        experience.confidence = max(0.0, experience.confidence - 0.2)
+        experience.save(update_fields=['status', 'failure_count', 'confidence', 'updated_at'])
+        return 1
+
     async def _invalidate_verified_experience(self, step):
         if not self.ai_project_id:
             return
         page_context = self._cache_context_by_step.get(self._step_context_key(step), {})
-
-        def invalidate_experience():
-            from apps.ai_testing.models import AIExecutionExperience
-
-            experience = AIExecutionExperience.objects.select_for_update().filter(
-                project_id=self.ai_project_id,
-                intent_hash=self._intent_hash(step),
-                page_fingerprint=page_context.get('fingerprint', ''),
-                environment_key=self._experience_environment_key(),
-                permission_fingerprint=self._permission_fingerprint(),
-                assertion_contract_hash=self._assertion_contract_hash(step),
-                status='verified',
-            ).first()
-            if experience is None:
-                return 0
-            experience.status = 'invalid'
-            experience.failure_count += 1
-            experience.confidence = max(0.0, experience.confidence - 0.2)
-            experience.save(update_fields=['status', 'failure_count', 'confidence', 'updated_at'])
-            return 1
-
         try:
-            await sync_to_async(invalidate_experience, thread_sensitive=True)()
+            await sync_to_async(self._invalidate_experience_sync, thread_sensitive=True)(step, page_context)
         except DatabaseError as error:
             logger.warning('planner_v2 failed to invalidate reused experience: %s', error)
 
@@ -1376,8 +1810,9 @@ class PyUICompatAgent:
             return self._safe_name(match.group(1).upper())
         return self._safe_name(self.case_name)
 
-    def _step_screenshot_filename(self, step_index):
-        return f'{self._case_id_token()}_step_{int(step_index):02d}.png'
+    def _step_screenshot_filename(self, step_index, suffix=''):
+        """Step screenshot name; replans and recoveries pass a suffix so earlier attempts' evidence is not overwritten."""
+        return f'{self._case_id_token()}_step_{int(step_index):02d}{suffix}.png'
 
     def _final_screenshot_filename(self):
         return f'{self._case_id_token()}_final.png'
@@ -1437,6 +1872,8 @@ class PyUICompatAgent:
         ])
         if page_text is not None:
             artifacts.append({'type': 'dom_snapshot', 'text': str(page_text)})
+        canvas_frames_before = self._merged_canvas_baseline(canvas_frames_before, self._observed_canvas_baseline)
+        self._observed_canvas_baseline = None
         try:
             artifacts.extend(await collect_browser_observations(
                 page,
@@ -1501,10 +1938,20 @@ class PyUICompatAgent:
             'param': str(action.get('param') or ''),
             'assert_kind': str(action.get('assert_kind') or ''),
             'value_present': bool(action.get('value')),
+            'value_digest': PyUICompatAgent._audit_value(action.get('value'), action.get('selector')),
             'source': step.get('step_mode') or 'direct',
             'executor': step.get('executor') or 'browser',
         }
         return payload
+
+    @staticmethod
+    def _audit_value(value, selector=None):
+        """Privacy-safe audit form of a typed value: a short digest plus length, never the plaintext."""
+        text = str(value or '')
+        if not text:
+            return ''
+        digest = hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
+        return f'sha256:{digest}/len={len(text)}'
 
     @staticmethod
     def _bind_step_assertions(step, bindings):
@@ -1546,7 +1993,11 @@ class PyUICompatAgent:
         history,
     ) -> bool:
         bindable_kinds = {'field_value', 'popup', 'element_state', 'collection', 'absence'}
-        if self.execution_record_id is not None and self._image_assertions(step):
+        has_bound_assertion = any(
+            isinstance(assertion, dict) and str((assertion.get('target') or {}).get('locator') or '').strip()
+            for assertion in step.get('assertions') or []
+        )
+        if self.execution_record_id is not None and has_bound_assertion:
             await self._clear_vanished_assertion_bindings(page, step, step_index)
         unresolved = [
             assertion
@@ -1560,40 +2011,71 @@ class PyUICompatAgent:
         ]
         if not unresolved or not actions or actions[-1].get('action') == 'assert':
             return False
-        deterministic_bindings = await self._field_value_bindings_from_completed_action(
-            page,
-            step,
-            unresolved,
-            actions[-1],
+        image_unresolved = [
+            assertion for assertion in unresolved
+            if isinstance(assertion.get('target'), dict) and assertion['target'].get('visual_content') == 'image'
+        ]
+        if image_unresolved:
+            # A thumbnail that has not rendered yet cannot be bound by anyone; give the lazy image (or the
+            # target camera's card) its bounded chance before binders decline and the model burns attempts.
+            try:
+                await self._wait_for_rendered_visual_content(page, step, image_unresolved)
+            except Exception as error:
+                logger.info('planner_v2 pre-binding render wait skipped: %s', error)
+        self._binding_verified_predecessors = self._verified_predecessor_context(history) if history is not None else []
+        binders = (
+            ('field_value', self._field_value_bindings_from_completed_action),
+            ('selected_value', self._selected_value_binding_from_completed_click),
+            ('visible_element', self._visible_element_binding_from_completed_click),
+            ('intent_value', self._intent_value_binding_from_completed_action),
+            ('rendered_visual', self._rendered_visual_binding_from_completed_action),
+            ('vanished_media', self._vanished_media_binding_from_completed_action),
+            ('fresh_content', self._fresh_content_binding_from_completed_action),
+            ('collection', self._collection_binding_from_completed_action),
+            ('inherited_collection', self._inherited_collection_binding_from_read_only_action),
         )
-        if not deterministic_bindings:
-            deterministic_bindings = await self._selected_value_binding_from_completed_click(
-                page,
-                step,
-                unresolved,
-                actions[-1],
-            )
-        if not deterministic_bindings:
-            deterministic_bindings = await self._visible_element_binding_from_completed_click(
-                page,
-                step,
-                unresolved,
-                actions[-1],
-            )
-        if not deterministic_bindings:
-            deterministic_bindings = await self._rendered_visual_binding_from_completed_action(
-                page,
-                step,
-                unresolved,
-                actions[-1],
-            )
+        # Every binder reasons about one assertion at a time, so a step with several unresolved assertions
+        # (a result count plus a thumbnail) is bound assertion by assertion and the results are merged.
+        deterministic_bindings = []
+        still_unresolved = []
+        for assertion in unresolved:
+            declined = []
+            bound = []
+            for binder_name, binder in binders:
+                bound = await binder(page, step, [assertion], actions[-1])
+                if bound:
+                    if history is not None:
+                        history.artifacts.append({
+                            'type': 'deterministic_binding',
+                            'step': step_index,
+                            'binder': binder_name,
+                            'bindings': bound,
+                        })
+                    break
+                declined.append(binder_name)
+            if bound:
+                deterministic_bindings.extend(bound)
+            else:
+                still_unresolved.append(assertion)
+                if history is not None:
+                    history.artifacts.append({
+                        'type': 'binders_declined',
+                        'step': step_index,
+                        'binders': declined,
+                        'unresolved': [{'assert_kind': assertion.get('assert_kind'), 'intent': (assertion.get('target') or {}).get('intent')}],
+                        'had_observable_baseline': self._observable_baseline is not None,
+                        'had_visual_baseline': self._rendered_visual_baseline is not None,
+                        'notes': list(self._runtime_events),
+                    })
+                    self._runtime_events = []
         if deterministic_bindings:
             await self._apply_assertion_bindings(
                 step_index,
                 step,
                 [{'action': 'assert', 'assertion_bindings': deterministic_bindings}],
             )
-            return True
+            if not still_unresolved:
+                return True
         binding_step = {
             **step,
             'allowed_capabilities': ['browser.inspect'],
@@ -1681,9 +2163,44 @@ class PyUICompatAgent:
             return []
         choice_roles = {'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio'}
         candidates: list[tuple[int, str]] = []
+        dialog_closed = False
+        for _ in range(6):  # the display may refresh a moment after the option is chosen
+            controls = await self._build_actionable_controls(page)
+            elements = [*controls, *await self._build_observable_elements(page)]
+            candidates = self._selected_value_candidates(assertion, expected, choice_roles, self._changed_since_planning(elements))
+            if candidates:
+                break
+            # A confirm click that closed the dialog commits a value the control already displayed while the
+            # dialog was open; the closed dialog is the change, so the unchanged display is the evidence.
+            dialog_closed = self._pre_action_blocking_layer and not any(
+                isinstance(control, dict) and control.get('blocking_layer') is True for control in controls
+            )
+            if dialog_closed:
+                candidates = self._selected_value_candidates(assertion, expected, choice_roles, elements)
+                if candidates:
+                    logger.info('planner_v2 selected-value binder accepted the display committed by closing the dialog')
+                    break
+            await page.wait_for_timeout(500)
+        if not candidates:
+            return []
+        best_priority = max(priority for priority, _ in candidates)
+        best = [selector for priority, selector in candidates if priority == best_priority]
+        if len(best) != 1:
+            logger.info('planner_v2 selected-value binder declined: %s equally ranked candidates', len(best))
+            return []
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 selected-value binder chose %s', best[0])
+        return [{'assertion_index': assertion_index, 'locator': best[0]}]
+
+    @staticmethod
+    def _selected_value_candidates(assertion: dict, expected: str, choice_roles: set, discovered: list) -> list[tuple[int, str]]:
+        candidates: list[tuple[int, str]] = []
         seen: set[str] = set()
         seen_rects: set[tuple] = set()
-        discovered = [*await self._build_actionable_controls(page), *await self._build_observable_elements(page)]
         for element in discovered:
             if not isinstance(element, dict):
                 continue
@@ -1708,20 +2225,7 @@ class PyUICompatAgent:
                 seen_rects.add(rect_key)
             priority = 2 if tag in {'select', 'input'} or role in {'combobox', 'textbox'} else 1 if not element.get('top_layer') else 0
             candidates.append((priority, selector))
-        if not candidates:
-            return []
-        best_priority = max(priority for priority, _ in candidates)
-        best = [selector for priority, selector in candidates if priority == best_priority]
-        if len(best) != 1:
-            logger.info('planner_v2 selected-value binder declined: %s equally ranked candidates', len(best))
-            return []
-        assertion_index = next(
-            index
-            for index, candidate in enumerate(step.get('assertions') or [], start=1)
-            if candidate is assertion
-        )
-        logger.info('planner_v2 selected-value binder chose %s', best[0])
-        return [{'assertion_index': assertion_index, 'locator': best[0]}]
+        return candidates
 
     async def _visible_element_binding_from_completed_click(
         self,
@@ -1730,13 +2234,13 @@ class PyUICompatAgent:
         unresolved: list[dict],
         action: dict,
     ) -> list[dict]:
-        if len(unresolved) != 1 or action.get('action') != 'click':
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'hover', 'scroll', 'wait'}:
             return []
         assertion = unresolved[0]
         if (
             assertion.get('assert_kind') != 'element_state'
             or assertion.get('operator') != 'exists'
-            or (assertion.get('expected') or {}).get('value') is not True
+            or not expects_true((assertion.get('expected') or {}).get('value'))
         ):
             return []
 
@@ -1791,6 +2295,92 @@ class PyUICompatAgent:
         )
         return [{'assertion_index': assertion_index, 'locator': min(selectors, key=len)}]
 
+    async def _intent_value_binding_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """Bind an element_state exists assertion whose intent names the text the element shows.
+
+        "status control showing To Do" is satisfied by the one discovered element whose visible text is
+        exactly "To Do". Repeated list labels share structural selectors and are skipped in favour of the
+        attribute-anchored control; an ambiguous match declines so the planner keeps ownership.
+        """
+        # Binders read the current page, so read-only recovery actions (scroll, hover, wait) count as completed too.
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'fill', 'press', 'navigate', 'goto', 'scroll', 'hover', 'wait'}:
+            return []
+        assertion = unresolved[0]
+        target = assertion.get('target') or {}
+        operator = assertion.get('operator')
+        expected_value = (assertion.get('expected') or {}).get('value')
+        if assertion.get('assert_kind') != 'element_state' or target.get('visual_content') == 'image':
+            return []
+        if operator == 'exists':
+            if not expects_true(expected_value):
+                return []
+            value = display_value_from_target(target)
+        elif operator in {'equals', 'contains'} and isinstance(expected_value, str):
+            # "status control displaying the selected value" contains "Close": the committed value is the text
+            # to find, and an option still listed in an open menu is not the control that displays it.
+            value = expected_value.strip()
+        else:
+            return []
+        if not value:
+            return []
+        if operator == 'exists':
+            elements = [*await self._build_actionable_controls(page), *await self._build_observable_elements(page)]
+            locator = exact_text_locator(value, elements)
+        else:
+            locator = ''
+            for _ in range(6):  # the display may refresh a moment after the option is chosen
+                elements = [*await self._build_actionable_controls(page), *await self._build_observable_elements(page)]
+                locator = exact_text_locator(
+                    value,
+                    self._changed_since_planning(elements),
+                    allow_containing=operator == 'contains',
+                    skip_choices=True,
+                    case_sensitive=True,
+                )
+                if locator:
+                    break
+                await page.wait_for_timeout(500)
+        if not locator:
+            return []
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        self._runtime_events.append({'type': 'intent_value_binding', 'value': value, 'locator': locator})
+        return [{'assertion_index': assertion_index, 'locator': locator}]
+
+    @staticmethod
+    def _rect_key(rect: dict) -> tuple:
+        return tuple(int(rect.get(key) or 0) for key in ('x', 'y', 'width', 'height'))
+
+    def _changed_since_planning(self, elements: list[dict]) -> list[dict]:
+        """Drop elements that already showed the same text when the action was planned.
+
+        A "close" icon button or a heading that existed before the action cannot be the display of the value
+        the action just committed. The same node may be rediscovered under another selector, so position is
+        compared as well.
+        """
+        unchanged = self._pre_action_control_names
+        if not unchanged:
+            return list(elements)
+        kept = []
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            text = ' '.join(str(element.get('name') or element.get('text') or '').split())
+            rect = element.get('rect') if isinstance(element.get('rect'), dict) else None
+            if rect and (self._rect_key(rect), text) in unchanged:
+                continue
+            kept.append(element)
+        return kept
+
     @staticmethod
     def _image_assertions(step: dict) -> list[dict]:
         return [
@@ -1834,11 +2424,237 @@ class PyUICompatAgent:
             return []
         return [element for element in elements if isinstance(element, dict) and element.get('selector')]
 
+    @staticmethod
+    def _vanishing_media_assertions(step: dict) -> list[dict]:
+        """not_exists assertions about a media surface the step is expected to remove (close a player, dismiss a preview)."""
+        result = []
+        for assertion in step.get('assertions') or []:
+            if not (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') == 'element_state'
+                and assertion.get('operator') == 'not_exists'
+                and assertion.get('required', True) is not False
+                and isinstance(assertion.get('target'), dict)
+            ):
+                continue
+            target = assertion['target']
+            if str(target.get('locator') or '').strip():
+                continue
+            described = f"{target.get('intent') or ''} {target.get('text') or ''}"
+            if target.get('visual_content') == 'image' or MEDIA_INTENT_PATTERN.search(described):
+                result.append(assertion)
+        return result
+
     async def _capture_rendered_visual_baseline(self, page, step):
-        """Remember which rendered media existed before the step acts, so new media can be attributed to it."""
-        if not self._media_bindable_assertions(step):
+        """Remember which rendered media existed before the step acts, so media that appears or vanishes can be attributed to it."""
+        self._rendered_visual_baseline_elements = None
+        if not self._media_bindable_assertions(step) and not self._vanishing_media_assertions(step):
             return None
-        return {element['selector'] for element in await self._rendered_visual_elements(page)}
+        elements = await self._rendered_visual_elements(page)
+        self._rendered_visual_baseline_elements = {str(element['selector']): element for element in elements}
+        return set(self._rendered_visual_baseline_elements)
+
+    async def _vanished_media_binding_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """Bind a not_exists media assertion to the rendered surface the action removed.
+
+        A closed player cannot be discovered afterwards, so the planner has no current locator to bind; the
+        pre-action inventory is the only objective source for it. The dominant vanished surface is chosen.
+        """
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'press', 'select'}:
+            return []
+        assertion = unresolved[0]
+        if assertion not in self._vanishing_media_assertions(step):
+            return []
+        baseline = self._rendered_visual_baseline_elements or {}
+        if not baseline:
+            return []
+
+        def area(element):
+            return int(element.get('area') or 0)
+
+        vanished: list[dict] = []
+        for _ in range(8):  # a closing surface may fade out; allow up to ~4 seconds
+            current = {str(element.get('selector') or '') for element in await self._rendered_visual_elements(page)}
+            vanished = [element for selector, element in baseline.items() if selector not in current]
+            if vanished:
+                break
+            await page.wait_for_timeout(500)
+        sizable = [element for element in vanished if area(element) >= 10000]
+        pool = sizable or (vanished if len(vanished) == 1 else [])
+        if not pool:
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'vanished_media', 'vanished': len(vanished)})
+            return []
+        chosen = max(pool, key=area)
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 vanished-media binder chose %s (vanished=%s)', chosen.get('selector'), len(vanished))
+        return [{'assertion_index': assertion_index, 'locator': str(chosen['selector'])}]
+
+    @staticmethod
+    def _unbound_collection_assertions(step: dict) -> list[dict]:
+        return [
+            assertion
+            for assertion in step.get('assertions') or []
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') == 'collection'
+                and assertion.get('required', True) is not False
+                and not str((assertion.get('target') or {}).get('locator') or '').strip()
+            )
+        ]
+
+    async def _capture_observable_baseline(self, page, step):
+        """Remember which observable elements existed before the step acts, so new content can be attributed to it."""
+        needs_baseline = any(
+            (assertion.get('target') or {}).get('visual_content') != 'image'
+            for assertion in self._media_bindable_assertions(step)
+        ) or bool(self._unbound_collection_assertions(step))
+        if not needs_baseline:
+            return None
+        return {
+            str(element.get('selector') or '')
+            for element in await self._build_observable_elements(page)
+            if isinstance(element, dict) and element.get('selector')
+        }
+
+    async def _collection_binding_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """Bind a collection assertion to the repeated-item group the action introduced."""
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'navigate', 'fill', 'scroll', 'wait'}:
+            return []
+        assertion = unresolved[0]
+        if assertion not in self._unbound_collection_assertions(step):
+            return []
+        baseline = self._observable_baseline
+        if baseline is None:
+            return []
+        groups: dict[str, dict] = {}
+        for element in [*await self._build_observable_elements(page), *await self._build_actionable_controls(page)]:
+            if not isinstance(element, dict):
+                continue
+            group_selector = str(element.get('group_selector') or '').strip()
+            if not group_selector or element.get('selector') in baseline:
+                continue
+            role = str(element.get('role') or '').strip().casefold()
+            if role in {'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'link'} or element.get('top_layer'):
+                continue
+            rect = element.get('rect') if isinstance(element.get('rect'), dict) else {}
+            area = int(rect.get('width') or 0) * int(rect.get('height') or 0)
+            entry = groups.setdefault(group_selector, {'size': int(element.get('group_size') or 1), 'area': 0, 'text': False})
+            entry['area'] = max(entry['area'], area)
+            entry['text'] = entry['text'] or bool(str(element.get('text') or element.get('name') or '').strip())
+        candidates = [(selector, info) for selector, info in groups.items() if info['size'] >= 1 and info['area'] >= 2000 and info['text']]
+        if not candidates:
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'collection', 'fresh_groups': len(groups)})
+            return []
+        selector, info = max(candidates, key=lambda item: (item[1]['size'], item[1]['area']))
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 collection binder chose %s (size=%s)', selector, info['size'])
+        return [{'assertion_index': assertion_index, 'locator': selector}]
+
+    async def _inherited_collection_binding_from_read_only_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """Bind a verify-only step's collection assertion to the verified predecessor group it continues.
+
+        After a wait, scroll or hover nothing new was introduced, so the fresh-group binder declines; the
+        repeated items a predecessor step already proved are still the evidence for "the list finished loading".
+        """
+        if len(unresolved) != 1 or action.get('action') not in {'wait', 'scroll', 'hover'}:
+            return []
+        assertion = unresolved[0]
+        if assertion not in self._unbound_collection_assertions(step):
+            return []
+        group_selectors = {
+            str(element.get('group_selector') or '').strip()
+            for element in [*await self._build_observable_elements(page), *await self._build_actionable_controls(page)]
+            if isinstance(element, dict) and str(element.get('group_selector') or '').strip()
+        }
+        intent = str((assertion.get('target') or {}).get('intent') or '')
+        locator = continuing_collection_locator(intent, self._binding_verified_predecessors, group_selectors)
+        if not locator:
+            return []
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 inherited collection binder chose %s', locator)
+        return [{'assertion_index': assertion_index, 'locator': locator}]
+
+    async def _fresh_content_binding_from_completed_action(
+        self,
+        page,
+        step: dict,
+        unresolved: list[dict],
+        action: dict,
+    ) -> list[dict]:
+        """Bind an intent-only existence assertion to the largest content block the action introduced."""
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'navigate', 'scroll', 'wait'}:
+            return []
+        assertion = unresolved[0]
+        if assertion not in self._media_bindable_assertions(step) or (assertion.get('target') or {}).get('visual_content') == 'image':
+            return []
+        baseline = self._observable_baseline
+        if baseline is None:
+            return []
+
+        def area(element):
+            rect = element.get('rect') if isinstance(element.get('rect'), dict) else {}
+            return int(rect.get('width') or 0) * int(rect.get('height') or 0)
+
+        fresh = [
+            element
+            for element in await self._build_observable_elements(page)
+            if isinstance(element, dict) and element.get('selector') and element.get('selector') not in baseline
+        ]
+        if len(fresh) < 3:
+            logger.info('planner_v2 fresh-content binder declined: only %s new observable element(s)', len(fresh))
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'fresh_content', 'fresh': len(fresh)})
+            return []
+        sizable = [element for element in fresh if area(element) >= 10000]
+        with_text = [element for element in sizable if str(element.get('text') or '').strip()]
+        pool = with_text or sizable
+        if not pool:
+            return []
+        chosen = max(pool, key=area)
+        if assertion.get('assert_kind') == 'popup':
+            # Diagnostic only: dialog text is too weak a signal to refuse the evidence (see planner note).
+            mismatch = popup_intent_mismatch(
+                str((assertion.get('target') or {}).get('intent') or ''),
+                str(chosen.get('text') or ''),
+            )
+            if mismatch:
+                self._runtime_events.append({'type': 'popup_intent_warning', 'binder': 'fresh_content', 'detail': mismatch[:200]})
+        assertion_index = next(
+            index
+            for index, candidate in enumerate(step.get('assertions') or [], start=1)
+            if candidate is assertion
+        )
+        logger.info('planner_v2 fresh-content binder chose %s (fresh=%s)', chosen.get('selector'), len(fresh))
+        return [{'assertion_index': assertion_index, 'locator': str(chosen['selector'])}]
 
     async def _rendered_visual_binding_from_completed_action(
         self,
@@ -1847,7 +2663,7 @@ class PyUICompatAgent:
         unresolved: list[dict],
         action: dict,
     ) -> list[dict]:
-        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'fill', 'navigate'}:
+        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'fill', 'navigate', 'scroll', 'wait'}:
             return []
         assertion = unresolved[0]
         if assertion not in self._media_bindable_assertions(step):
@@ -1866,6 +2682,25 @@ class PyUICompatAgent:
 
         def area(element):
             return int(element.get('area') or 0)
+
+        target_rects = await self._target_camera_card_rects(page, step)
+        if target_rects:
+            in_target = [
+                element for element in fresh
+                if any(self._rect_inside(element.get('rect'), target) for target in target_rects)
+            ]
+            if in_target:
+                chosen = max(in_target, key=area)
+                logger.info('planner_v2 media binder chose the target camera thumbnail %s', chosen.get('selector'))
+                assertion_index = next(
+                    index
+                    for index, candidate in enumerate(step.get('assertions') or [], start=1)
+                    if candidate is assertion
+                )
+                return [{'assertion_index': assertion_index, 'locator': str(chosen['selector'])}]
+            # The target card is visible but its thumbnail has not rendered: do not bind a neighbour.
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'rendered_visual', 'target_camera_pending': len(fresh)})
+            return []
 
         def ratio(element):
             return float(element.get('viewport_ratio') or 0)
@@ -1886,6 +2721,7 @@ class PyUICompatAgent:
                 'planner_v2 media binder declined: fresh=%s top_layer=%s dominant=%s image=%s',
                 len(fresh), len(top_layer), len(dominant), is_image,
             )
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'rendered_visual', 'fresh': len(fresh), 'top_layer': len(top_layer), 'dominant': len(dominant)})
             return []
         logger.info(
             'planner_v2 media binder chose %s (fresh=%s top_layer=%s dominant=%s image=%s)',
@@ -1973,7 +2809,7 @@ class PyUICompatAgent:
                 ).order_by('-id')[:len(step.assertions)]
             )[::-1]
         except Exception as error:  # diagnostic enrichment only; never block the retry loop
-            logger.info('planner_v2 could not load observed assertion values: %s', error)
+            logger.debug('planner_v2 could not load observed assertion values: %s', error)
             return []
         return [row.actual if isinstance(row.actual, dict) else {} for row in rows]
 
@@ -2040,7 +2876,7 @@ class PyUICompatAgent:
             for assertion in assertions
             if (
                 isinstance(assertion, dict)
-                and assertion.get('assert_kind') == 'playback'
+                and assertion.get('assert_kind') in {'playback', 'stream_state'}
                 and assertion.get('required', True) is not False
             )
         ]
@@ -2070,17 +2906,35 @@ class PyUICompatAgent:
                 )
             return
         if playback_assertions:
+            from apps.ai_testing.execution.browser_observers import capture_canvas_frames
+
+            stream_assertions = [assertion for assertion in playback_assertions if assertion.get('assert_kind') == 'stream_state']
             timeout_ms = max(
                 int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
                 for assertion in playback_assertions
             )
+            if stream_assertions:
+                # A live stream negotiates and decodes before its first picture; give it a bounded head start
+                # instead of judging a canvas that has not drawn yet and replanning (which opens another stream).
+                timeout_ms = max(timeout_ms, STREAM_START_WAIT_MS)
             minimum_advanced_seconds = max(
                 float((assertion.get('expected') or {}).get('minimum_advanced_seconds') or 0)
                 for assertion in playback_assertions
             )
             deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
             playback_baselines = {}
+            self._observed_canvas_baseline = None
+            iteration = 0
             while True:
+                iteration += 1
+                if stream_assertions and iteration % 2 == 1:
+                    frames = await capture_canvas_frames(page, stream_assertions)
+                    if self._observed_canvas_baseline is None:
+                        self._observed_canvas_baseline = list(frames)
+                    else:
+                        if self._canvas_frames_changed(self._observed_canvas_baseline, frames):
+                            return
+                        self._observed_canvas_baseline = self._first_picture_canvas_frames(self._observed_canvas_baseline, frames)
                 media_state = await self._capture_media_state(page)
                 if isinstance(media_state, list):
                     for media_index, media in enumerate(media_state):
@@ -2111,11 +2965,58 @@ class PyUICompatAgent:
         while not self._current_step_download_events() and time.monotonic() < deadline:
             await page.wait_for_timeout(min(500, max(1, round((deadline - time.monotonic()) * 1000))))
 
+    @staticmethod
+    def _first_picture_canvas_frames(baseline: list, frames: list) -> list:
+        """Keep, per canvas, the earliest frame that shows a picture; a blank connecting canvas is not a baseline."""
+        by_index = {frame.get('index'): dict(frame) for frame in baseline if isinstance(frame, dict)}
+        for frame in frames or []:
+            if not isinstance(frame, dict):
+                continue
+            current = by_index.get(frame.get('index'))
+            if current is None or (not current.get('visual_signal') and frame.get('visual_signal')):
+                by_index[frame.get('index')] = dict(frame)
+        return list(by_index.values())
+
+    @staticmethod
+    def _canvas_frames_changed(baseline: list, frames: list) -> bool:
+        """True when a canvas that already showed a picture now shows a different one (a live stream is drawing)."""
+        before = {frame.get('index'): frame for frame in baseline if isinstance(frame, dict)}
+        for frame in frames or []:
+            if not isinstance(frame, dict):
+                continue
+            earlier = before.get(frame.get('index'))
+            if (
+                earlier is not None
+                and earlier.get('visual_signal') and frame.get('visual_signal')
+                and earlier.get('content_hash') and frame.get('content_hash')
+                and earlier.get('content_hash') != frame.get('content_hash')
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _merged_canvas_baseline(pre_action_frames, observed_frames) -> list:
+        """Evidence baseline for canvas change: the pre-action frame, or for a canvas the action introduced (or one
+        that was still blank before the action) the first picture observed while waiting for the stream."""
+        merged = {frame.get('index'): dict(frame) for frame in pre_action_frames or [] if isinstance(frame, dict)}
+        for frame in observed_frames or []:
+            if not isinstance(frame, dict):
+                continue
+            current = merged.get(frame.get('index'))
+            if current is None or (not current.get('visual_signal') and frame.get('visual_signal')):
+                merged[frame.get('index')] = dict(frame)
+        return list(merged.values())
+
     def _current_step_download_events(self):
         return self._recent_download_events[self._download_event_baseline:]
 
     async def _wait_for_rendered_visual_content(self, page, step, image_assertions):
-        """Give lazily loaded images and media a bounded chance to render before evidence capture."""
+        """Give lazily loaded images and media a bounded chance to render before evidence capture.
+
+        Camera thumbnails are fetched one by one after a list opens and commonly take 20-30 seconds, so an
+        image assertion waits noticeably longer than other media. When the step names the environment's
+        target camera, the wait ends only once a thumbnail renders inside that camera's card.
+        """
         timeout_ms = min(15000, max(
             int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
             for assertion in image_assertions
@@ -2130,10 +3031,29 @@ class PyUICompatAgent:
         baseline = self._rendered_visual_baseline if not locators else None
         if not locators and not is_image_wait:
             timeout_ms = min(timeout_ms, 5000)
+        if is_image_wait and not locators:
+            timeout_ms = min(60000, max(timeout_ms, IMAGE_RENDER_WAIT_MS))
+        wants_target = bool(is_image_wait and not locators and self._step_targets_configured_camera(step))
+        target_rects = await self._target_camera_card_rects(page, step) if wants_target else []
         deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        probes = 0
         while True:
+            probes += 1
             try:
-                if locators or baseline is None:
+                if wants_target and not target_rects and probes % 4 == 0:
+                    # The card may only appear once the site group expands; keep looking for it.
+                    target_rects = await self._target_camera_card_rects(page, step)
+                if wants_target and not target_rects:
+                    settled = False  # another camera's thumbnail is not the target's
+                elif target_rects:
+                    # The step is about the configured target camera: it is settled once any rendered media sits
+                    # inside that camera's card, whether or not the media existed before the action.
+                    settled = any(
+                        self._rect_inside(element.get('rect'), target)
+                        for element in await self._rendered_visual_elements(page)
+                        for target in target_rects
+                    )
+                elif locators or baseline is None:
                     settled = await page.evaluate(VISUAL_CONTENT_SETTLED_JS, locators)
                 else:
                     # Unbound media assertion with a pre-action baseline: wait for the surface the
@@ -2160,19 +3080,29 @@ class PyUICompatAgent:
         if self.execution_record_id is None:
             return None
         await self._clear_vanished_assertion_bindings(page, step, step_index)
+        if not self._step_budget_exhausted():
+            recovered = await self._recover_by_rebinding(page, step, step_index, actions, step_callback, history, artifact_dir)
+            if recovered is not None:
+                return recovered
         shortfall = PyUICompatAgent._describe_assertion_shortfall(
             step, assertion_statuses, actuals=await sync_to_async(self._latest_assertion_actuals)(step_index),
         )
         failure = (
             f'Required assertions were not verified: {", ".join(assertion_statuses)}.'
             + (f' {shortfall}' if shortfall else '')
+            + (f' {self._last_action_effect_note}' if self._last_action_effect_note else '')
         )
         replan_limit = self._assertion_replan_limit()
         persisted_actions = await sync_to_async(self._persisted_step_action_history)(step_index)
         prior_actions = persisted_actions or [self._audit_action_payload(action, step) for action in actions[-8:]]
         persisted_attempt = None
         screenshot_path = None
+        previous_outcome = None
         for attempt in range(1, replan_limit + 1):
+            if self._step_budget_exhausted():
+                budget_message = f'Step time budget exhausted after {attempt - 1} assertion replan(s).'
+                await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: {budget_message}\n'})
+                return 'inconclusive', budget_message, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
             replanning_step = {
                 **step,
                 '_planner_failure': failure,
@@ -2203,7 +3133,9 @@ class PyUICompatAgent:
             from apps.ai_testing.execution.browser_observers import capture_canvas_frames, capture_visual_frames
             visual_frames_before = await capture_visual_frames(page, step.get('assertions') or [])
             canvas_frames_before = await capture_canvas_frames(page, step.get('assertions') or [])
+            self._observed_canvas_baseline = None
             self._download_event_baseline = len(self._recent_download_events)
+            self._pre_action_visual_frames = None
             try:
                 await self._execute_ai_actions(
                     page, step, replan_actions, step_index, step_callback, timeout_error, history=history,
@@ -2219,11 +3151,12 @@ class PyUICompatAgent:
                     page, step, step_index, replan_actions, step_callback, history,
                 )
             screenshot_path = await self._capture_screenshot(
-                page, artifact_dir, self._step_screenshot_filename(step_index),
+                page, artifact_dir, self._step_screenshot_filename(step_index, suffix=f'_r{attempt}'),
             )
             persisted_attempt = await self._persist_step_attempt(
                 step_index, step, replan_actions[-1] if replan_actions else {}, action_status,
-                error_message, None, screenshot_path, page, media_state_before, visual_frames_before,
+                error_message, None, screenshot_path, page, media_state_before,
+                self._pre_action_visual_frames or visual_frames_before,
                 canvas_frames_before,
             )
             statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
@@ -2231,6 +3164,12 @@ class PyUICompatAgent:
             status = self._status_after_assertions(action_status, required_statuses)
             if self._step_assertions_are_verified(step, required_statuses) or action_status != 'completed':
                 return status, error_message, replan_actions[-1].get('action') if replan_actions else '', replan_actions, persisted_attempt, screenshot_path
+            outcome = (self._action_signature(replan_actions), tuple(required_statuses))
+            if outcome == previous_outcome:
+                stall_message = 'Replanning repeated the same actions with the same unverified outcome; stopping early.'
+                await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: {stall_message}\n'})
+                return status, stall_message, replan_actions[-1].get('action') if replan_actions else '', replan_actions, persisted_attempt, screenshot_path
+            previous_outcome = outcome
             shortfall = PyUICompatAgent._describe_assertion_shortfall(
                 step, required_statuses, actuals=await sync_to_async(self._latest_assertion_actuals)(step_index),
             )
@@ -2251,22 +3190,180 @@ class PyUICompatAgent:
                 )
         return status, failure, actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
 
+    async def _action_had_visible_effect(self, page):
+        """None without a pre-action baseline; otherwise whether the URL, content or media changed since it."""
+        current_url = str(getattr(page, 'url', '') or '')
+        if self._pre_action_url and current_url and current_url != self._pre_action_url:
+            return True
+        if self._pre_action_control_names:
+            # A control whose text changed in place (a status now reading "Close") is a visible effect too.
+            texts_by_position: dict[tuple, set] = {}
+            for rect_key, text in self._pre_action_control_names:
+                texts_by_position.setdefault(rect_key, set()).add(text)
+            revealed_controls = 0
+            for control in await self._build_actionable_controls(page):
+                if not isinstance(control, dict) or not isinstance(control.get('rect'), dict):
+                    continue
+                rect_key = self._rect_key(control['rect'])
+                text = ' '.join(str(control.get('name') or '').split())
+                if rect_key in texts_by_position and text not in texts_by_position[rect_key]:
+                    return True
+                if rect_key not in texts_by_position and text:
+                    revealed_controls += 1
+            # A panel that expanded brings a row of new named controls (filters, tabs) without changing any
+            # existing text or adding media; a single stray control could be a tooltip, so require a group.
+            if revealed_controls >= 2:
+                return True
+        if self._observable_baseline is None and self._rendered_visual_baseline is None:
+            return None
+        if self._observable_baseline is not None:
+            current = {
+                str(element.get('selector') or '')
+                for element in await self._build_observable_elements(page)
+                if isinstance(element, dict) and element.get('selector')
+            }
+            if current - self._observable_baseline:
+                return True
+        if self._rendered_visual_baseline is not None:
+            rendered = {str(element.get('selector') or '') for element in await self._rendered_visual_elements(page)}
+            if rendered - self._rendered_visual_baseline:
+                return True
+        return False
+
+    @staticmethod
+    def _control_toggles_state(action: dict, controls: list | None) -> bool:
+        """True for a control that undoes itself when clicked twice (toggle, collapse/expand, switch, checkbox).
+
+        Repeating such a click after a slow first response would close the panel it had just opened, so the
+        swallowed-action retry must leave it alone and let the normal replan look at the page instead.
+        """
+        selector = str(action.get('selector') or '').strip()
+        names = [str(action.get('accessible_name') or '')]
+        for control in controls or []:
+            if not isinstance(control, dict) or not selector or str(control.get('selector') or '').strip() != selector:
+                continue
+            if str(control.get('role') or '').strip().casefold() in {'switch', 'checkbox', 'menuitemcheckbox', 'menuitemradio'}:
+                return True
+            names.append(str(control.get('name') or ''))
+        haystack = ' '.join([selector, *names]).casefold()
+        return bool(re.search(r'toggle|collapse|expand|aria-expanded|aria-pressed|\bswitch\b', haystack))
+
+    async def _click_inner_activator(self, page, selector: str) -> bool:
+        """Click the thumbnail/link inside a container whose own click had no effect."""
+        if not selector or selector.startswith('text='):
+            return False
+        try:
+            inner = page.locator(f'{selector} img, {selector} a, {selector} [role="button"], {selector} button').first
+            if await inner.count() == 0 or not await inner.is_visible():
+                return False
+            await inner.click(timeout=5000)
+            return True
+        except Exception as error:
+            logger.info('planner_v2 inner activator click failed: %s', error)
+            return False
+
+    async def _recover_by_rebinding(self, page, step, step_index, actions, step_callback, history, artifact_dir):
+        """Before asking the model to act again, give the completed action's state a chance to settle and rebind.
+
+        Many unverified outcomes are not wrong actions but evidence captured too early (a form still
+        rendering, a thumbnail not yet loaded) or bindings the model failed to produce. Re-running the
+        settle wait, the deterministic binders and the evaluation is cheap and avoids a needless replan.
+        """
+        if not actions or not isinstance(actions[-1], dict) or actions[-1].get('action') == 'assert':
+            return None
+        dom_kinds = {'element_state', 'popup', 'field_value', 'collection', 'absence'}
+        required = [
+            assertion
+            for assertion in step.get('assertions') or []
+            if isinstance(assertion, dict) and assertion.get('required', True) is not False
+        ]
+        if not required or any(assertion.get('assert_kind') not in dom_kinds for assertion in required):
+            return None
+        last_action = actions[-1]
+        self._last_action_effect_note = ''
+        if (
+            last_action.get('action') in {'click', 'select'}
+            and step_index not in self._swallowed_action_retries
+            and not self._control_toggles_state(last_action, self._last_actionable_controls)
+        ):
+            if await self._action_had_visible_effect(page) is False and not await self._click_target_moved(page, last_action):
+                # A completed click that changed nothing is usually swallowed by a re-render (live lists,
+                # portals) or landed on a container whose activator is an inner thumbnail/link.
+                self._swallowed_action_retries.add(step_index)
+                await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: action produced no visible change; repeating it once.\n'})
+                methods = ['same_target']
+                try:
+                    await self._execute_step(page, last_action, timeout_error=TimeoutError)
+                except Exception as error:
+                    logger.info('planner_v2 swallowed-action retry failed: %s', error)
+                await page.wait_for_timeout(1500)
+                if await self._action_had_visible_effect(page) is False:
+                    if await self._click_inner_activator(page, str(last_action.get('selector') or '')):
+                        methods.append('inner_activator')
+                        await page.wait_for_timeout(1500)
+                if await self._action_had_visible_effect(page) is False:
+                    self._last_action_effect_note = (
+                        'The completed action produced no visible change on the page, so the intended transition did not happen; '
+                        'choose a different target (for example the item thumbnail or link) instead of asserting.'
+                    )
+                if history is not None:
+                    history.artifacts.append({
+                        'type': 'swallowed_action_retry',
+                        'step': step_index,
+                        'action': self._audit_action_payload(last_action, step),
+                        'methods': methods,
+                        'effect_after_retry': not self._last_action_effect_note,
+                    })
+        await self._wait_for_assertion_observation(page, step)
+        await self._bind_required_assertions_after_action(page, step, step_index, actions, step_callback, history)
+        # Applying bindings replaces the step's assertion dicts, so re-read them instead of the pre-binding list.
+        required = [
+            assertion
+            for assertion in step.get('assertions') or []
+            if isinstance(assertion, dict) and assertion.get('required', True) is not False
+        ]
+        if not required or any(not str((assertion.get('target') or {}).get('locator') or '').strip() for assertion in required):
+            return None
+        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: re-evaluating evidence after settle/rebind.\n'})
+        screenshot_path = await self._capture_screenshot(page, artifact_dir, self._step_screenshot_filename(step_index, suffix='_rebind'))
+        persisted_attempt = await self._persist_step_attempt(
+            step_index, step, actions[-1], 'completed', '', None, screenshot_path, page, None, [], [],
+        )
+        statuses = persisted_attempt.get('assertion_statuses', []) if persisted_attempt else []
+        required_statuses = self._required_assertion_statuses(step, statuses)
+        if not self._step_assertions_are_verified(step, required_statuses):
+            return None
+        if history is not None:
+            history.artifacts.append({'type': 'rebind_recovery', 'step': step_index, 'statuses': required_statuses})
+        return 'completed', '', actions[-1].get('action') if actions else '', actions, persisted_attempt, screenshot_path
+
     async def _clear_vanished_assertion_bindings(self, page, step, step_index):
+        """Drop bound locators that no longer point at usable evidence so the step can rebind."""
         stale_indexes = []
         for assertion_index, assertion in enumerate(step.get('assertions') or [], start=1):
-            if not isinstance(assertion, dict) or assertion.get('operator') != 'exists':
+            if not isinstance(assertion, dict) or assertion.get('assert_kind') not in {'field_value', 'popup', 'element_state', 'collection'}:
+                continue
+            operator = assertion.get('operator')
+            if operator in {'not_exists', 'not_contains'}:
                 continue
             target = assertion.get('target') or {}
             locator = str(target.get('locator') or '').strip()
             if not locator:
                 continue
+            expected_value = (assertion.get('expected') or {}).get('value') if isinstance(assertion.get('expected'), dict) else None
             try:
                 handle = page.locator(locator)
                 if await handle.count() == 0:
+                    if assertion.get('assert_kind') == 'collection' and operator == 'equals' and str(expected_value) == '0':
+                        continue  # an empty collection is exactly what this contract expects
                     stale_indexes.append(assertion_index)
-                elif target.get('visual_content') == 'image' and not await handle.first.is_visible():
+                elif (
+                    operator == 'exists'
+                    and assertion.get('assert_kind') in {'popup', 'element_state'}
+                    and not await handle.first.is_visible()
+                ):
                     # Portal-level structural selectors drift when sibling layers appear or close;
-                    # an invisible image target is no longer evidence for this assertion.
+                    # an invisible target is no longer evidence for an existence assertion.
                     stale_indexes.append(assertion_index)
             except Exception:
                 continue
@@ -2302,8 +3399,32 @@ class PyUICompatAgent:
         for attempt in attempts:
             if not isinstance(attempt.action, dict):
                 continue
-            history.append({**attempt.action, 'status': attempt.status})
+            history.append({**attempt.action, 'status': attempt.status, 'error': str(attempt.error_message or '')[:200]})
         return history
+
+    def _step_time_budget_seconds(self):
+        settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
+        browser = settings.get('ai_testing_browser', {}) if isinstance(settings, dict) else {}
+        try:
+            return max(60, min(3600, int(browser.get('step_time_budget_seconds', 600))))
+        except (TypeError, ValueError):
+            return 600
+
+    def _step_budget_exhausted(self):
+        return self._step_deadline is not None and time.monotonic() >= self._step_deadline
+
+    @staticmethod
+    def _action_signature(actions):
+        return json.dumps(
+            [
+                {key: action.get(key) for key in ('action', 'selector', 'value', 'param', 'url', 'role', 'accessible_name')}
+                for action in actions or []
+                if isinstance(action, dict)
+            ],
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        )
 
     def _assertion_replan_limit(self):
         settings = getattr(self.environment_configuration, 'runtime_settings', {}) or {}
@@ -2477,6 +3598,13 @@ class PyUICompatAgent:
             validate_browser_action(action, step.get('allowed_capabilities') or [])
 
     async def _plan_ai_step(self, page, step):
+        image_assertions = self._image_assertions(step)
+        if image_assertions and not any(
+            isinstance(action, dict) and action.get('status') == 'completed' for action in step.get('_prior_actions') or []
+        ):
+            # A verify-only step ("locate camera X and check its thumbnail") plans straight from the current page;
+            # give lazily loaded thumbnails the same chance to render that post-action binding gets.
+            await self._wait_for_rendered_visual_content(page, step, image_assertions)
         from apps.ai_testing.execution.mcp_tools import (
             BrowserMCPToolAdapter,
             MCPInProcessClient,
@@ -2520,6 +3648,15 @@ class PyUICompatAgent:
         )
         return normalized_actions
 
+    @staticmethod
+    def _planner_control_baseline(actionable_controls):
+        """The trimmed control list kept as the pre-action baseline for binders and effect detection."""
+        return [
+            {key: control.get(key) for key in PLANNER_CONTROL_KEYS}
+            for control in (actionable_controls or [])[:300]
+            if isinstance(control, dict)
+        ]
+
     async def _collect_planner_observation(self, page, step):
         current_url = page.url or ''
         try:
@@ -2540,15 +3677,15 @@ class PyUICompatAgent:
         from apps.ai_testing.execution.page_observation import capture_accessibility_snapshot
 
         actionable_controls = await self._build_actionable_controls(page)
-        self._last_actionable_controls = [
-            {
-                key: control.get(key)
-                for key in ('selector', 'group_selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'has_visual_content', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'dialog_layer', 'z_index', 'container_text')
-            }
-            for control in actionable_controls[:300]
-            if isinstance(control, dict)
-        ]
-        observable_elements = await self._build_observable_elements(page)
+        prior_actions = step.get('_prior_actions') or []
+        hover_state = bool(prior_actions) and str((prior_actions[-1] or {}).get('action') or '') == 'hover'
+        if not hover_state:  # probing would move the mouse and close a hover-revealed menu
+            await self._enrich_icon_control_names(page, actionable_controls)
+        self._last_actionable_controls = self._planner_control_baseline(actionable_controls)
+        observable_elements = self._dedupe_observable_elements(
+            actionable_controls,
+            await self._build_observable_elements(page),
+        )
         accessibility_snapshot = await capture_accessibility_snapshot(page)
         self._last_accessibility_snapshot = accessibility_snapshot
         try:
@@ -2600,6 +3737,168 @@ class PyUICompatAgent:
             'error': step.get('_planner_failure', ''),
             'screenshot': await self._capture_inline_screenshot_data(page),
         }
+
+    @staticmethod
+    def _rect_inside(inner, outer, tolerance: int = 2) -> bool:
+        if not isinstance(inner, dict) or not isinstance(outer, dict):
+            return False
+        try:
+            ix, iy, iw, ih = (float(inner.get(key) or 0) for key in ('x', 'y', 'width', 'height'))
+            ox, oy, ow, oh = (float(outer.get(key) or 0) for key in ('x', 'y', 'width', 'height'))
+        except (TypeError, ValueError):
+            return False
+        return iw > 0 and ih > 0 and ix >= ox - tolerance and iy >= oy - tolerance and ix + iw <= ox + ow + tolerance and iy + ih <= oy + oh + tolerance
+
+    def _step_targets_configured_camera(self, step) -> bool:
+        camera_names = default_device_camera_names(self._execution_resources)
+        description = f"{step.get('description') or ''} {step.get('intent') or ''}"
+        return bool(camera_names) and refers_to_target_device(description, camera_names)
+
+    async def _target_camera_card_rects(self, page, step) -> list[dict]:
+        """Rects of visible controls named after the environment's target camera, for steps about that camera."""
+        camera_names = default_device_camera_names(self._execution_resources)
+        names = [name.casefold() for name in camera_names]
+        description = f"{step.get('description') or ''} {step.get('intent') or ''}"
+        if not names or not refers_to_target_device(description, camera_names):
+            if not names:
+                logger.info('planner_v2 target camera rects: no environment device cameras among %s resources', len(self._execution_resources))
+            return []
+        rects = []
+        controls = await self._build_actionable_controls(page)
+        for control in controls:
+            if not isinstance(control, dict) or not isinstance(control.get('rect'), dict) or is_text_input(control):
+                continue
+            shown = ' '.join(str(control.get('name') or '').split()).casefold()
+            if any(name in shown for name in names) and int(control['rect'].get('width') or 0) >= 60:
+                rects.append(control['rect'])
+        logger.info('planner_v2 target camera rects: cameras=%s controls=%s matched=%s', camera_names, len(controls), len(rects))
+        return rects
+
+    def _seed_environment_resources(self) -> None:
+        """Publish the environment's configured test devices as execution-scoped resources for the planner."""
+        existing = {
+            str(resource.get('resource_id') or '')
+            for resource in self._execution_resources
+            if isinstance(resource, dict) and resource.get('resource_type') == 'environment_device'
+        }
+        for resource in environment_device_resources(self.environment_configuration):
+            if str(resource.get('resource_id') or '') not in existing:
+                self._execution_resources.append(resource)
+
+    async def _click_target_moved(self, page, action: dict) -> bool:
+        """True when the clicked selector now resolves elsewhere (or nowhere) than the element that was clicked.
+
+        Value-based selectors such as ``[title="Close"]`` match a menu option first and the control that
+        displays the chosen value afterwards; repeating such a click would toggle the menu again.
+        """
+        selector = str(action.get('selector') or '').strip()
+        if not selector or not isinstance(self._last_click_box, dict):
+            return False
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0:
+                return True
+            box = await locator.bounding_box()
+        except Exception as error:
+            logger.info('planner_v2 click target probe failed for %s: %s', selector, error)
+            return False
+        if not isinstance(box, dict):
+            return True
+        return any(round(float(box.get(key) or 0)) != round(float(self._last_click_box.get(key) or 0)) for key in ('x', 'y', 'width', 'height'))
+
+    async def _enrich_icon_control_names(self, page, controls):
+        """Name icon-only toolbar buttons from their hover tooltips.
+
+        A player toolbar is a row of unnamed svg buttons; without names the planner picks one by DOM index
+        and regularly lands on the neighbour ("Create Case" instead of "Download"). Hovering reveals the
+        tooltip, which is the very word the step description uses. Probing is bounded, skipped while a
+        blocking layer is open, and cached per page path and button position.
+        """
+        if not isinstance(controls, list):
+            return
+        if any(isinstance(control, dict) and control.get('blocking_layer') is True for control in controls):
+            return
+        unnamed = []
+        for control in controls:
+            if not isinstance(control, dict) or control.get('tag') != 'button' or str(control.get('name') or '').strip():
+                continue
+            rect = control.get('rect') if isinstance(control.get('rect'), dict) else {}
+            selector = str(control.get('selector') or '').strip()
+            width, height = int(rect.get('width') or 0), int(rect.get('height') or 0)
+            if selector and ' > ' in selector and 16 <= width <= 96 and 16 <= height <= 96:
+                unnamed.append(control)
+        groups: dict[str, list[dict]] = {}
+        for control in unnamed:
+            groups.setdefault(control['selector'].rsplit(' > ', 1)[0], []).append(control)
+        candidates = [control for group in groups.values() if len(group) >= 3 for control in group][:ICON_TOOLTIP_PROBE_LIMIT]
+        if not candidates:
+            return
+        cache = self._tooltip_name_cache.setdefault(urlsplit(str(page.url or '')).path, {})
+
+        def key_for(control):
+            rect = control['rect']
+            return (control['selector'], int(rect.get('x') or 0) // 8, int(rect.get('y') or 0) // 8)
+
+        pending = [control for control in candidates if key_for(control) not in cache]
+        if pending:
+            try:
+                previous = set((await page.evaluate(TOOLTIP_PROBE_JS, ''))['texts'])
+            except Exception as error:
+                logger.info('planner_v2 tooltip probe unavailable: %s', error)
+                return
+            for control in pending:
+                rect = control['rect']
+                name = ''
+                try:
+                    await page.mouse.move(rect['x'] + rect['width'] / 2, rect['y'] + rect['height'] / 2)
+                    await page.wait_for_timeout(ICON_TOOLTIP_HOVER_MS)
+                    probe = await page.evaluate(TOOLTIP_PROBE_JS, control['selector'])
+                    texts = [str(text) for text in (probe.get('texts') or [])]
+                    fresh = [text for text in texts if text not in previous]
+                    name = str(probe.get('described') or '').strip() or (fresh[0] if len(fresh) == 1 else '')
+                    previous = set(texts)
+                except Exception as error:
+                    logger.info('planner_v2 tooltip probe failed for %s: %s', control['selector'], error)
+                cache[key_for(control)] = name
+            try:
+                await page.mouse.move(1, 1)  # leave the toolbar so the last tooltip closes before the screenshot
+                await page.wait_for_timeout(150)
+            except Exception:
+                pass
+        named = 0
+        for control in candidates:
+            name = cache.get(key_for(control), '')
+            if name:
+                control['name'] = name
+                control['name_source'] = 'tooltip'
+                named += 1
+        if named:
+            logger.info('planner_v2 named %s icon button(s) from tooltips on %s', named, urlsplit(str(page.url or '')).path)
+
+    @staticmethod
+    def _dedupe_observable_elements(actionable_controls, observable_elements):
+        """Remove observables that are the same node as an actionable control (rect and text match)."""
+        control_keys = set()
+        for control in actionable_controls or []:
+            if not isinstance(control, dict) or not isinstance(control.get('rect'), dict):
+                continue
+            rect = control['rect']
+            control_keys.add((
+                tuple(int(rect.get(key) or 0) for key in ('x', 'y', 'width', 'height')),
+                str(control.get('name') or '').strip(),
+            ))
+        deduped = []
+        for element in observable_elements or []:
+            if isinstance(element, dict) and isinstance(element.get('rect'), dict):
+                rect = element['rect']
+                key = (
+                    tuple(int(rect.get(key) or 0) for key in ('x', 'y', 'width', 'height')),
+                    str(element.get('text') or '').strip(),
+                )
+                if key in control_keys and not element.get('group_selector'):
+                    continue
+            deduped.append(element)
+        return deduped
 
     async def _build_actionable_controls(self, page):
         try:
@@ -2666,9 +3965,27 @@ class PyUICompatAgent:
                     const uniqueId = element.id && document.querySelectorAll(`#${CSS.escape(element.id)}`).length === 1;
                     const attributeSelector = (attribute, value) => `[${attribute}=${JSON.stringify(value)}]`;
                     const structuralSelector = (target = element) => {
+                        const uniqueAnchor = (node) => {
+                            if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`;
+                            const testId = node.getAttribute('data-testid');
+                            if (testId && document.querySelectorAll(`[data-testid=${JSON.stringify(testId)}]`).length === 1) return `[data-testid=${JSON.stringify(testId)}]`;
+                            if (node.parentElement === document.body) {
+                                const classes = typeof node.className === 'string' ? node.className.split(/\\s+/).filter(Boolean) : [];
+                                if (classes.length) {
+                                    const candidate = `body > ${node.tagName.toLowerCase()}${classes.map(token => `.${CSS.escape(token)}`).join('')}`;
+                                    if (document.querySelectorAll(candidate).length === 1) return candidate;
+                                }
+                            }
+                            return '';
+                        };
                         const parts = [];
                         let current = target;
                         while (current && current !== document.body) {
+                            const anchor = uniqueAnchor(current);
+                            if (anchor) {
+                                const anchored = parts.length ? `${anchor} > ${parts.join(' > ')}` : anchor;
+                                if (document.querySelectorAll(anchored).length === 1) return anchored;
+                            }
                             const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
                             const position = siblings.indexOf(current) + 1;
                             parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${position})`);
@@ -2681,7 +3998,10 @@ class PyUICompatAgent:
                         return '';
                     };
                     const selector = uniqueId ? `#${CSS.escape(element.id)}` : element.dataset.testid ? attributeSelector('data-testid', element.dataset.testid) : element.getAttribute('aria-label') ? attributeSelector('aria-label', element.getAttribute('aria-label')) : title ? attributeSelector('title', title) : href ? attributeSelector('href', href) : structuralSelector();
-                    const url = href ? new URL(href, document.baseURI).href : '';
+                    let url = '';
+                    if (href) {
+                        try { url = new URL(href, document.baseURI).href; } catch (error) { url = href; }
+                    }
                     const rect = element.getBoundingClientRect();
                     const depth = (() => { let value = 0; let current = element; while (current && current !== document.body) { value += 1; current = current.parentElement; } return value; })();
                     const nativeControl = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
@@ -2696,9 +4016,9 @@ class PyUICompatAgent:
                         ? `${parentSelector} > ${element.tagName.toLowerCase()}${groupClass}`
                         : '';
                     const hasRenderedVisual = element.tagName === 'IMG'
-                        ? (element.complete && element.naturalWidth > 1 && element.naturalHeight > 1)
+                        ? (element.naturalWidth > 1 && element.naturalHeight > 1)
                         : (getComputedStyle(element).backgroundImage !== 'none' || Array.from(element.querySelectorAll('img, canvas, video')).some(candidate => (
-                            candidate instanceof HTMLImageElement ? (candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1)
+                            candidate instanceof HTMLImageElement ? (candidate.naturalWidth > 1 && candidate.naturalHeight > 1)
                                 : candidate instanceof HTMLCanvasElement ? (candidate.width > 1 && candidate.height > 1)
                                 : (candidate.readyState >= 2 && candidate.videoWidth > 1)
                         )));
@@ -2756,7 +4076,7 @@ class PyUICompatAgent:
                     const rect = element.getBoundingClientRect();
                     const text = (element.getAttribute('aria-label') || element.getAttribute('title') || element.getAttribute('alt') || element.innerText || element.value || '').trim();
                     const ratio = (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight);
-                    const ownVisual = (element instanceof HTMLImageElement && element.complete && element.naturalWidth > 1 && element.naturalHeight > 1)
+                    const ownVisual = (element instanceof HTMLImageElement && element.naturalWidth > 1 && element.naturalHeight > 1)
                         || (element instanceof HTMLCanvasElement && element.width > 1 && element.height > 1)
                         || (element instanceof HTMLVideoElement && element.readyState >= 2 && element.videoWidth > 1)
                         || (style.backgroundImage !== 'none' && rect.width >= 24 && rect.height >= 24);
@@ -2767,11 +4087,30 @@ class PyUICompatAgent:
                     return { element, order, offscreen };
                 }).sort((left, right) => left.offscreen - right.offscreen || left.order - right.order).slice(0, 200).map(({ element }, index) => {
                     const structuralSelector = (target = element) => {
+                        const uniqueAnchor = (node) => {
+                            if (node.id && document.querySelectorAll(`#${CSS.escape(node.id)}`).length === 1) return `#${CSS.escape(node.id)}`;
+                            const testId = node.getAttribute('data-testid');
+                            if (testId && document.querySelectorAll(`[data-testid=${JSON.stringify(testId)}]`).length === 1) return `[data-testid=${JSON.stringify(testId)}]`;
+                            if (node.parentElement === document.body) {
+                                const classes = typeof node.className === 'string' ? node.className.split(/\\s+/).filter(Boolean) : [];
+                                if (classes.length) {
+                                    const candidate = `body > ${node.tagName.toLowerCase()}${classes.map(token => `.${CSS.escape(token)}`).join('')}`;
+                                    if (document.querySelectorAll(candidate).length === 1) return candidate;
+                                }
+                            }
+                            return '';
+                        };
                         const parts = [];
                         let current = target;
                         while (current && current !== document.body) {
+                            const anchor = uniqueAnchor(current);
+                            if (anchor) {
+                                const anchored = parts.length ? `${anchor} > ${parts.join(' > ')}` : anchor;
+                                if (document.querySelectorAll(anchored).length === 1) return anchored;
+                            }
                             const siblings = Array.from(current.parentElement.children).filter(sibling => sibling.tagName === current.tagName);
-                            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`);
+                            const position = siblings.indexOf(current) + 1;
+                            parts.unshift(`${current.tagName.toLowerCase()}:nth-of-type(${position})`);
                             if (current.parentElement === document.body) {
                                 const candidate = `body > ${parts.join(' > ')}`;
                                 if (document.querySelectorAll(candidate).length === 1) return candidate;
@@ -2793,7 +4132,7 @@ class PyUICompatAgent:
                         : '';
                     const visualElements = [element, ...element.querySelectorAll('img, canvas, video, [style]')];
                     const hasVisualContent = visualElements.some(candidate => {
-                        if (candidate instanceof HTMLImageElement) return candidate.complete && candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
+                        if (candidate instanceof HTMLImageElement) return candidate.naturalWidth > 1 && candidate.naturalHeight > 1;
                         if (candidate instanceof HTMLCanvasElement) return candidate.width > 1 && candidate.height > 1;
                         if (candidate instanceof HTMLVideoElement) return candidate.readyState >= 2 && candidate.videoWidth > 1 && candidate.videoHeight > 1;
                         return getComputedStyle(candidate).backgroundImage !== 'none';
@@ -2802,30 +4141,13 @@ class PyUICompatAgent:
                 }).filter(element => element.selector);
                 """
             )
-            from apps.ai_testing.execution.browser_observers import measure_visual_signal
-
-            viewport = getattr(page, 'viewport_size', None) or {}
-            viewport_height = int(viewport.get('height') or 0) if isinstance(viewport, dict) else 0
-            viewport_width = int(viewport.get('width') or 0) if isinstance(viewport, dict) else 0
+            # Discovery reports whether an element has rendered image content but never screenshots
+            # elements: per-element screenshots cost seconds each (and scroll the page), which turned
+            # observation of media-heavy pages into a multi-minute stall. The pixel-level signal is
+            # measured only at evidence time for the one element an assertion is bound to.
             for element in elements:
-                if not element.get('has_visual_content'):
-                    continue
-                rect = element.get('rect') or {}
-                offscreen = (
-                    int(rect.get('y') or 0) + int(rect.get('height') or 0) <= 0
-                    or (viewport_height and int(rect.get('y') or 0) >= viewport_height)
-                    or int(rect.get('x') or 0) + int(rect.get('width') or 0) <= 0
-                    or (viewport_width and int(rect.get('x') or 0) >= viewport_width)
-                )
-                if offscreen:
-                    # Screenshotting scrolls the element into view; never move the page during observation.
+                if element.get('has_visual_content'):
                     element['visual_signal'] = None
-                    continue
-                try:
-                    frame = await page.locator(element['selector']).first.screenshot(type='png', timeout=3000)
-                    element['visual_signal'] = measure_visual_signal(frame)
-                except Exception:
-                    element['visual_signal'] = False
             return elements
         except Exception:
             return []
@@ -3016,6 +4338,62 @@ class PyUICompatAgent:
         except Exception:
             return None
 
+    async def _recover_control_by_observed_geometry(self, page, selector):
+        """Re-find a control whose structural selector drifted (auto-hiding toolbars, re-indexed siblings).
+
+        The planner chose the selector from an observation that also recorded the control's geometry.
+        Hovering that spot re-reveals auto-hidden controls; if the selector still fails, the element now
+        occupying the same spot is used when it is a genuine control.
+        """
+        observed = next(
+            (
+                control
+                for control in self._last_actionable_controls
+                if isinstance(control, dict) and str(control.get('selector') or '').strip() == selector
+            ),
+            None,
+        )
+        rect = observed.get('rect') if isinstance(observed, dict) and isinstance(observed.get('rect'), dict) else None
+        if not rect or int(rect.get('width') or 0) <= 0 or int(rect.get('height') or 0) <= 0:
+            return None
+        center_x = int(rect['x']) + int(rect['width']) / 2
+        center_y = int(rect['y']) + int(rect['height']) / 2
+        try:
+            await page.mouse.move(center_x, center_y)
+            await page.wait_for_timeout(400)
+            revealed = await self._resolve_locator(page, selector)
+            if revealed is not None:
+                self._runtime_events.append({'type': 'selector_recovery', 'selector': selector, 'method': 'hover_reveal'})
+                return revealed
+        except Exception as error:
+            logger.info('planner_v2 geometry recovery hover failed: %s', error)
+            return None
+        try:
+            probe = await page.evaluate(
+                """([x, y]) => {
+                    const element = document.elementFromPoint(x, y);
+                    if (!element) return null;
+                    const control = element.closest('button, a, [role="button"], [role="menuitem"], [role="tab"], [role="option"], input, select, [onclick], [tabindex]');
+                    if (!control) return null;
+                    const rect = control.getBoundingClientRect();
+                    return { tag: control.tagName.toLowerCase(), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, name: (control.getAttribute('aria-label') || control.getAttribute('title') || control.innerText || '').trim().slice(0, 80) };
+                }""",
+                [center_x, center_y],
+            )
+        except Exception as error:
+            logger.info('planner_v2 geometry recovery probe failed: %s', error)
+            return None
+        if not probe:
+            return None
+        self._runtime_events.append({
+            'type': 'selector_recovery',
+            'selector': selector,
+            'method': 'element_at_observed_position',
+            'resolved_tag': probe.get('tag'),
+            'resolved_name': probe.get('name'),
+        })
+        return _PointClickTarget(page, float(probe['x']), float(probe['y']))
+
     async def _resolve_step_locator(self, page, step):
         role = str(step.get('role') or '').strip()
         accessible_name = str(step.get('accessible_name') or '').strip()
@@ -3129,7 +4507,17 @@ class PyUICompatAgent:
         if action in {'click'}:
             locator = await self._resolve_step_locator(page, step)
             point = self._parse_point(loc) or self._parse_point(param)
+            if locator is None and point is None and selector:
+                locator = await self._recover_control_by_observed_geometry(page, selector)
             if locator is not None:
+                self._last_click_box = None
+                bounding_box = getattr(locator, 'bounding_box', None)
+                if callable(bounding_box):
+                    try:
+                        box = await bounding_box()
+                        self._last_click_box = box if isinstance(box, dict) else None
+                    except Exception:
+                        self._last_click_box = None
                 await locator.click(timeout=timeout_ms)
             elif point is not None:
                 await page.mouse.click(point[0], point[1])
@@ -3480,6 +4868,11 @@ class PyUICompatAgent:
         if self._fill_matches(value, observed):
             return
         logger.info('planner_v2 fill mismatch expected=%r observed=%r; retyping through keyboard', value, observed)
+        event = {
+            'type': 'fill_repair',
+            'expected': self._audit_value(value, None),
+            'observed_before': self._audit_value(observed, None),
+        }
         try:
             await locator.click(timeout=timeout_ms)
             await locator.press('Control+A')
@@ -3493,8 +4886,11 @@ class PyUICompatAgent:
             observed = await locator.input_value(timeout=2000)
         except Exception as error:
             logger.info('planner_v2 fill repair failed: %s', error)
+            self._runtime_events.append({**event, 'result': 'error', 'error': f'{type(error).__name__}: {error}'})
             return
-        if not self._fill_matches(value, observed):
+        matched = self._fill_matches(value, observed)
+        self._runtime_events.append({**event, 'observed_after': self._audit_value(observed, None), 'result': 'repaired' if matched else 'mismatch'})
+        if not matched:
             logger.info('planner_v2 fill still mismatched after keyboard retype: expected=%r observed=%r', value, observed)
 
     async def _assert_stream_active(self, page, timeout_ms):
@@ -3673,7 +5069,7 @@ class PyUICompatAgent:
                 return
             if not login_ready:
                 await self._capture_bootstrap_debug(page, step_callback, 'login_form_not_ready')
-            raise AssertionError('planner_v2 bootstrap could not find login form')
+            raise EnvironmentBootstrapError('planner_v2 bootstrap could not find login form')
 
         if login.username and login.password:
             last_login_error = None
@@ -3703,7 +5099,7 @@ class PyUICompatAgent:
                         await page.goto(login.login_url, wait_until='commit', timeout=60000)
                         await self._wait_login_page_ready(page, timeout_ms=30000)
             if last_login_error is not None:
-                raise AssertionError(f'planner_v2 bootstrap login did not reach dashboard: {last_login_error}') from last_login_error
+                raise EnvironmentBootstrapError(f'planner_v2 bootstrap login did not reach dashboard: {last_login_error}') from last_login_error
 
             await self._emit(step_callback, {'type': 'log', 'content': '[planner_v2] Bootstrap login complete.\n'})
 

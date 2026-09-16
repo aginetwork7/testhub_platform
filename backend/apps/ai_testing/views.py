@@ -1,13 +1,10 @@
 import logging
-import threading
 import os
 import re
 import json
 from pathlib import Path
 from django.conf import settings
-from asgiref.sync import sync_to_async
-from django.db import connection, DatabaseError, transaction
-from django.utils import timezone
+from django.db import connection, transaction
 from django.db import models
 from django.http import HttpResponse
 from rest_framework import viewsets, filters, status
@@ -18,16 +15,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import AiProject, AICase, AIExecutionExperience, AIExecutionRecord
 from .serializers import AiProjectSerializer, AICaseSerializer, AIExecutionExperienceSerializer, AIExecutionRecordSerializer
-from .ai_testing import run_full_process_sync
 from .global_planner import GlobalPlanError, GlobalTestPlanner
 from .alpha.access import accessible_ai_project_queryset
-from .execution.plan_persistence import persist_execution_plan
-from .execution.quality_gate_persistence import evaluate_execution_quality_gate
 
 logger = logging.getLogger(__name__)
 
 # 全局字典，用于存储停止信号
-STOP_SIGNALS = {}
+from .execution.dispatch import STOP_SIGNALS, dispatch_ai_execution, launch_case_execution, process_gif_recording, request_stop  # noqa: E402
 
 
 def parse_request_bool(value, default=True):
@@ -298,6 +292,7 @@ class AICaseViewSet(viewsets.ModelViewSet):
         ai_case = ai_case or self.get_object()
         execution_mode = request.data.get('execution_mode', 'planner_v2')
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
+        force_replan = parse_request_bool(request.data.get('force_replan'), default=False)
         configuration_id = request.data.get('environment_configuration_id')
         if configuration_id is not None:
             try:
@@ -321,232 +316,14 @@ class AICaseViewSet(viewsets.ModelViewSet):
             if not has_configuration_access:
                 return Response({'error': '设备 CLI 环境不存在或无访问权限'}, status=status.HTTP_403_FORBIDDEN)
 
-        # 创建执行记录
-        execution_record = AIExecutionRecord.objects.create(
-            project=ai_case.project,
-            ai_case=ai_case,
-            environment_configuration=environment_configuration,
-            case_name=ai_case.name,
-            task_description=ai_case.task_description,
+        execution_record = launch_case_execution(
+            ai_case,
+            user=request.user,
             execution_mode=execution_mode,
-            status='running',
-            executed_by=request.user,
-            logs="正在分析任务...\n"
+            use_cache=use_cache,
+            environment_configuration=environment_configuration,
+            force_replan=force_replan,
         )
-
-        # 异步执行
-        import threading
-        import os
-        from asgiref.sync import sync_to_async
-        from django.db import connection, DatabaseError
-        from .ai_testing import run_full_process_sync
-
-        def run_task():
-            # 注册停止信号
-            STOP_SIGNALS[execution_record.id] = False
-
-            # 关键修复：关闭旧连接，避免子线程共享主线程的连接
-            try:
-                connection.close()
-            except:
-                pass
-
-            # 设置环境变量，允许在后台线程中使用同步 ORM
-            os.environ['DJANGO_ALLOW_ASYNC_UNSAFE'] = 'true'
-
-            def safe_save(record, update_fields=None, max_retries=3):
-                """安全的保存方法，带有重试机制"""
-                for attempt in range(max_retries):
-                    try:
-                        record.save(update_fields=update_fields)
-                        return True
-                    except (DatabaseError, Exception) as e:
-                        error_str = str(e)
-                        # 检查是否是MySQL连接错误
-                        if '2006' in error_str or 'MySQL server has gone away' in error_str or '0' == error_str:
-                            if attempt < max_retries - 1:
-                                logger.warning(f"数据库连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-                                # 关闭旧连接并重试
-                                try:
-                                    connection.close()
-                                except:
-                                    pass
-                                import time
-                                time.sleep(0.5)  # 等待一下再重试
-                                continue
-                            else:
-                                logger.error(f"数据库保存失败，已达最大重试次数: {e}")
-                                raise
-                        else:
-                            # 其他错误直接抛出
-                            logger.error(f"数据库保存失败: {e}")
-                            raise
-                return False
-
-            try:
-                def should_stop():
-                    return STOP_SIGNALS.get(execution_record.id, False)
-
-                async def on_analysis_complete(planned_tasks):
-                    execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
-                    await sync_to_async(persist_execution_plan)(
-                        execution_record.id,
-                        ai_case.task_description,
-                        execution_record.planned_tasks,
-                    )
-                    execution_record.logs += "任务分析完成，开始执行...\n"
-                    await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
-
-                async def on_step_update(step_info):
-                    try:
-                        # 处理日志
-                        if step_info.get('type') == 'log':
-                            content = step_info.get('content')
-                            if content:
-                                execution_record.logs += content
-                                await sync_to_async(safe_save)(execution_record, update_fields=['logs'])
-                            return
-
-                        # 处理任务状态
-                        task_id = step_info.get('task_id')
-                        status = step_info.get('status')
-                        if task_id and status:
-                            execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                            updated = update_planned_task_status(
-                                execution_record.planned_tasks,
-                                task_id,
-                                status
-                            )
-                            if updated:
-                                await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks'])
-                    except Exception as e:
-                        logger.error(f"更新步骤状态失败: {e}")
-
-                use_persisted_freeform_plan = (
-                    ai_case.case_mode == 'freeform'
-                    and has_canonical_freeform_plan(
-                        ai_case.planned_steps,
-                        environment_configuration.id if environment_configuration else None,
-                        ai_case.task_description,
-                    )
-                )
-                if ai_case.case_mode == 'freeform' and ai_case.planned_steps and not use_persisted_freeform_plan:
-                    execution_record.logs += '[planner_v2] Ignored legacy persisted plan that does not meet the current assertion and capability contract.\n'
-                    safe_save(execution_record, update_fields=['logs'])
-                runtime_task_steps = (
-                    ai_case.planned_steps
-                    if ai_case.case_mode == 'freeform' and ai_case.planned_steps
-                    else ai_case.task_steps
-                )
-
-                history = run_full_process_sync(
-                    ai_case.task_description,
-                    analysis_callback=on_analysis_complete,
-                    step_callback=on_step_update,
-                    should_stop=should_stop,
-                    execution_mode=execution_mode,
-                    enable_gif=(execution_mode == 'text'),
-                    case_name=ai_case.name,
-                    case_mode='hybrid' if use_persisted_freeform_plan else ai_case.case_mode,
-                    task_steps=runtime_task_steps,
-                    use_cache=use_cache,
-                    execution_user_id=request.user.id,
-                    environment_configuration=environment_configuration,
-                    ai_project_id=ai_case.project_id,
-                    execution_record_id=execution_record.id,
-                    ai_case_id=ai_case.id,
-                )
-
-                # 检查是否是手动停止
-                if should_stop():
-                    execution_record.status = 'stopped'
-                    execution_record.logs += "\n[System] 任务已由用户停止。"
-                else:
-                    execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    quality_gate_result = evaluate_execution_quality_gate(execution_record.id)
-                    if quality_gate_result is None:
-                        execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
-                    else:
-                        execution_record.status = quality_gate_result.status
-                        task_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                    if execution_record.status == 'passed':
-                        execution_record.logs += "\n执行完成。"
-                    elif execution_record.status == 'inconclusive':
-                        execution_record.logs += "\n执行结束，但计划为空或仍有未完成子任务，无法证明通过。"
-                    else:
-                        execution_record.logs += "\n执行结束，但存在未完成或失败的子任务。"
-                    logger.info(
-                        "🏁 Task completion summary: "
-                        f"{task_summary['completed']}/{task_summary['total']} completed, "
-                        f"{task_summary['failed']} failed, "
-                        f"{task_summary['pending'] + task_summary['in_progress']} pending"
-                    )
-
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-
-                # 格式化 history 为日志 (如果不是停止状态)
-                steps = []
-                if history:
-                    if hasattr(history, 'steps'):
-                        steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
-                    if hasattr(history, 'planner_trace'):
-                        execution_record.planner_trace = history.planner_trace or {}
-                    if hasattr(history, 'artifacts'):
-                        execution_record.artifacts = history.artifacts or []
-                        execution_record.screenshots_sequence = extract_screenshot_sequence(execution_record.artifacts)
-                    if hasattr(history, 'cache_stats'):
-                        execution_record.cache_stats = history.cache_stats or {}
-
-                execution_record.steps_completed = steps
-
-                if execution_record.planned_tasks:
-                    execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    execution_record.logs = append_execution_summary(
-                        execution_record.logs,
-                        summarize_planned_tasks(execution_record.planned_tasks)
-                    )
-
-                # 处理GIF录制文件
-                if execution_record.execution_mode == 'text':
-                    self._process_gif_recording(execution_record, history)
-
-                safe_save(execution_record)
-
-            except Exception as e:
-                error_message = str(e)
-                logger.error(f"AI 执行线程异常: {error_message}", exc_info=True)
-                execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                current_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
-                execution_record.status = 'failed'
-                if 'Execution LLM unavailable' in error_message:
-                    execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
-                else:
-                    execution_record.logs += f"\n执行出错: {error_message}"
-                if failed_task_id is not None:
-                    execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
-
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                execution_record.logs = append_execution_summary(
-                    execution_record.logs,
-                    summarize_planned_tasks(execution_record.planned_tasks)
-                )
-                try:
-                    safe_save(execution_record)
-                except:
-                    # 如果保存失败，至少尝试保存基本信息
-                    logger.error(f"保存失败状态时出错: {e}")
-                    pass
-            finally:
-                # 清理停止信号
-                if execution_record.id in STOP_SIGNALS:
-                    del STOP_SIGNALS[execution_record.id]
-
-        thread = threading.Thread(target=run_task)
-        thread.daemon = True
-        thread.start()
 
         return Response({
             'message': 'AI 用例开始执行',
@@ -624,48 +401,8 @@ class AICaseViewSet(viewsets.ModelViewSet):
         return self.run(request, pk=pk)
 
     def _process_gif_recording(self, execution_record, history):
-        """
-        处理GIF录制文件
-        在执行完成后查找生成的GIF文件并保存路径到数据库
-        """
-        try:
-            import os
-            from django.conf import settings
-            from datetime import datetime
-
-            # browser-use 默认生成的GIF文件名（固定为agent_history.gif）
-            default_gif_path = os.path.join(os.getcwd(), 'agent_history.gif')
-
-            # 如果找到GIF文件，移动到media/ai_recording目录并重命名
-            if os.path.exists(default_gif_path):
-                import shutil
-
-                # 创建录制文件目录 - 使用配置文件中的路径
-                gif_dir = os.path.join(settings.MEDIA_ROOT, settings.ALLURE_AI_RECORDING)
-                os.makedirs(gif_dir, exist_ok=True)
-
-                # 生成新的文件名：用例名称+年月日时分秒
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                # 清理用例名称中的非法字符
-                safe_case_name = "".join(
-                    [c if c.isalnum() or c in (' ', '_', '-') else '_' for c in execution_record.case_name])
-                new_gif_filename = f"{safe_case_name}_{timestamp}.gif"
-                new_gif_path = os.path.join(gif_dir, new_gif_filename)
-
-                # 移动并重命名文件
-                shutil.move(default_gif_path, new_gif_path)
-
-                # 保存相对路径到数据库（使用正斜杠，确保跨平台兼容）- 使用配置文件中的路径
-                # 注意：不要包含 'media/' 前缀，因为 MEDIA_URL 已经是 '/media/'
-                relative_path = f'{settings.ALLURE_AI_RECORDING}/{new_gif_filename}'
-                execution_record.gif_path = relative_path
-
-                logger.info(f"✅ GIF recording saved to: {relative_path}")
-            else:
-                logger.warning(f"⚠️ GIF file not found at: {default_gif_path}")
-        except Exception as e:
-            logger.error(f"❌ Error moving GIF file: {e}")
-            logger.warning(f"⚠️ Failed to process GIF recording: {e}")
+        """GIF 录制归档已收敛到 execution.dispatch.process_gif_recording。"""
+        process_gif_recording(execution_record)
 
     def _auto_mark_completed_tasks(self, execution_record):
         """
@@ -703,7 +440,6 @@ class AICaseViewSet(viewsets.ModelViewSet):
 
 
 # 全局停止信号字典 {execution_id: bool}
-STOP_SIGNALS = {}
 
 TERMINAL_TASK_STATUSES = {'completed', 'failed', 'skipped'}
 ACTIVE_TASK_STATUSES = {'pending', 'in_progress'}
@@ -919,6 +655,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         accessible_projects = build_accessible_ai_project_queryset(request.user)
         experiences = AIExecutionExperience.objects.filter(project__in=accessible_projects)
         project_id = request.query_params.get('project')
+        normalized_project_id = None
         if project_id:
             try:
                 normalized_project_id = int(project_id)
@@ -933,6 +670,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         experience_hits = 0
         experience_writes = 0
         revalidated = 0
+        stale_skips = 0
+        plan_cache_hits = 0
         for record in records:
             if record.ai_case_id and record.ai_case_id not in first_records:
                 first_records[record.ai_case_id] = record.status
@@ -941,7 +680,17 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             experience_hits += int(stats.get('experience_hit') or 0)
             experience_writes += int(stats.get('experience_write') or 0)
             revalidated += int(stats.get('revalidated') or 0)
+            stale_skips += int(stats.get('stale_skip') or 0)
+            plan_cache_hits += int(stats.get('plan_cache_hit') or 0)
 
+        from django.utils import timezone as dj_timezone
+
+        from .models import AIActionCacheEntry
+
+        action_cache = AIActionCacheEntry.objects.all()
+        if normalized_project_id is not None:
+            action_cache = action_cache.filter(project_id=normalized_project_id)
+        now = dj_timezone.now()
         first_run_total = len(first_records)
         first_run_passed = sum(status == 'passed' for status in first_records.values())
         total_records = len(records)
@@ -964,6 +713,12 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
                 'experience_hits': experience_hits,
                 'experience_writes': experience_writes,
                 'revalidated': revalidated,
+                'stale_skips': stale_skips,
+                'plan_cache_hits': plan_cache_hits,
+                # What the runtime can actually reuse: verified and confident, regardless of human review.
+                'experience_reusable': experiences.filter(status='verified', confidence__gte=0.7).count(),
+                'action_cache_entries': action_cache.filter(expires_at__gt=now).count(),
+                'action_cache_expired': action_cache.filter(expires_at__lte=now).count(),
             },
         })
 
@@ -1076,6 +831,7 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         case_mode = request.data.get('case_mode', 'freeform')
         task_steps = request.data.get('task_steps') or []
         use_cache = parse_request_bool(request.data.get('use_cache'), default=True)
+        force_replan = parse_request_bool(request.data.get('force_replan'), default=False)
         environment_configuration_id = request.data.get('environment_configuration_id')
 
         if not task_description:
@@ -1114,243 +870,19 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
             logs="正在分析任务...\n"
         )
 
-        # 异步执行
-        import threading
-        import os
-        from asgiref.sync import sync_to_async
-        from django.db import connection, DatabaseError
-        from .ai_testing import run_full_process_sync
-
-        def run_task():
-            # 注册停止信号
-            STOP_SIGNALS[execution_record.id] = False
-
-            # 关键修复：关闭旧连接，避免子线程共享主线程的连接
-            try:
-                connection.close()
-            except:
-                pass
-
-            # 设置环境变量，允许在后台线程中使用同步 ORM
-            os.environ['DJANGO_ALLOW_ASYNC_UNSAFE'] = 'true'
-
-            def safe_save(record, update_fields=None, max_retries=3):
-                """安全的保存方法，带有重试机制"""
-                for attempt in range(max_retries):
-                    try:
-                        record.save(update_fields=update_fields)
-                        return True
-                    except (DatabaseError, Exception) as e:
-                        error_str = str(e)
-                        # 检查是否是MySQL连接错误
-                        if '2006' in error_str or 'MySQL server has gone away' in error_str or '0' == error_str:
-                            if attempt < max_retries - 1:
-                                logger.warning(f"数据库连接失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-                                # 关闭旧连接并重试
-                                try:
-                                    connection.close()
-                                except:
-                                    pass
-                                import time
-                                time.sleep(0.5)  # 等待一下再重试
-                                continue
-                            else:
-                                logger.error(f"数据库保存失败，已达最大重试次数: {e}")
-                                raise
-                        else:
-                            # 其他错误直接抛出
-                            logger.error(f"数据库保存失败: {e}")
-                            raise
-                return False
-
-            try:
-                # 定义异步安全的 should_stop
-                async def should_stop_async():
-                    # 优先检查内存信号
-                    if STOP_SIGNALS.get(execution_record.id, False):
-                        return True
-                    # 兜底检查数据库状态 (使用 sync_to_async 避免异步上下文错误)
-                    # 关键修复：只刷新 status 字段，避免覆盖内存中最新的 planned_tasks
-                    await sync_to_async(execution_record.refresh_from_db)(fields=['status'])
-                    return execution_record.status == 'stopped'
-
-                # 定义同步版本的 should_stop 用于最后检查
-                def should_stop_sync():
-                    if STOP_SIGNALS.get(execution_record.id, False):
-                        return True
-                    # 只刷新 status 字段，避免覆盖内存中最新的 planned_tasks
-                    # 因为 planned_tasks 已经由 on_step_update 实时更新并在内存中是最新的
-                    execution_record.refresh_from_db(fields=['status'])
-                    return execution_record.status == 'stopped'
-
-                async def on_analysis_complete(planned_tasks):
-                    execution_record.planned_tasks = sanitize_planned_tasks(planned_tasks)
-                    await sync_to_async(persist_execution_plan)(
-                        execution_record.id,
-                        task_description,
-                        execution_record.planned_tasks,
-                    )
-                    execution_record.logs += "任务分析完成，开始执行...\n"
-                    await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks', 'logs'])
-
-                async def on_step_update(step_info):
-                    try:
-                        # 处理日志
-                        if step_info.get('type') == 'log':
-                            content = step_info.get('content')
-                            if content:
-                                execution_record.logs += content
-                                # 立即保存到数据库，确保前端轮询能看到最新日志
-                                await sync_to_async(safe_save)(execution_record, update_fields=['logs'])
-                            return
-
-                        # 处理任务状态
-                        task_id = step_info.get('task_id')
-                        status = step_info.get('status')
-                        logger.info(f"DEBUG: on_step_update received: task_id={task_id}, status={status}")
-
-                        if task_id and status:
-                            updated = False
-                            if execution_record.planned_tasks:
-                                execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                                old_status = None
-                                for task in execution_record.planned_tasks:
-                                    if str(task.get('id')) == str(task_id):
-                                        old_status = task.get('status', 'pending')
-                                        break
-                                updated = update_planned_task_status(
-                                    execution_record.planned_tasks,
-                                    task_id,
-                                    status
-                                )
-                                if updated:
-                                    logger.info(f"DEBUG: Updated task {task_id} from {old_status} to {status}")
-                            if updated:
-                                # 立即保存到数据库，确保前端轮询能看到最新状态
-                                await sync_to_async(safe_save)(execution_record, update_fields=['planned_tasks'])
-                            else:
-                                logger.warning(
-                                    f"DEBUG: Task ID {task_id} not found in planned_tasks: {execution_record.planned_tasks}")
-                    except Exception as e:
-                        logger.error(f"更新步骤状态失败: {e}", exc_info=True)
-
-                history = run_full_process_sync(
-                    task_description,
-                    analysis_callback=on_analysis_complete,
-                    step_callback=on_step_update,
-                    should_stop=should_stop_async,  # 传递异步版本
-                    execution_mode=execution_mode,
-                    enable_gif=enable_gif,  # 传递GIF录制开关
-                    case_name=task_description[:50] if task_description else "Adhoc Task",  # 传递用例名称用于GIF文件命名
-                    case_mode=case_mode,
-                    task_steps=task_steps,
-                    use_cache=use_cache,
-                    execution_user_id=request.user.id,
-                    environment_configuration=environment_configuration,
-                    execution_record_id=execution_record.id,
-                )
-
-                # 检查是否是手动停止 (使用同步版本)
-                if should_stop_sync():
-                    execution_record.status = 'stopped'
-                    execution_record.logs += "\n[System] 任务已由用户停止。"
-                else:
-                    execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    # 关键修复：移除可能导致数据回滚的 refresh_from_db 调用
-                    # 内存中的 execution_record.planned_tasks 已经由 on_step_update 实时更新并在内存中是最新的
-                    # 信任内存中的状态，而不是去数据库拉取（可能存在异步写入延迟）
-                    # execution_record.refresh_from_db(fields=['planned_tasks'])
-                    
-                    quality_gate_result = evaluate_execution_quality_gate(execution_record.id)
-                    if quality_gate_result is None:
-                        execution_record.status, task_summary = resolve_execution_status(execution_record.planned_tasks)
-                    else:
-                        execution_record.status = quality_gate_result.status
-                        task_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                    
-                    # 添加详细调试日志，以便排查问题
-                    logger.info(f"🔍 Final task status check before save: {task_summary}")
-                    if execution_record.status != 'passed':
-                        logger.warning(f"⚠️ Execution failed despite tasks completed? Tasks: {execution_record.planned_tasks}")
-
-                    if execution_record.status == 'passed':
-                        execution_record.logs += "\n执行完成。"
-                    elif execution_record.status == 'inconclusive':
-                        execution_record.logs += "\n执行结束，但计划为空或仍有未完成子任务，无法证明通过。"
-                    else:
-                        execution_record.logs += "\n执行结束，但存在未完成或失败的子任务。"
-                    logger.info(
-                        "🏁 Task completion summary: "
-                        f"{task_summary['completed']}/{task_summary['total']} completed, "
-                        f"{task_summary['failed']} failed, "
-                        f"{task_summary['pending'] + task_summary['in_progress']} pending"
-                    )
-
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-
-                # 格式化 history 为日志 (如果不是停止状态)
-                steps = []
-                if history:
-                    if hasattr(history, 'steps'):
-                        steps = [extract_step_info(s, i) for i, s in enumerate(history.steps)]
-                    if hasattr(history, 'planner_trace'):
-                        execution_record.planner_trace = history.planner_trace or {}
-                    if hasattr(history, 'artifacts'):
-                        execution_record.artifacts = history.artifacts or []
-                        execution_record.screenshots_sequence = extract_screenshot_sequence(execution_record.artifacts)
-                    if hasattr(history, 'cache_stats'):
-                        execution_record.cache_stats = history.cache_stats or {}
-
-                execution_record.steps_completed = steps
-
-                if execution_record.planned_tasks:
-                    execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                    execution_record.logs = append_execution_summary(
-                        execution_record.logs,
-                        summarize_planned_tasks(execution_record.planned_tasks)
-                    )
-
-                # 处理GIF录制文件
-                if execution_record.execution_mode == 'text':
-                    self._process_gif_recording(execution_record, history)
-
-                safe_save(execution_record)
-
-            except Exception as e:
-                error_message = str(e)
-                logger.error(f"AI adhoc 执行线程异常: {error_message}", exc_info=True)
-                execution_record.planned_tasks = sanitize_planned_tasks(execution_record.planned_tasks)
-                current_summary = summarize_planned_tasks(execution_record.planned_tasks)
-                failed_task_id = None if is_infrastructure_failure(error_message) else mark_first_active_task(execution_record.planned_tasks, 'failed')
-                execution_record.status = 'failed'
-                if 'Execution LLM unavailable' in error_message:
-                    execution_record.logs += f"\n执行出错: AI 执行模型连接失败。{error_message}"
-                else:
-                    execution_record.logs += f"\n执行出错: {error_message}"
-                if failed_task_id is not None:
-                    execution_record.logs += f"\n[System] 子任务 {failed_task_id} 已自动标记为失败。"
-
-                execution_record.end_time = timezone.now()
-                execution_record.duration = (execution_record.end_time - execution_record.start_time).total_seconds()
-                execution_record.logs = append_execution_summary(
-                    execution_record.logs,
-                    summarize_planned_tasks(execution_record.planned_tasks)
-                )
-                try:
-                    safe_save(execution_record)
-                except:
-                    # 如果保存失败，至少尝试保存基本信息
-                    logger.error(f"保存失败状态时出错: {e}")
-                    pass
-            finally:
-                # 清理停止信号
-                if execution_record.id in STOP_SIGNALS:
-                    del STOP_SIGNALS[execution_record.id]
-
-        thread = threading.Thread(target=run_task)
-        thread.daemon = True
-        thread.start()
+        dispatch_ai_execution(execution_record.id, {
+            'task_description': task_description,
+            'execution_mode': execution_mode,
+            'enable_gif': parse_request_bool(enable_gif, default=True),
+            'case_name': task_description[:50] if task_description else 'Adhoc Task',
+            'case_mode': case_mode,
+            'task_steps': task_steps,
+            'use_cache': use_cache,
+            'force_replan': force_replan,
+            'execution_user_id': request.user.id,
+            'ai_project_id': project.id if project else None,
+            'ai_case_id': None,
+        })
 
         return Response({
             'message': 'AI 任务开始执行',
@@ -1359,23 +891,18 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='stop')
     def stop_task(self, request, pk=None):
-        """停止正在执行的任务"""
+        """停止正在执行的任务（对任意进程/worker 生效）。"""
         try:
             execution_id = int(pk)
+            record = self.get_object()
+            if request_stop(execution_id):
+                return Response({'message': '已发送停止信号'})
             if execution_id in STOP_SIGNALS:
                 STOP_SIGNALS[execution_id] = True
                 return Response({'message': '已发送停止信号'})
-            else:
-                # 如果不在内存中，可能已经结束，或者重启过服务
-                # 尝试直接更新数据库状态
-                record = self.get_object()
-                if record.status == 'running':
-                    record.status = 'stopped'
-                    record.end_time = timezone.now()
-                    record.logs += "\n[System] 任务被强制标记为停止（未在运行队列中找到）。"
-                    record.save()
-                    return Response({'message': '任务已标记为停止'})
-                return Response({'message': '任务不在运行中'}, status=status.HTTP_400_BAD_REQUEST)
+            if record.status == 'running':
+                return Response({'message': '已发送停止信号'})
+            return Response({'message': '任务不在运行中'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -1784,48 +1311,8 @@ class AIExecutionRecordViewSet(viewsets.ModelViewSet):
         return response
 
     def _process_gif_recording(self, execution_record, history):
-        """
-        处理GIF录制文件
-        在执行完成后查找生成的GIF文件并保存路径到数据库
-        """
-        try:
-            import os
-            from django.conf import settings
-            from datetime import datetime
-
-            # browser-use 默认生成的GIF文件名（固定为agent_history.gif）
-            default_gif_path = os.path.join(os.getcwd(), 'agent_history.gif')
-
-            # 如果找到GIF文件，移动到media/ai_recording目录并重命名
-            if os.path.exists(default_gif_path):
-                import shutil
-
-                # 创建录制文件目录 - 使用配置文件中的路径
-                gif_dir = os.path.join(settings.MEDIA_ROOT, settings.ALLURE_AI_RECORDING)
-                os.makedirs(gif_dir, exist_ok=True)
-
-                # 生成新的文件名：用例名称+年月日时分秒
-                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                # 清理用例名称中的非法字符
-                safe_case_name = "".join(
-                    [c if c.isalnum() or c in (' ', '_', '-') else '_' for c in execution_record.case_name])
-                new_gif_filename = f"{safe_case_name}_{timestamp}.gif"
-                new_gif_path = os.path.join(gif_dir, new_gif_filename)
-
-                # 移动并重命名文件
-                shutil.move(default_gif_path, new_gif_path)
-
-                # 保存相对路径到数据库（使用正斜杠，确保跨平台兼容）- 使用配置文件中的路径
-                # 注意：不要包含 'media/' 前缀，因为 MEDIA_URL 已经是 '/media/'
-                relative_path = f'{settings.ALLURE_AI_RECORDING}/{new_gif_filename}'
-                execution_record.gif_path = relative_path
-
-                logger.info(f"✅ GIF recording saved to: {relative_path}")
-            else:
-                logger.warning(f"⚠️ GIF file not found at: {default_gif_path}")
-        except Exception as e:
-            logger.error(f"❌ Error moving GIF file: {e}")
-            logger.warning(f"⚠️ Failed to process GIF recording: {e}")
+        """GIF 录制归档已收敛到 execution.dispatch.process_gif_recording。"""
+        process_gif_recording(execution_record)
 
     def _auto_mark_completed_tasks(self, execution_record):
         return AICaseViewSet._auto_mark_completed_tasks(self, execution_record)

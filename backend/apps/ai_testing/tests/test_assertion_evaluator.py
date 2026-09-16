@@ -294,6 +294,29 @@ class AssertionEvaluatorTests(unittest.TestCase):
         self.assertEqual(placeholder.status, 'failed')
         self.assertEqual(loaded.status, 'passed')
 
+    def test_playback_visual_progress_must_be_plausible_against_elapsed_time(self) -> None:
+        assertion = parse_assertion({
+            'action': 'assert', 'assert_kind': 'playback', 'target': {'intent': 'playback player'},
+            'operator': 'greater_than', 'expected': {'minimum_advanced_seconds': 10},
+            'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress'],
+        })
+        base = [
+            {'type': 'media_state_before', 'elements': [{'paused': False, 'currentTime': 0}]},
+            {'type': 'media_state_after', 'elements': [{'paused': False, 'currentTime': 0}]},
+            {'type': 'playback_time_progress', 'advanced_seconds': 0.0},
+        ]
+
+        implausible = evaluate_assertion(assertion, base + [
+            {'type': 'playback_visual_progress', 'advanced_seconds': 85957, 'confidence': 0.9, 'elapsed_seconds': 12.0},
+        ])
+        plausible = evaluate_assertion(assertion, base + [
+            {'type': 'playback_visual_progress', 'advanced_seconds': 20, 'confidence': 0.9, 'elapsed_seconds': 12.0},
+        ])
+
+        self.assertEqual(implausible.status, 'failed')
+        self.assertEqual(plausible.status, 'passed')
+        self.assertEqual(plausible.actual['visual_elapsed_seconds'], 12.0)
+
     def test_playback_assertion_accepts_high_confidence_visual_progress(self) -> None:
         assertion = parse_assertion({'action': 'assert', 'assert_kind': 'playback', 'target': {'locator': 'video'}, 'operator': 'greater_than', 'expected': {'minimum_advanced_seconds': 10}, 'evidence_requirements': ['media_state_before', 'media_state_after', 'playback_time_progress']})
         result = evaluate_assertion(assertion, [
@@ -462,3 +485,27 @@ class AssertionEvaluatorTests(unittest.TestCase):
         ])
 
         self.assertEqual(result.status, 'failed')
+
+class CaseSpecificComparisonTests(unittest.TestCase):
+    def _evaluate(self, operator, expected, actual):
+        if operator == 'starts_with':
+            assertion = parse_assertion({
+                'action': 'assert', 'assert_kind': 'field_value', 'target': {'locator': '#status'},
+                'operator': operator, 'expected': {'value': expected}, 'evidence_requirements': ['structured_value'],
+            })
+            return evaluate_assertion(assertion, [{'type': 'structured_value', 'locator': '#status', 'value': actual}]).status
+        assertion = parse_assertion({
+            'action': 'assert', 'assert_kind': 'element_state', 'target': {'locator': '#status'},
+            'operator': operator, 'expected': {'value': expected}, 'evidence_requirements': ['element_state'],
+        })
+        return evaluate_assertion(assertion, [{'type': 'element_state', 'locator': '#status', 'visible': True, 'text': actual}]).status
+
+    def test_capitalised_expectations_require_matching_case(self) -> None:
+        self.assertEqual(self._evaluate('contains', 'Close', 'close'), 'failed')
+        self.assertEqual(self._evaluate('contains', 'Close', 'Status: Close'), 'passed')
+        self.assertEqual(self._evaluate('starts_with', 'Close', 'close case'), 'failed')
+        self.assertEqual(self._evaluate('starts_with', 'Close', 'Close'), 'passed')
+
+    def test_lower_case_expectations_stay_case_insensitive(self) -> None:
+        self.assertEqual(self._evaluate('contains', 'close', 'Close'), 'passed')
+        self.assertEqual(self._evaluate('starts_with', 'admin', 'Admin user'), 'passed')

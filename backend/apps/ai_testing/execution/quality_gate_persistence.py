@@ -66,6 +66,5 @@ def evaluate_execution_quality_gate(execution_record_id: int) -> QualityGateResu
                 'missing_assertion_step_ids': list(result.missing_assertion_step_ids),
             },
         )
-        revision.execution_record.status = result.status
-        revision.execution_record.save(update_fields=['status'])
+        # The caller (execution dispatch) owns the record's status transition; evaluation only records evidence.
         return result

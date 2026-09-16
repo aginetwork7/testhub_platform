@@ -157,6 +157,9 @@ class AIExecutionRecord(models.Model):
     executed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, verbose_name='执行人', related_name='ai_testing_executions')
     gif_path = models.CharField(max_length=500, null=True, blank=True, verbose_name='GIF录制路径')
     screenshots_sequence = models.JSONField(default=list, verbose_name='截图序列')
+    dispatch_backend = models.CharField(max_length=16, blank=True, default='', verbose_name='派发后端')
+    dispatch_task_id = models.CharField(max_length=64, blank=True, default='', verbose_name='队列任务ID')
+    heartbeat_at = models.DateTimeField(null=True, blank=True, verbose_name='最近心跳时间')
 
     class Meta:
         db_table = 'ai_testing_execution_records'
@@ -295,6 +298,8 @@ class AIExecutionAssertionResult(models.Model):
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, db_index=True)
     actual = models.JSONField(default=dict)
     evidence_artifacts = models.ManyToManyField(AIExecutionEvidenceArtifact, related_name='assertion_results')
+    attempt_number = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name='评估的步骤尝试')
+    plan_revision_number = models.PositiveSmallIntegerField(null=True, blank=True, verbose_name='评估时的计划版本')
     evaluated_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -383,6 +388,44 @@ class AIExecutionExperience(models.Model):
 
     def __str__(self):
         return f'{self.project.name}: {self.step_description[:60]}'
+
+
+class AIActionCacheEntry(models.Model):
+    """A verified step action sequence keyed by case, step and page-state fingerprint (replaces the JSON file cache).
+
+    Entries expire on a sliding TTL and each step keeps only its newest page-state variants, so the cache
+    cannot grow without bound the way the file did. Project and case ids are plain integers on purpose:
+    a cache row must never block deleting a project or case.
+    """
+
+    cache_key = models.CharField(max_length=191, unique=True, verbose_name='缓存键')
+    schema_version = models.CharField(max_length=16, default='', verbose_name='键格式版本')
+    project_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name='项目 id')
+    ai_case_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name='用例 id')
+    case_name = models.CharField(max_length=255, blank=True, default='', verbose_name='用例名')
+    step_index = models.PositiveIntegerField(default=0, verbose_name='步骤序号')
+    step_description = models.TextField(blank=True, default='', verbose_name='步骤描述')
+    page_url = models.CharField(max_length=1000, blank=True, default='', verbose_name='页面地址')
+    page_fingerprint = models.CharField(max_length=64, blank=True, default='', db_index=True, verbose_name='页面指纹')
+    environment_key = models.CharField(max_length=200, blank=True, default='', verbose_name='环境标识')
+    permission_fingerprint = models.CharField(max_length=64, blank=True, default='', verbose_name='权限指纹')
+    actions = models.JSONField(default=list, verbose_name='动作序列')
+    hit_count = models.PositiveIntegerField(default=0, verbose_name='命中次数')
+    last_hit_at = models.DateTimeField(null=True, blank=True, verbose_name='最近命中时间')
+    expires_at = models.DateTimeField(db_index=True, verbose_name='过期时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ai_testing_action_cache_entries'
+        verbose_name = 'AI步骤动作缓存'
+        verbose_name_plural = 'AI步骤动作缓存'
+        indexes = [
+            models.Index(fields=['case_name', 'step_index'], name='ai_action_cache_step_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.case_name} step {self.step_index}: {self.step_description[:60]}'
 
 
 class AlphaRun(models.Model):

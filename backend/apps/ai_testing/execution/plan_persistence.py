@@ -24,10 +24,13 @@ def persist_execution_plan(
     source_goal: str,
     planned_tasks: Sequence[Mapping[str, Any]],
     reason: str = 'initial',
+    context_fingerprint: str = '',
 ) -> AIExecutionPlanRevision:
     """Persist a canonical plan once, returning the existing snapshot on retry."""
     normalized_tasks = [_normalize_task(task, index) for index, task in enumerate(planned_tasks, start=1)]
-    plan = {'steps': normalized_tasks}
+    plan: dict[str, Any] = {'steps': normalized_tasks}
+    if context_fingerprint:
+        plan['context_fingerprint'] = str(context_fingerprint)
     plan_hash = _hash_plan(plan)
 
     with transaction.atomic():
