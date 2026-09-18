@@ -3687,6 +3687,29 @@ class PyUICompatAgent:
         haystack = ' '.join([selector, *names]).casefold()
         return bool(re.search(r'toggle|collapse|expand|aria-expanded|aria-pressed|\bswitch\b', haystack))
 
+    async def _expected_media_surface_missing(self, page, step) -> bool:
+        """True when the step asserts a playing surface and the page has no video or canvas at all.
+
+        A stream or playback assertion can only be about a <video> or <canvas>; the thumbnails in a camera
+        list are <img> and can never satisfy it. So "no video and no canvas anywhere" is objective evidence
+        that the click did not open what the step was supposed to open, however much else the page repainted.
+        Deliberately narrow: an existing-but-stalled player is left alone, because repeating the click there
+        could close the very thing the assertion is about.
+        """
+        wants_surface = any(
+            isinstance(assertion, dict)
+            and assertion.get('assert_kind') in {'stream_state', 'playback'}
+            and assertion.get('required', True) is not False
+            for assertion in step.get('assertions') or []
+        )
+        if not wants_surface:
+            return False
+        for element in await self._rendered_visual_elements(page):
+            if str(element.get('tag') or '').strip().lower() in {'video', 'canvas'}:
+                return False
+        logger.info('planner_v2 step expects a playing surface but the page has no video or canvas')
+        return True
+
     async def _click_inner_activator(self, page, selector: str) -> bool:
         """Click the thumbnail/link inside a container whose own click had no effect."""
         if not selector or selector.startswith('text='):
@@ -3716,10 +3739,20 @@ class PyUICompatAgent:
             or self._control_toggles_state(last_action, self._last_actionable_controls)
         ):
             return
-        if await self._action_had_visible_effect(page) is not False or await self._click_target_moved(page, last_action):
-            return
+        # "Had some effect" is not the same as "did what the step needed". A click that missed the camera
+        # thumbnail still repainted the list — the filter cleared and every site group came back — so the
+        # effect check said yes while the live view never opened. Where the step tells us what kind of
+        # surface it expects, check for that instead of settling for any change at all.
+        missing_surface = await self._expected_media_surface_missing(page, step)
+        if not missing_surface:
+            if await self._action_had_visible_effect(page) is not False or await self._click_target_moved(page, last_action):
+                return
         self._swallowed_action_retries.add(step_index)
-        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: action produced no visible change; repeating it once.\n'})
+        reason = (
+            'the step expects a playing media surface and there is none'
+            if missing_surface else 'action produced no visible change'
+        )
+        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: {reason}; repeating it once.\n'})
         methods = ['same_target']
         try:
             await self._execute_step(page, last_action, timeout_error=TimeoutError)

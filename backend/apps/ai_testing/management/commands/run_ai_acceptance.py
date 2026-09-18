@@ -65,12 +65,13 @@ class Command(BaseCommand):
                     f"ROUND{round_number} case={case.id} {case.case_number or case.name}: "
                     f"{outcome['status']} dur={outcome['duration']:.1f}s record={outcome['record_id']}"
                 )
-        warm = [item for item in results if item.get('plan_source') not in {'model', None, ''}]
-        if options['assert_cold'] and warm:
-            # A cold run that quietly reused a proven plan measures nothing, and it looks exactly like a
-            # real pass. Fail loudly rather than hand back a green report the reader cannot trust.
-            detail = ', '.join(f"record={item['record_id']} plan_source={item['plan_source']}" for item in warm[:10])
-            raise CommandError(f'声明了冷跑，但 {len(warm)} 次运行复用了已有计划：{detail}')
+        # Only a passing run can hand back a green report that was secretly warm. A run that failed before
+        # it ever produced a plan reports plan_source=unknown, and failing the whole command over that threw
+        # away the report for an unrelated planner timeout.
+        warm = [
+            item for item in results
+            if item['status'] == 'passed' and item.get('plan_source') not in {'model', None, ''}
+        ]
         passed = sum(1 for item in results if item['status'] == 'passed')
         summary = {
             'rounds': rounds, 'cases': len(cases), 'runs': len(results), 'passed': passed,
@@ -82,6 +83,11 @@ class Command(BaseCommand):
         if options['json']:
             with open(options['json'], 'w', encoding='utf-8') as handle:
                 json.dump(summary, handle, ensure_ascii=False, indent=2, default=str)
+        if options['assert_cold'] and warm:
+            # A cold run that quietly reused a proven plan measures nothing, and it looks exactly like a real
+            # pass. Raised only after the summary and the JSON are written, so the evidence survives.
+            detail = ', '.join(f"record={item['record_id']} plan_source={item['plan_source']}" for item in warm[:10])
+            raise CommandError(f'声明了冷跑，但 {len(warm)} 次通过的运行复用了已有计划：{detail}')
         if passed != len(results):
             raise CommandError(f'{len(results) - passed} 次运行未通过。')
 
