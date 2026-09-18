@@ -71,6 +71,12 @@ def parse_assertion(payload: Mapping[str, Any]) -> AssertionSpec:
 
     target = _required_mapping(payload, 'target')
     expected = _required_mapping(payload, 'expected')
+    if assert_kind in {'element_state', 'popup'} and operator in {'exists', 'not_exists'}:
+        # The operator already carries the polarity, so expected.value is redundant here and planners
+        # have written it as True, "true" and "" interchangeably. The empty string was the damaging one:
+        # binders gate on expects_true(), so an existence assertion written with "" silently became
+        # unbindable and the step could only end inconclusive. Normalise all three to True.
+        expected = {**expected, 'value': True}
     _validate_kind_payload(assert_kind, operator, target, expected)
     evidence_requirements = _parse_evidence_requirements(payload)
     missing_evidence = set(definition.required_evidence).difference(evidence_requirements)

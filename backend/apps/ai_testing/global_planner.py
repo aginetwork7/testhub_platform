@@ -23,6 +23,7 @@ from apps.ai_testing.execution.intent_text import (
 )
 from apps.ai_testing.execution.environment_resources import default_device_camera_names, default_device_site, environment_device_resources, is_text_input, refers_to_target_device
 from apps.ai_testing.execution.model_errors import is_transient_llm_error
+from apps.ai_testing.execution.plan_contract_examples import retry_guidance
 
 from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 
@@ -81,8 +82,10 @@ ACTION_SUBMISSION_TOOL = {
 }
 
 
+_COMMIT_VERB_PATTERN = re.compile(r'\b(confirm|submit|apply)\b|确认|提交|保存', re.IGNORECASE)
+
 # Bump when the planning instructions in _build_messages change in a way that should invalidate cached plans.
-PLAN_CONTRACT_VERSION = 5
+PLAN_CONTRACT_VERSION = 6
 
 
 class GlobalPlanError(ValueError):
@@ -1651,12 +1654,19 @@ class GlobalTestPlanner:
                     )
                 except GlobalPlanError as error:
                     last_error = error
+                    # 只重复违规文本时模型常常连续多次改不对；附上一个可照抄的最小合规步骤。
+                    guidance = retry_guidance(error)
+                    if guidance:
+                        logging.getLogger(__name__).info(
+                            'planner_v2 plan rejected, attaching a compliant example: %s', str(error)[:120],
+                        )
                     retry_messages.append({
                         'role': 'user',
                         'content': (
                             f'Your previous plan violated this contract: {error}. '
                             'Correct that specific violation and call submit_execution_plan again with the complete non-empty steps array. '
                             'Rebuild the full ordered plan rather than appending a repair step. Move every required field-edit transaction, including its commit and verification, before any irreversible final-status transaction, and remove any duplicate or post-status field steps.'
+                            + guidance
                         ),
                     })
         raise GlobalPlanError(f'Planner 未生成有效计划：{last_error or "未知原因"}') from last_error
@@ -1680,6 +1690,9 @@ class GlobalTestPlanner:
                 'content': (
                     f'{prompt_content}\n\n'
                     'You are a test planner. Call submit_execution_plan exactly once with an ordered steps array. '
+                    'A step that confirms, submits or saves a pending change must assert the committed result itself '
+                    '(a field_value or element_state text assertion on the control that now shows the new value); '
+                    'asserting only that the confirmation dialog disappeared is not accepted, keep that as an extra non-required assertion. '
                     'Each step must have executor and description. '
                     'executor can only be browser, data_factory, or device_cli. '
                     'For browser, output step_mode="ai", a concrete description, a non-empty allowed_capabilities array, verification_required=true, and at least one required assertion for the immediate state produced by that transition. No browser step may pass from action completion alone. '
@@ -1804,12 +1817,18 @@ class GlobalTestPlanner:
                     assertions,
                     index,
                     transition,
+                    goal_text=task_description,
                 )
                 GlobalTestPlanner._validate_search_result_absence_assertion(
                     description,
                     assertions,
                     index,
                     transition,
+                )
+                GlobalTestPlanner._validate_commit_step_assertion(
+                    description,
+                    assertions,
+                    index,
                 )
                 correlates_resource = str(raw_step.get('correlates_resource') or '').strip()
                 available_resource_types = {
@@ -1962,6 +1981,42 @@ class GlobalTestPlanner:
         ]
 
     @staticmethod
+    def _validate_commit_step_assertion(
+        description: str,
+        assertions: list[dict[str, Any]],
+        step_index: int,
+    ) -> None:
+        """提交类步骤必须断言提交后可见的结果，不能只断言某个弹层消失了。
+
+        "点击 Confirm 提交 Investigate" 这类步骤如果只断言确认对话框消失，证明不了提交成功：可关闭的弹层
+        常常仍挂在 DOM 上，断言会失败；即便通过，也没有证明状态真的变成了 Investigate。冷启动实测中
+        TC_007 第 7 步正是因此失败。只在"所有 required 断言都是弹层消失"时拒绝，断言内容消失
+        （text not_contains、absence、集合为空）仍然是有效证据，例如确认删除后记录从列表消失。
+        """
+        if not _COMMIT_VERB_PATTERN.search(str(description or '')):
+            return
+        required = [
+            assertion
+            for assertion in assertions
+            if isinstance(assertion, dict) and assertion.get('required', True) is not False
+        ]
+        if not required:
+            return
+
+        def asserts_layer_vanished(assertion: dict[str, Any]) -> bool:
+            return (
+                assertion.get('assert_kind') in {'popup', 'element_state'}
+                and assertion.get('operator') == 'not_exists'
+            )
+
+        if all(asserts_layer_vanished(assertion) for assertion in required):
+            raise GlobalPlanError(
+                f'Planner browser step {step_index} commits a transaction but only asserts that a layer disappeared. '
+                'Assert the committed result itself with a field_value or element_state text assertion, and keep the '
+                'disappearance as an additional non-required assertion.'
+            )
+
+    @staticmethod
     def _validate_search_result_absence_assertion(
         description: str,
         assertions: list[dict[str, Any]],
@@ -1987,8 +2042,10 @@ class GlobalTestPlanner:
         assertions: list[dict[str, Any]],
         step_index: int,
         transition: dict[str, Any] | None = None,
+        goal_text: str = '',
     ) -> None:
         description_text = description.casefold()
+        goal = str(goal_text or '').casefold()
         selects_dropdown_option = GlobalTestPlanner._is_select_option_transition(description, transition)
         if not selects_dropdown_option:
             return
@@ -2005,9 +2062,15 @@ class GlobalTestPlanner:
             expected_text = str((assertion.get('expected') or {}).get('value') or '').strip().casefold()
             if not expected_text:
                 return False
-            # The requested option itself, or a display text the step description declares (a control may
-            # abbreviate the chosen option, e.g. "Magic Search V2" shown as "Magic V2").
-            return expected_text == expected_selection or expected_text in description_text
+            # The requested option itself, or a display text declared by the step description or by the case
+            # goal (a control may abbreviate the chosen option: the goal says 选择 "Magic Search V2" 后标签
+            # 显示为 "Magic V2"). The goal has to participate because the generated step description usually
+            # names only the option that is clicked, not the abbreviated label the control ends up showing.
+            return (
+                expected_text == expected_selection
+                or expected_text in description_text
+                or (bool(goal) and expected_text in goal)
+            )
 
         proves_selected_value = any(_proves(assertion) for assertion in assertions)
         proves_transaction_dialog = any(
