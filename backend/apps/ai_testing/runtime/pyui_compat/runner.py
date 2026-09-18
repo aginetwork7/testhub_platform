@@ -104,6 +104,21 @@ CARD_APPEAR_WAIT_MS = 10000
 RENDER_WAIT_BUDGET_PER_STEP_MS = 120000
 # An intent that names a discrete control rather than a region. Binders that pick "the biggest thing that
 # appeared" must not answer for these: a container satisfies them without the control existing at all.
+# A control that reveals content already present in the data but not yet rendered or shown. Clicking one of
+# these is the only corrective action that can change an existence verdict without changing business state.
+DISCLOSURE_CONTROL_PATTERN = re.compile(
+    r'\b(expand|collapse|show\s*more|show\s*all|see\s*more|next\s*page|load\s*more|toggle)\b|展开|收起|更多|下一页|加载更多',
+    re.IGNORECASE,
+)
+# Never click these while correcting: expanding a group does not make "the user is deactivated" true, but
+# clicking Confirm does. Kept deliberately broad — a refused correction costs one inconclusive step, an
+# accepted one that commits something costs a false pass.
+STATE_CHANGING_CONTROL_PATTERN = re.compile(
+    r'\b(confirm|submit|save|apply|delete|remove|deactivate|activate|create|send|upload|download)\b'
+    r'|确认|提交|保存|删除|停用|启用|新建|创建|发送|上传|下载',
+    re.IGNORECASE,
+)
+
 NAMED_CONTROL_INTENT_PATTERN = re.compile(
     r'\b(button|btn|icon|checkbox|radio|toggle|switch|link|tab|menu item|menuitem)\b',
     re.IGNORECASE,
@@ -308,6 +323,7 @@ class PyUICompatAgent:
         self._observable_baseline = None
         self._observable_baseline_texts = set()
         self._exhausted_binding_states = set()
+        self._corrective_action_steps = set()
         self._binding_verified_predecessors = []
         self._swallowed_action_retries = set()
         self._last_action_effect_note = ''
@@ -411,6 +427,10 @@ class PyUICompatAgent:
                 # A plan reused from the proven-plan table is as much a cache hit as one reused from a
                 # previous execution record; counting only the latter understated the hit rate.
                 'plan_cache_hit': 1 if plan_source in {'cache', 'verified'} else 0,
+                # How many steps only passed because the framework revealed the target itself. This is a
+                # quality signal, not a score: it rising means plans are getting worse and corrections are
+                # papering over the gap.
+                'corrective_actions': 0,
             },
             case_report={
                 'case_id': self.case_name,
@@ -2090,40 +2110,9 @@ class PyUICompatAgent:
             ('collection', self._collection_binding_from_completed_action),
             ('inherited_collection', self._inherited_collection_binding_from_read_only_action),
         )
-        # Every binder reasons about one assertion at a time, so a step with several unresolved assertions
-        # (a result count plus a thumbnail) is bound assertion by assertion and the results are merged.
-        deterministic_bindings = []
-        still_unresolved = []
-        for assertion in unresolved:
-            declined = []
-            bound = []
-            for binder_name, binder in binders:
-                bound = await binder(page, step, [assertion], actions[-1])
-                if bound:
-                    if history is not None:
-                        history.artifacts.append({
-                            'type': 'deterministic_binding',
-                            'step': step_index,
-                            'binder': binder_name,
-                            'bindings': bound,
-                        })
-                    break
-                declined.append(binder_name)
-            if bound:
-                deterministic_bindings.extend(bound)
-            else:
-                still_unresolved.append(assertion)
-                if history is not None:
-                    history.artifacts.append({
-                        'type': 'binders_declined',
-                        'step': step_index,
-                        'binders': declined,
-                        'unresolved': [{'assert_kind': assertion.get('assert_kind'), 'intent': (assertion.get('target') or {}).get('intent')}],
-                        'had_observable_baseline': self._observable_baseline is not None,
-                        'had_visual_baseline': self._rendered_visual_baseline is not None,
-                        'notes': list(self._runtime_events),
-                    })
-                    self._runtime_events = []
+        deterministic_bindings, still_unresolved = await self._run_deterministic_binders(
+            page, step, step_index, unresolved, actions[-1], binders, history,
+        )
         if deterministic_bindings:
             await self._apply_assertion_bindings(
                 step_index,
@@ -2158,7 +2147,12 @@ class PyUICompatAgent:
                 'planner_v2 skipped a repeat binding round for step %s: page state unchanged since the last failure',
                 step_index,
             )
-            return False
+            # Skipping the model round here is right — it would see the same page and give the same
+            # unbindable answer. Skipping the corrective round was not: a page that has not changed since
+            # the last failure is exactly the one where acting, rather than looking again, is what is left.
+            return await self._correct_and_rebind(
+                page, step, step_index, still_unresolved, actions, binders, step_callback, history,
+            )
         try:
             binding_actions = await self._plan_ai_step_with_retries(
                 page,
@@ -2171,6 +2165,10 @@ class PyUICompatAgent:
         except PlannerRetryExhaustedError:
             if binding_state:
                 self._exhausted_binding_states.add(binding_state)
+            if await self._correct_and_rebind(
+                page, step, step_index, still_unresolved, actions, binders, step_callback, history,
+            ):
+                return True
             logger.info(
                 'planner_v2 could not bind required assertions after step %s action; continue with strict evidence capture',
                 step_index,
@@ -2178,6 +2176,167 @@ class PyUICompatAgent:
             return False
         await self._apply_assertion_bindings(step_index, step, binding_actions)
         return True
+
+    async def _correct_and_rebind(
+        self, page, step, step_index, unresolved, actions, binders, step_callback, history,
+    ) -> bool:
+        """Reveal the assertion target, then rerun the deterministic chain. True when everything bound."""
+        if not await self._reveal_assertion_target(page, step, step_index, unresolved, step_callback, history):
+            return False
+        recovered, remaining = await self._run_deterministic_binders(
+            page, step, step_index, unresolved, actions[-1], binders, history,
+        )
+        if not recovered:
+            return False
+        await self._apply_assertion_bindings(
+            step_index, step, [{'action': 'assert', 'assertion_bindings': recovered}],
+        )
+        return not remaining
+
+    @staticmethod
+    def _corrigible_assertions(unresolved: list[dict]) -> list[dict]:
+        """Assertions a corrective action may legitimately help, i.e. positive existence ones only.
+
+        A negative assertion must never be corrected. Clicking a disclosure control can genuinely remove rows
+        from the DOM, and "the camera is no longer in the list" would then become true because the framework
+        collapsed the group, not because the product did anything. Revealing content that was already there
+        cannot fake a positive assertion the same way: the row existed, it was merely not rendered.
+        """
+        return [
+            assertion for assertion in unresolved or []
+            if isinstance(assertion, dict)
+            and assertion.get('operator') in {'exists', 'greater_than', 'greater_than_or_equal', 'contains'}
+        ]
+
+    def _corrective_action_refusal(self, action: dict, controls: list[dict]) -> str:
+        """Why this action may not be used to correct, or '' when it is allowed."""
+        name = str(action.get('action') or '').strip().lower()
+        if name == 'scroll':
+            # Playwright's is_visible() ignores viewport position, so scrolling cannot flip an existence
+            # verdict on its own. It still matters for a virtualised list, where rows enter the DOM only
+            # once they approach the viewport.
+            return ''
+        if name == 'hover':
+            # Not dangerous, just useless: hovering changes neither what is in the DOM nor whether it is
+            # visible, so it can never turn an unbindable existence assertion into a bindable one.
+            return 'hover cannot change whether the target exists or is visible'
+        if name != 'click':
+            return f'{name or "empty"} may change business state; only click and scroll can correct'
+        selector = str(action.get('selector') or '').strip()
+        label = str(action.get('accessible_name') or '')
+        for control in controls or []:
+            if isinstance(control, dict) and str(control.get('selector') or '').strip() == selector:
+                label = f"{label} {control.get('name') or ''}"
+                if str(control.get('aria_expanded') or '').strip().lower() == 'false':
+                    return ''
+                if str(control.get('role') or '').strip().lower() in {'treeitem', 'tab'}:
+                    return ''
+        haystack = f'{selector} {label}'
+        if STATE_CHANGING_CONTROL_PATTERN.search(haystack):
+            return 'the control commits or destroys something'
+        if DISCLOSURE_CONTROL_PATTERN.search(haystack):
+            return ''
+        return 'the control does not look like it reveals hidden content'
+
+    async def _reveal_assertion_target(self, page, step, step_index, unresolved, step_callback, history) -> bool:
+        """One bounded attempt to reveal an assertion target that is present but not rendered.
+
+        TC_006 cold-planned a step that types a site name and then asserts the camera is among the results,
+        without the step that expands the matching site group. The camera was in the filtered data the whole
+        time; nothing in the framework could act to show it, because the binding round is inspect-only.
+        """
+        corrigible = self._corrigible_assertions(unresolved)
+        if not corrigible or step_index in self._corrective_action_steps:
+            return False
+        self._corrective_action_steps.add(step_index)
+
+        controls = await self._build_actionable_controls(page)
+        reveal_step = {
+            **step,
+            'allowed_capabilities': ['browser.act', 'browser.inspect'],
+            'description': (
+                f"{step['description']}\n"
+                'The assertion target is not on the page yet. It is present in the data but not rendered: a '
+                'matching group may be collapsed, or a long list may not have rendered the row yet. Return '
+                'exactly one action that reveals it — click a control that expands or discloses content, or '
+                'scroll the list. Never click a control that confirms, submits, saves, creates or deletes '
+                'anything, and never fill, select or press a key: revealing content must not change any '
+                'business state.'
+            ),
+        }
+        try:
+            planned = await self._plan_ai_step_with_retries(
+                page, reveal_step, history, step_callback=step_callback, step_index=step_index, max_attempts=1,
+            )
+        except PlannerRetryExhaustedError:
+            return False
+
+        action = next((item for item in planned or [] if isinstance(item, dict) and item.get('action') != 'assert'), None)
+        if action is None:
+            return False
+        refusal = self._corrective_action_refusal(action, controls)
+        if history is not None:
+            history.artifacts.append({
+                'type': 'corrective_action',
+                'step': step_index,
+                'action': self._audit_action_payload(action, step),
+                'allowed': not refusal,
+                'refused_because': refusal,
+            })
+        if refusal:
+            logger.info('planner_v2 step %s corrective action refused: %s', step_index, refusal)
+            return False
+        if history is not None and isinstance(getattr(history, 'cache_stats', None), dict):
+            history.cache_stats['corrective_actions'] = history.cache_stats.get('corrective_actions', 0) + 1
+        logger.info('planner_v2 step %s corrective action: %s %s',
+                    step_index, action.get('action'), str(action.get('selector') or '')[:80])
+        try:
+            await self._execute_step(page, action, timeout_error=TimeoutError)
+        except Exception as error:
+            logger.info('planner_v2 step %s corrective action failed: %s', step_index, error)
+            return False
+        await page.wait_for_timeout(1500)
+        return True
+
+    async def _run_deterministic_binders(self, page, step, step_index, unresolved, action, binders, history):
+        """Walk the binder chain once per unresolved assertion; returns (bindings, still unresolved).
+
+        Every binder reasons about one assertion at a time, so a step with several unresolved assertions
+        (a result count plus a thumbnail) is bound assertion by assertion and the results are merged.
+        """
+        deterministic_bindings = []
+        still_unresolved = []
+        for assertion in unresolved:
+            declined = []
+            bound = []
+            for binder_name, binder in binders:
+                bound = await binder(page, step, [assertion], action)
+                if bound:
+                    if history is not None:
+                        history.artifacts.append({
+                            'type': 'deterministic_binding',
+                            'step': step_index,
+                            'binder': binder_name,
+                            'bindings': bound,
+                        })
+                    break
+                declined.append(binder_name)
+            if bound:
+                deterministic_bindings.extend(bound)
+            else:
+                still_unresolved.append(assertion)
+                if history is not None:
+                    history.artifacts.append({
+                        'type': 'binders_declined',
+                        'step': step_index,
+                        'binders': declined,
+                        'unresolved': [{'assert_kind': assertion.get('assert_kind'), 'intent': (assertion.get('target') or {}).get('intent')}],
+                        'had_observable_baseline': self._observable_baseline is not None,
+                        'had_visual_baseline': self._rendered_visual_baseline is not None,
+                        'notes': list(self._runtime_events),
+                    })
+                    self._runtime_events = []
+        return deterministic_bindings, still_unresolved
 
     async def _binding_state_key(self, page, step_index: int, unresolved: list[dict]) -> str:
         """Identify "this step, these assertions, this page structure" so a hopeless round is asked only once."""
@@ -4352,7 +4511,7 @@ class PyUICompatAgent:
                         : element.tagName === 'INPUT' && inputType === 'checkbox' ? 'checkbox'
                         : element.tagName === 'INPUT' && inputType === 'radio' ? 'radio'
                         : element.tagName === 'INPUT' ? 'textbox' : '';
-                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || implicitRole, name, selector, group_selector: groupSelector, url, described_by: element.getAttribute('aria-describedby') || '', native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: grouped.length, group_ordinal: grouped.indexOf(element), has_visual_content: hasRenderedVisual, top_layer: topLayer, blocking_layer: blockingLayer, blocking_layer_id: blockingLayerId, dialog_layer: Boolean(dialog), z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+                    return { index, tag: element.tagName.toLowerCase(), role: element.getAttribute('role') || implicitRole, name, selector, group_selector: groupSelector, url, described_by: element.getAttribute('aria-describedby') || '', aria_expanded: element.getAttribute('aria-expanded') || '', native_control: nativeControl, editable: !element.hasAttribute('readonly') && !element.hasAttribute('disabled'), depth, container_text: containerText, group_size: grouped.length, group_ordinal: grouped.indexOf(element), has_visual_content: hasRenderedVisual, top_layer: topLayer, blocking_layer: blockingLayer, blocking_layer_id: blockingLayerId, dialog_layer: Boolean(dialog), z_index: zIndex, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
                 }).filter(control => control.selector || control.name).sort((left, right) => {
                     const blockingLayerRank = Number(right.blocking_layer) - Number(left.blocking_layer);
                     const namedRank = Number(Boolean(right.name)) - Number(Boolean(left.name));
