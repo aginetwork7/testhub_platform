@@ -96,6 +96,15 @@ TRANSIENT_MODEL_BACKOFF_CAP_SECONDS = 45.0
 ICON_TOOLTIP_PROBE_LIMIT = 20
 IMAGE_RENDER_WAIT_MS = 45000
 STREAM_START_WAIT_MS = 20000
+CARD_APPEAR_WAIT_MS = 10000
+RENDER_WAIT_BUDGET_PER_STEP_MS = 120000
+# An intent that names a discrete control rather than a region. Binders that pick "the biggest thing that
+# appeared" must not answer for these: a container satisfies them without the control existing at all.
+NAMED_CONTROL_INTENT_PATTERN = re.compile(
+    r'\b(button|btn|icon|checkbox|radio|toggle|switch|link|tab|menu item|menuitem)\b',
+    re.IGNORECASE,
+)
+
 PLANNER_CONTROL_KEYS = ('selector', 'group_selector', 'url', 'name', 'tag', 'role', 'rect', 'group_size', 'group_ordinal', 'has_visual_content', 'top_layer', 'blocking_layer', 'blocking_layer_id', 'dialog_layer', 'z_index', 'container_text')
 ICON_TOOLTIP_HOVER_MS = 350
 # Returns the tooltip an element is described by (aria-describedby) plus every short top-layer text, so a
@@ -183,7 +192,15 @@ RENDERED_VISUAL_ELEMENTS_JS = """
         return rect.width > 1 && rect.height > 1 && style.visibility !== 'hidden' && style.display !== 'none' && rendered(element);
     }).map(element => {
         const rect = element.getBoundingClientRect();
-        return { selector: structuralSelector(element), tag: element.tagName.toLowerCase(), area: Math.round(rect.width * rect.height), viewport_ratio: (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight), top_layer: isTopLayer(element), rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
+        // What picture this surface is showing. A filtered list reuses its containers, so the structural
+        // selector of a thumbnail survives the swap while the image behind it is a different one entirely.
+        const source = (element.currentSrc || element.getAttribute('src') || '').slice(-180);
+        const intrinsic = element instanceof HTMLImageElement
+            ? `${element.naturalWidth}x${element.naturalHeight}`
+            : element instanceof HTMLVideoElement
+                ? `${element.videoWidth}x${element.videoHeight}`
+                : `${element.width}x${element.height}`;
+        return { selector: structuralSelector(element), tag: element.tagName.toLowerCase(), area: Math.round(rect.width * rect.height), viewport_ratio: (rect.width * rect.height) / Math.max(1, window.innerWidth * window.innerHeight), top_layer: isTopLayer(element), content_key: `${source}|${intrinsic}`, rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } };
     }).filter(item => item.selector).slice(0, 300);
 }
 """
@@ -282,8 +299,11 @@ class PyUICompatAgent:
         self._step_deadline = None
         self._pre_action_visual_frames = None
         self._observed_canvas_baseline = None
+        self._render_wait_spent_ms = {}
         self._runtime_events = []
         self._observable_baseline = None
+        self._observable_baseline_texts = set()
+        self._exhausted_binding_states = set()
         self._binding_verified_predecessors = []
         self._swallowed_action_retries = set()
         self._last_action_effect_note = ''
@@ -382,6 +402,7 @@ class PyUICompatAgent:
                 'experience_hit': 0,
                 'experience_write': 0,
                 'stale_skip': 0,
+                'write_skipped': 0,
                 'plan_source': plan_source,
                 'plan_cache_hit': 1 if plan_source == 'cache' else 0,
             },
@@ -705,8 +726,10 @@ class PyUICompatAgent:
                         and isinstance(ai_actions, list)
                         and assertions_verified
                     ):
-                        await self._store_cached_ai_actions(step, ai_actions)
-                        history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
+                        if await self._store_cached_ai_actions(step, ai_actions):
+                            history.cache_stats['write'] = history.cache_stats.get('write', 0) + 1
+                        else:
+                            history.cache_stats['write_skipped'] = history.cache_stats.get('write_skipped', 0) + 1
                         experience_written = await self._store_verified_experience(step, ai_actions)
                         if experience_written:
                             history.cache_stats['experience_write'] = history.cache_stats.get('experience_write', 0) + 1
@@ -1384,17 +1407,33 @@ class PyUICompatAgent:
         if stale:
             AIActionCacheEntry.objects.filter(pk__in=stale).delete()
 
-    async def _store_cached_ai_actions(self, step, actions, page_context=None):
+    async def _store_cached_ai_actions(self, step, actions, page_context=None) -> bool:
+        """Persist the step's verified actions; returns whether anything was stored.
+
+        The skip reasons used to be silent while the caller still counted a write, so a step that never made it
+        into the cache looked identical to one that did. TC_006 stayed permanently cold that way: its first
+        step reported a write every run yet had no entry, and there was nothing in the log to say why.
+        """
         safe_actions = self._safe_experience_actions(actions)
         if not safe_actions:
-            return
+            logger.info(
+                'planner_v2 step %s not cached: no replayable action in %s',
+                step.get('index'), [str(action.get('action') or '') for action in actions or []][:4],
+            )
+            return False
         context = page_context or self._cache_context_by_step.get(self._step_context_key(step), {})
         if not context.get('fingerprint'):
-            return
+            logger.info(
+                'planner_v2 step %s not cached: no page fingerprint (context keys=%s)',
+                step.get('index'), sorted(context) if isinstance(context, dict) else type(context).__name__,
+            )
+            return False
         try:
             await sync_to_async(self._upsert_cached_actions_sync, thread_sensitive=True)(step, safe_actions, context)
         except DatabaseError as error:
             logger.warning('planner_v2 failed to write action cache: %s', error)
+            return False
+        return True
 
     def _delete_cached_actions_sync(self, cache_key):
         from apps.ai_testing.models import AIActionCacheEntry
@@ -2092,6 +2131,17 @@ class PyUICompatAgent:
                 'this step; never bind a text label, an empty container, or a loading placeholder.'
             ),
         }
+        # A model binding round costs two planner_vision calls. Asking again about a page whose structure has
+        # not moved since the last failure returns the same unbindable answer: one step burned twelve rounds
+        # this way. The skeleton fingerprint ignores text and list lengths, so a refreshed list still counts as
+        # the same state, while an opened dialog or expanded panel correctly counts as a new one worth asking about.
+        binding_state = await self._binding_state_key(page, step_index, still_unresolved)
+        if binding_state and binding_state in self._exhausted_binding_states:
+            logger.info(
+                'planner_v2 skipped a repeat binding round for step %s: page state unchanged since the last failure',
+                step_index,
+            )
+            return False
         try:
             binding_actions = await self._plan_ai_step_with_retries(
                 page,
@@ -2102,6 +2152,8 @@ class PyUICompatAgent:
                 max_attempts=2,
             )
         except PlannerRetryExhaustedError:
+            if binding_state:
+                self._exhausted_binding_states.add(binding_state)
             logger.info(
                 'planner_v2 could not bind required assertions after step %s action; continue with strict evidence capture',
                 step_index,
@@ -2109,6 +2161,22 @@ class PyUICompatAgent:
             return False
         await self._apply_assertion_bindings(step_index, step, binding_actions)
         return True
+
+    async def _binding_state_key(self, page, step_index: int, unresolved: list[dict]) -> str:
+        """Identify "this step, these assertions, this page structure" so a hopeless round is asked only once."""
+        try:
+            context = await self._build_page_context(page)
+        except Exception as error:
+            logger.info('planner_v2 binding state fingerprint unavailable: %s', error)
+            return ''
+        fingerprint = str((context or {}).get('fingerprint') or '')
+        if not fingerprint:
+            return ''
+        wanted = sorted(
+            f"{assertion.get('assert_kind')}|{(assertion.get('target') or {}).get('intent') or ''}"
+            for assertion in unresolved
+        )
+        return f'{step_index}|{fingerprint}|' + '|'.join(wanted)
 
     async def _field_value_bindings_from_completed_action(
         self,
@@ -2183,22 +2251,32 @@ class PyUICompatAgent:
             await page.wait_for_timeout(500)
         if not candidates:
             return []
-        best_priority = max(priority for priority, _ in candidates)
-        best = [selector for priority, selector in candidates if priority == best_priority]
+        best_priority = max(priority for priority, _selector, _rect in candidates)
+        best = [(selector, rect) for priority, selector, rect in candidates if priority == best_priority]
         if len(best) != 1:
-            logger.info('planner_v2 selected-value binder declined: %s equally ranked candidates', len(best))
-            return []
+            innermost = self._innermost_of_nested(best)
+            if not innermost:
+                logger.info(
+                    'planner_v2 selected-value binder declined: %s equally ranked candidates that do not nest (%s)',
+                    len(best), [selector for selector, _rect in best][:8],
+                )
+                return []
+            logger.info(
+                'planner_v2 selected-value binder resolved %s nested candidates to the innermost %s',
+                len(best), innermost,
+            )
+            best = [(innermost, ())]
         assertion_index = next(
             index
             for index, candidate in enumerate(step.get('assertions') or [], start=1)
             if candidate is assertion
         )
-        logger.info('planner_v2 selected-value binder chose %s', best[0])
-        return [{'assertion_index': assertion_index, 'locator': best[0]}]
+        logger.info('planner_v2 selected-value binder chose %s', best[0][0])
+        return [{'assertion_index': assertion_index, 'locator': best[0][0]}]
 
     @staticmethod
-    def _selected_value_candidates(assertion: dict, expected: str, choice_roles: set, discovered: list) -> list[tuple[int, str]]:
-        candidates: list[tuple[int, str]] = []
+    def _selected_value_candidates(assertion: dict, expected: str, choice_roles: set, discovered: list) -> list[tuple[int, str, tuple]]:
+        candidates: list[tuple[int, str, tuple]] = []
         seen: set[str] = set()
         seen_rects: set[tuple] = set()
         for element in discovered:
@@ -2224,8 +2302,46 @@ class PyUICompatAgent:
             if rect_key is not None:
                 seen_rects.add(rect_key)
             priority = 2 if tag in {'select', 'input'} or role in {'combobox', 'textbox'} else 1 if not element.get('top_layer') else 0
-            candidates.append((priority, selector))
+            candidates.append((priority, selector, rect_key or ()))
         return candidates
+
+    def _is_fresh_content(self, element: dict, baseline: set) -> bool:
+        """Whether this element is content the action introduced.
+
+        A new structural selector is the obvious signal, but it misses the common case: a single-page app
+        swapping the contents of a container keeps the nth-of-type path, so content that is new to the reader
+        is old to the selector set. One measured step showed 12 elements carrying text that was nowhere on the
+        page before, while only 1 had a selector the baseline had not already seen. Text that was not on the
+        page before the action therefore counts as fresh too.
+        """
+        if element.get('selector') not in baseline:
+            return True
+        text = str(element.get('text') or '').strip()
+        return bool(text) and text not in self._observable_baseline_texts
+
+    @staticmethod
+    def _innermost_of_nested(candidates: list[tuple[str, tuple]]) -> str:
+        """Return the innermost selector when the tied candidates are one control seen at several DOM depths.
+
+        A status control's text is reported by the control and by every ancestor that wraps it, so a single
+        control on screen arrives here as a chain of boxes that each contain the next. Picking the innermost
+        is then correct by construction. Candidates that do not nest are genuinely different controls and the
+        caller must keep declining rather than guess between them.
+        """
+        boxed = [(selector, rect) for selector, rect in candidates if rect and len(rect) == 4 and rect[2] > 0 and rect[3] > 0]
+        if len(boxed) != len(candidates) or not boxed:
+            return ''
+
+        def contains(outer, inner):
+            ox, oy, ow, oh = outer
+            ix, iy, iw, ih = inner
+            return ox <= ix and oy <= iy and ox + ow >= ix + iw and oy + oh >= iy + ih
+
+        ordered = sorted(boxed, key=lambda item: item[1][2] * item[1][3])
+        for (_outer_selector, outer), (_inner_selector, inner) in zip(ordered[1:], ordered):
+            if not contains(outer, inner):
+                return ''
+        return ordered[0][0]
 
     async def _visible_element_binding_from_completed_click(
         self,
@@ -2255,10 +2371,17 @@ class PyUICompatAgent:
         if not target_text and not intent_tokens:
             return []
 
+        controls = [control for control in await self._build_actionable_controls(page) if isinstance(control, dict)]
+        # Dialog content first: while a layer is open it owns the screen, and a background control with a
+        # matching name would be the wrong evidence. With no blocking layer on the page that risk is gone, and
+        # restricting to the top layer left ordinary content unbindable — a camera list entry named in the plan
+        # matched no binder at all, because assertions carrying target.text are excluded from the media binders.
+        scoped = [control for control in controls if control.get('top_layer') is True]
+        if not scoped and not any(control.get('blocking_layer') is True for control in controls):
+            scoped = controls
+
         candidates_by_name: dict[str, dict[str, Any]] = {}
-        for control in await self._build_actionable_controls(page):
-            if not isinstance(control, dict) or control.get('top_layer') is not True:
-                continue
+        for control in scoped:
             name = str(control.get('name') or '').strip()
             selector = str(control.get('selector') or '').strip()
             normalized_name = name.casefold()
@@ -2431,7 +2554,11 @@ class PyUICompatAgent:
         for assertion in step.get('assertions') or []:
             if not (
                 isinstance(assertion, dict)
-                and assertion.get('assert_kind') == 'element_state'
+                # 'absence' states the same thing as element_state/not_exists and planners use both for a
+                # closed player. Recognising only one of them left the other with no deterministic binder:
+                # the model guessed a locator instead, and a guess that landed on a surviving container made
+                # the step fail even though the player had closed.
+                and assertion.get('assert_kind') in {'element_state', 'absence'}
                 and assertion.get('operator') == 'not_exists'
                 and assertion.get('required', True) is not False
                 and isinstance(assertion.get('target'), dict)
@@ -2453,6 +2580,53 @@ class PyUICompatAgent:
         elements = await self._rendered_visual_elements(page)
         self._rendered_visual_baseline_elements = {str(element['selector']): element for element in elements}
         return set(self._rendered_visual_baseline_elements)
+
+    async def _media_inventory_census(self, page) -> str:
+        """Why the rendered-media inventory came back empty on a page that visibly shows pictures.
+
+        The inventory only queries img/canvas/video, while the observable-element inventory also counts a
+        sized CSS background image. If a page paints its thumbnails as background images the two disagree,
+        and this census says so instead of leaving a bare "observed=0".
+        """
+        try:
+            counts = await page.evaluate(
+                """() => {
+                    const tagged = Array.from(document.querySelectorAll('img, canvas, video'));
+                    const sized = (element) => {
+                        const rect = element.getBoundingClientRect();
+                        return rect.width >= 24 && rect.height >= 24;
+                    };
+                    const backgrounds = Array.from(document.querySelectorAll('div, span, a, button, li'))
+                        .filter(element => sized(element) && getComputedStyle(element).backgroundImage !== 'none');
+                    return {
+                        tagged: tagged.length,
+                        tagged_sized: tagged.filter(sized).length,
+                        backgrounds: backgrounds.length,
+                    };
+                }"""
+            )
+        except Exception as error:
+            return f'census unavailable: {error}'
+        return (
+            f"census tagged={counts.get('tagged')} tagged_sized={counts.get('tagged_sized')} "
+            f"background_images={counts.get('backgrounds')}"
+        )
+
+    def _is_fresh_media(self, element: dict, baseline: set) -> bool:
+        """Whether this rendered surface is showing something the action brought in.
+
+        Selector novelty alone misses the case that blocks thumbnail assertions: filtering a camera list
+        reuses the row containers, so the thumbnail keeps its structural selector while the picture behind
+        it changes. Comparing what the surface is showing catches that.
+        """
+        selector = element.get('selector')
+        if selector not in baseline:
+            return True
+        previous = (self._rendered_visual_baseline_elements or {}).get(str(selector))
+        if not isinstance(previous, dict):
+            return False
+        key = str(element.get('content_key') or '')
+        return bool(key) and key != str(previous.get('content_key') or '')
 
     async def _vanished_media_binding_from_completed_action(
         self,
@@ -2519,12 +2693,18 @@ class PyUICompatAgent:
             for assertion in self._media_bindable_assertions(step)
         ) or bool(self._unbound_collection_assertions(step))
         if not needs_baseline:
+            self._observable_baseline_texts = set()
             return None
-        return {
-            str(element.get('selector') or '')
-            for element in await self._build_observable_elements(page)
+        elements = [
+            element for element in await self._build_observable_elements(page)
             if isinstance(element, dict) and element.get('selector')
+        ]
+        # Texts are kept alongside selectors because a structural nth-of-type selector survives a SPA
+        # swapping the content inside a stable container: the node is new to the user, old to the set.
+        self._observable_baseline_texts = {
+            text for text in (str(element.get('text') or '').strip() for element in elements) if text
         }
+        return {str(element.get('selector') or '') for element in elements}
 
     async def _collection_binding_from_completed_action(
         self,
@@ -2612,33 +2792,63 @@ class PyUICompatAgent:
         action: dict,
     ) -> list[dict]:
         """Bind an intent-only existence assertion to the largest content block the action introduced."""
-        if len(unresolved) != 1 or action.get('action') not in {'click', 'select', 'press', 'navigate', 'scroll', 'wait'}:
+        # Each gate says why it refused. A binder that returns an empty list in silence is the reason a
+        # single unbindable assertion has cost several diagnostic runs: the log showed the chain failing
+        # without showing where.
+        def refuse(reason: str) -> list:
+            logger.info('planner_v2 fresh-content binder skipped: %s', reason)
+            self._runtime_events.append({'type': 'binder_note', 'binder': 'fresh_content', 'skipped': reason})
             return []
+
+        if len(unresolved) != 1:
+            return refuse(f'{len(unresolved)} assertions in one call')
+        if action.get('action') not in {'click', 'select', 'press', 'navigate', 'scroll', 'wait'}:
+            return refuse(f"last action was {action.get('action')}")
         assertion = unresolved[0]
-        if assertion not in self._media_bindable_assertions(step) or (assertion.get('target') or {}).get('visual_content') == 'image':
-            return []
+        if assertion not in self._media_bindable_assertions(step):
+            return refuse('assertion is not media-bindable')
+        if (assertion.get('target') or {}).get('visual_content') == 'image':
+            return refuse('image target belongs to the rendered-visual binder')
+        named_control = NAMED_CONTROL_INTENT_PATTERN.search(str((assertion.get('target') or {}).get('intent') or ''))
+        if named_control:
+            # This binder answers "the action introduced this block of content" by taking the largest fresh
+            # element. That is the wrong shape of answer for "the Deactivate button exists": the largest
+            # fresh block is a layout container, it is present whether or not the button is, and binding it
+            # turned a broken flow into a passing step. A named control belongs to a name-matching binder.
+            return refuse(f'intent names a control ({named_control.group(0)}); leave it to a name-matching binder')
         baseline = self._observable_baseline
         if baseline is None:
-            return []
+            return refuse('no observable baseline was captured before the action')
 
         def area(element):
             rect = element.get('rect') if isinstance(element.get('rect'), dict) else {}
             return int(rect.get('width') or 0) * int(rect.get('height') or 0)
 
-        fresh = [
-            element
-            for element in await self._build_observable_elements(page)
-            if isinstance(element, dict) and element.get('selector') and element.get('selector') not in baseline
+        observed = [
+            element for element in await self._build_observable_elements(page)
+            if isinstance(element, dict) and element.get('selector')
         ]
+        fresh = [element for element in observed if self._is_fresh_content(element, baseline)]
+        by_selector = sum(1 for element in observed if element.get('selector') not in baseline)
         if len(fresh) < 3:
-            logger.info('planner_v2 fresh-content binder declined: only %s new observable element(s)', len(fresh))
-            self._runtime_events.append({'type': 'binder_note', 'binder': 'fresh_content', 'fresh': len(fresh)})
+            logger.info(
+                'planner_v2 fresh-content binder declined: only %s new observable element(s) '
+                '(baseline=%s observed=%s new_by_selector=%s)',
+                len(fresh), len(baseline), len(observed), by_selector,
+            )
+            self._runtime_events.append({
+                'type': 'binder_note', 'binder': 'fresh_content', 'fresh': len(fresh),
+                'baseline': len(baseline), 'observed': len(observed), 'new_by_selector': by_selector,
+            })
             return []
         sizable = [element for element in fresh if area(element) >= 10000]
         with_text = [element for element in sizable if str(element.get('text') or '').strip()]
         pool = with_text or sizable
         if not pool:
-            return []
+            return refuse(
+                f'{len(fresh)} new element(s) but none reaches 10000px2 '
+                f'(largest={max((area(element) for element in fresh), default=0)})'
+            )
         chosen = max(pool, key=area)
         if assertion.get('assert_kind') == 'popup':
             # Diagnostic only: dialog text is too weak a signal to refuse the evidence (see planner note).
@@ -2671,12 +2881,18 @@ class PyUICompatAgent:
         baseline = self._rendered_visual_baseline
         if baseline is None:
             return []
-        fresh = [
-            element
-            for element in await self._rendered_visual_elements(page)
-            if element.get('selector') not in baseline
-        ]
+        observed = await self._rendered_visual_elements(page)
+        fresh = [element for element in observed if self._is_fresh_media(element, baseline)]
         if not fresh:
+            logger.info(
+                'planner_v2 media binder declined: no new rendered media (baseline=%s observed=%s%s)',
+                len(baseline), len(observed),
+                f' {await self._media_inventory_census(page)}' if not observed else '',
+            )
+            self._runtime_events.append({
+                'type': 'binder_note', 'binder': 'rendered_visual',
+                'fresh': 0, 'baseline': len(baseline), 'observed': len(observed),
+            })
             return []
         is_image = (assertion.get('target') or {}).get('visual_content') == 'image'
 
@@ -3016,6 +3232,13 @@ class PyUICompatAgent:
         Camera thumbnails are fetched one by one after a list opens and commonly take 20-30 seconds, so an
         image assertion waits noticeably longer than other media. When the step names the environment's
         target camera, the wait ends only once a thumbnail renders inside that camera's card.
+
+        The budget is spent in two phases and is amortised across the whole step. Waiting the full image
+        budget while the target camera's card is not even on screen buys nothing: the card usually appears
+        only after the model expands its site group, so that phase is capped short and control returns to the
+        model. And because a step can re-enter this wait on every assertion replan, the time already spent is
+        subtracted from a per-step ceiling; TC_006 previously paid the full 45s eighteen times and exhausted
+        its 600s step budget inside step 1, which left the case permanently uncached and failing.
         """
         timeout_ms = min(15000, max(
             int(assertion.get('timeout_ms') or step.get('timeout_ms') or 10000)
@@ -3035,51 +3258,84 @@ class PyUICompatAgent:
             timeout_ms = min(60000, max(timeout_ms, IMAGE_RENDER_WAIT_MS))
         wants_target = bool(is_image_wait and not locators and self._step_targets_configured_camera(step))
         target_rects = await self._target_camera_card_rects(page, step) if wants_target else []
-        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+
+        step_key = str(step.get('index') or step.get('description') or '')
+        spent_ms = self._render_wait_spent_ms.get(step_key, 0)
+        budget_left_ms = max(0, RENDER_WAIT_BUDGET_PER_STEP_MS - spent_ms)
+        if budget_left_ms <= 0:
+            logger.info(
+                'planner_v2 step %s already spent its %sms render-wait budget; capture evidence now',
+                step.get('index'), spent_ms,
+            )
+            return
+        timeout_ms = min(timeout_ms, budget_left_ms)
+        started_at = time.monotonic()
+        card_deadline = (
+            started_at + min(CARD_APPEAR_WAIT_MS, timeout_ms) / 1000.0
+            if wants_target and not target_rects
+            else None
+        )
+        deadline = started_at + max(0, timeout_ms) / 1000.0
         probes = 0
-        while True:
-            probes += 1
-            try:
-                if wants_target and not target_rects and probes % 4 == 0:
-                    # The card may only appear once the site group expands; keep looking for it.
-                    target_rects = await self._target_camera_card_rects(page, step)
-                if wants_target and not target_rects:
-                    settled = False  # another camera's thumbnail is not the target's
-                elif target_rects:
-                    # The step is about the configured target camera: it is settled once any rendered media sits
-                    # inside that camera's card, whether or not the media existed before the action.
-                    settled = any(
-                        self._rect_inside(element.get('rect'), target)
-                        for element in await self._rendered_visual_elements(page)
-                        for target in target_rects
+        try:
+            while True:
+                probes += 1
+                try:
+                    if wants_target and not target_rects and probes % 4 == 0:
+                        # The card may only appear once the site group expands; keep looking for it.
+                        target_rects = await self._target_camera_card_rects(page, step)
+                        if target_rects:
+                            card_deadline = None  # the card is here: the thumbnail may use the full budget
+                    if wants_target and not target_rects:
+                        settled = False  # another camera's thumbnail is not the target's
+                    elif target_rects:
+                        # The step is about the configured target camera: it is settled once any rendered media
+                        # sits inside that camera's card, whether or not the media existed before the action.
+                        settled = any(
+                            self._rect_inside(element.get('rect'), target)
+                            for element in await self._rendered_visual_elements(page)
+                            for target in target_rects
+                        )
+                    elif locators or baseline is None:
+                        settled = await page.evaluate(VISUAL_CONTENT_SETTLED_JS, locators)
+                    else:
+                        # Unbound media assertion with a pre-action baseline: wait for the surface the
+                        # action introduces, not merely for already-present media to finish loading.
+                        settled = any(
+                            element.get('selector') not in baseline
+                            for element in await self._rendered_visual_elements(page)
+                        )
+                except Exception as error:
+                    logger.info('planner_v2 visual content settle probe failed: %s', error)
+                    return
+                if settled:
+                    return
+                now = time.monotonic()
+                if card_deadline is not None and now >= card_deadline:
+                    logger.info(
+                        'planner_v2 target camera card still absent after %sms; stop waiting so the step can act',
+                        round(CARD_APPEAR_WAIT_MS),
                     )
-                elif locators or baseline is None:
-                    settled = await page.evaluate(VISUAL_CONTENT_SETTLED_JS, locators)
-                else:
-                    # Unbound media assertion with a pre-action baseline: wait for the surface the
-                    # action introduces, not merely for already-present media to finish loading.
-                    settled = any(
-                        element.get('selector') not in baseline
-                        for element in await self._rendered_visual_elements(page)
+                    return
+                remaining_ms = round((deadline - now) * 1000)
+                if remaining_ms <= 0:
+                    logger.info(
+                        'planner_v2 visual content did not settle within %sms; continue with strict evidence capture',
+                        timeout_ms,
                     )
-            except Exception as error:
-                logger.info('planner_v2 visual content settle probe failed: %s', error)
-                return
-            if settled:
-                return
-            remaining_ms = round((deadline - time.monotonic()) * 1000)
-            if remaining_ms <= 0:
-                logger.info(
-                    'planner_v2 visual content did not settle within %sms; continue with strict evidence capture',
-                    timeout_ms,
-                )
-                return
-            await page.wait_for_timeout(min(500, remaining_ms))
+                    return
+                await page.wait_for_timeout(min(500, remaining_ms))
+        finally:
+            self._render_wait_spent_ms[step_key] = spent_ms + round((time.monotonic() - started_at) * 1000)
 
     async def _retry_assertion_failure(self, page, step, step_index, actions, assertion_statuses, step_callback, timeout_error, history, artifact_dir):
         if self.execution_record_id is None:
             return None
         await self._clear_vanished_assertion_bindings(page, step, step_index)
+        if actions and isinstance(actions[-1], dict) and actions[-1].get('action') != 'assert':
+            # Before any rebinding, deal with a click that did nothing. This must not be gated on the step's
+            # assertion kinds: steps asserting page text need it as much as steps asserting an element.
+            await self._retry_swallowed_action(page, step, step_index, actions[-1], step_callback, history)
         if not self._step_budget_exhausted():
             recovered = await self._recover_by_rebinding(page, step, step_index, actions, step_callback, history, artifact_dir)
             if recovered is not None:
@@ -3200,6 +3456,10 @@ class PyUICompatAgent:
             texts_by_position: dict[tuple, set] = {}
             for rect_key, text in self._pre_action_control_names:
                 texts_by_position.setdefault(rect_key, set()).add(text)
+            # Novelty is judged by text, never by pixel position: rect keys are exact coordinates, so a
+            # one-pixel scroll or a reflow would otherwise mark every control as revealed and make this
+            # method report an effect for any click at all, silently disabling swallowed-click recovery.
+            previous_texts = {text for _rect_key, text in self._pre_action_control_names if text}
             revealed_controls = 0
             for control in await self._build_actionable_controls(page):
                 if not isinstance(control, dict) or not isinstance(control.get('rect'), dict):
@@ -3208,10 +3468,10 @@ class PyUICompatAgent:
                 text = ' '.join(str(control.get('name') or '').split())
                 if rect_key in texts_by_position and text not in texts_by_position[rect_key]:
                     return True
-                if rect_key not in texts_by_position and text:
+                if text and text not in previous_texts:
                     revealed_controls += 1
-            # A panel that expanded brings a row of new named controls (filters, tabs) without changing any
-            # existing text or adding media; a single stray control could be a tooltip, so require a group.
+            # A panel that expanded brings a row of genuinely new labels (filters, tabs); a single stray
+            # control could be a tooltip, so require a group.
             if revealed_controls >= 2:
                 return True
         if self._observable_baseline is None and self._rendered_visual_baseline is None:
@@ -3262,6 +3522,51 @@ class PyUICompatAgent:
             logger.info('planner_v2 inner activator click failed: %s', error)
             return False
 
+    async def _retry_swallowed_action(self, page, step, step_index, last_action, step_callback, history) -> None:
+        """Repeat a click that changed nothing, then try the activator inside it.
+
+        Live lists and portals routinely swallow the first click on a row, and some rows are containers whose
+        real activator is an inner thumbnail or link. This runs before any rebinding and independently of the
+        step's assertion kinds: a step asserting page text (\"results contain 5003_D13\") needs the retry just
+        as much as one asserting an element, and gating it on DOM-kind assertions left TC_006 without it.
+        """
+        self._last_action_effect_note = ''
+        if (
+            last_action.get('action') not in {'click', 'select'}
+            or step_index in self._swallowed_action_retries
+            or self._control_toggles_state(last_action, self._last_actionable_controls)
+        ):
+            return
+        if await self._action_had_visible_effect(page) is not False or await self._click_target_moved(page, last_action):
+            return
+        self._swallowed_action_retries.add(step_index)
+        await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: action produced no visible change; repeating it once.\n'})
+        methods = ['same_target']
+        try:
+            await self._execute_step(page, last_action, timeout_error=TimeoutError)
+        except Exception as error:
+            logger.info('planner_v2 swallowed-action retry failed: %s', error)
+        await page.wait_for_timeout(1500)
+        if await self._action_had_visible_effect(page) is False:
+            if await self._click_inner_activator(page, str(last_action.get('selector') or '')):
+                methods.append('inner_activator')
+                await page.wait_for_timeout(1500)
+        if await self._action_had_visible_effect(page) is False:
+            self._last_action_effect_note = (
+                'The completed action produced no visible change on the page, so the intended transition did not happen; '
+                'choose a different target (for example the item thumbnail or link) instead of asserting.'
+            )
+        logger.info('planner_v2 step %s swallowed-action retry methods=%s recovered=%s',
+                    step_index, methods, not self._last_action_effect_note)
+        if history is not None:
+            history.artifacts.append({
+                'type': 'swallowed_action_retry',
+                'step': step_index,
+                'action': self._audit_action_payload(last_action, step),
+                'methods': methods,
+                'effect_after_retry': not self._last_action_effect_note,
+            })
+
     async def _recover_by_rebinding(self, page, step, step_index, actions, step_callback, history, artifact_dir):
         """Before asking the model to act again, give the completed action's state a chance to settle and rebind.
 
@@ -3280,40 +3585,6 @@ class PyUICompatAgent:
         if not required or any(assertion.get('assert_kind') not in dom_kinds for assertion in required):
             return None
         last_action = actions[-1]
-        self._last_action_effect_note = ''
-        if (
-            last_action.get('action') in {'click', 'select'}
-            and step_index not in self._swallowed_action_retries
-            and not self._control_toggles_state(last_action, self._last_actionable_controls)
-        ):
-            if await self._action_had_visible_effect(page) is False and not await self._click_target_moved(page, last_action):
-                # A completed click that changed nothing is usually swallowed by a re-render (live lists,
-                # portals) or landed on a container whose activator is an inner thumbnail/link.
-                self._swallowed_action_retries.add(step_index)
-                await self._emit(step_callback, {'type': 'log', 'content': f'[planner_v2] Step {step_index}: action produced no visible change; repeating it once.\n'})
-                methods = ['same_target']
-                try:
-                    await self._execute_step(page, last_action, timeout_error=TimeoutError)
-                except Exception as error:
-                    logger.info('planner_v2 swallowed-action retry failed: %s', error)
-                await page.wait_for_timeout(1500)
-                if await self._action_had_visible_effect(page) is False:
-                    if await self._click_inner_activator(page, str(last_action.get('selector') or '')):
-                        methods.append('inner_activator')
-                        await page.wait_for_timeout(1500)
-                if await self._action_had_visible_effect(page) is False:
-                    self._last_action_effect_note = (
-                        'The completed action produced no visible change on the page, so the intended transition did not happen; '
-                        'choose a different target (for example the item thumbnail or link) instead of asserting.'
-                    )
-                if history is not None:
-                    history.artifacts.append({
-                        'type': 'swallowed_action_retry',
-                        'step': step_index,
-                        'action': self._audit_action_payload(last_action, step),
-                        'methods': methods,
-                        'effect_after_retry': not self._last_action_effect_note,
-                    })
         await self._wait_for_assertion_observation(page, step)
         await self._bind_required_assertions_after_action(page, step, step_index, actions, step_callback, history)
         # Applying bindings replaces the step's assertion dicts, so re-read them instead of the pre-binding list.
@@ -3504,6 +3775,28 @@ class PyUICompatAgent:
             target = f'{target[:57]}...'
         return f'{label} → {target}' if target else label
 
+    @staticmethod
+    def _normalize_existence_expectations(assertions):
+        """Give every existence assertion the same expected value before binders look at it.
+
+        parse_assertion normalises this when a plan is generated and again when it is evaluated, but binders
+        read the plan as it was stored. A plan written before that normalisation can still carry
+        ``expected.value: ""``, which expects_true() reads as False, so the binders that gate on it decline
+        and the step can only end inconclusive. Healing on load keeps those stored plans usable.
+        """
+        healed = []
+        for assertion in assertions or []:
+            if (
+                isinstance(assertion, dict)
+                and assertion.get('assert_kind') in {'element_state', 'popup'}
+                and assertion.get('operator') in {'exists', 'not_exists'}
+                and isinstance(assertion.get('expected'), dict)
+                and assertion['expected'].get('value') is not True
+            ):
+                assertion = {**assertion, 'expected': {**assertion['expected'], 'value': True}}
+            healed.append(assertion)
+        return healed
+
     def _normalize_step(self, raw_step, index):
         if not isinstance(raw_step, dict):
             return {
@@ -3532,7 +3825,7 @@ class PyUICompatAgent:
             'action': action,
             'description': description,
             'allowed_capabilities': raw_step.get('allowed_capabilities') or self._direct_action_capabilities(action),
-            'assertions': raw_step.get('assertions') or [],
+            'assertions': self._normalize_existence_expectations(raw_step.get('assertions') or []),
             'transition': raw_step.get('transition'),
             'verification_required': raw_step.get('verification_required', True) is not False,
             'selector': selector,

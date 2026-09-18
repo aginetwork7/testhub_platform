@@ -923,6 +923,49 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         page.evaluate.assert_not_awaited()
         self.assertTrue(page.wait_for_timeout.await_count >= 3)
 
+    def test_render_wait_stops_early_while_the_target_card_is_absent(self) -> None:
+        agent = PyUICompatAgent(case_name='Two_Phase_Wait')
+        agent._execution_resources = [{
+            'resource_type': 'environment_device', 'resource_id': 'nvr_5003',
+            'resource': {'role': 'main_device', 'device_id': 'nvr_5003', 'camera_names': ['5003_D13'], 'site': '萧山区'},
+        }]
+        agent._rendered_visual_baseline = set()
+        agent._build_actionable_controls = AsyncMock(return_value=[])  # 卡片始终不出现
+        agent._rendered_visual_elements = AsyncMock(return_value=[{'selector': '#other', 'rect': {'x': 0, 'y': 0, 'width': 9, 'height': 9}}])
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=True), wait_for_timeout=AsyncMock())
+        step = {'index': 1, 'description': 'Locate camera 5003_D13 and verify its thumbnail displays normally.', 'assertions': [{
+            'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True},
+            'target': {'intent': 'thumbnail on the camera 5003_D13 icon', 'visual_content': 'image'},
+        }]}
+
+        with patch('apps.ai_testing.runtime.pyui_compat.runner.CARD_APPEAR_WAIT_MS', 1000):
+            asyncio.run(agent._wait_for_rendered_visual_content(page, step, step['assertions']))
+
+        # 卡片一直不出现时只花掉卡片阶段的预算，而不是 45 秒的图片预算。
+        spent_ms = agent._render_wait_spent_ms[str(step['index'])]
+        self.assertLess(spent_ms, 5000, f'实际花费 {spent_ms}ms，应当在卡片阶段就返回')
+
+    def test_render_wait_budget_is_amortised_across_replans_of_one_step(self) -> None:
+        agent = PyUICompatAgent(case_name='Budget_Amortised')
+        agent._rendered_visual_baseline = set()
+        agent._rendered_visual_elements = AsyncMock(return_value=[])
+        page = SimpleNamespace(evaluate=AsyncMock(return_value=False), wait_for_timeout=AsyncMock())
+        step = {'index': 4, 'description': 'Open the detail and verify its image.', 'assertions': [{
+            'assert_kind': 'element_state', 'operator': 'exists', 'expected': {'value': True},
+            'target': {'intent': 'detail image', 'visual_content': 'image', 'locator': '#img'},
+        }]}
+
+        # 预算已用尽时直接返回，不再等待。
+        agent._render_wait_spent_ms[str(step['index'])] = 999999
+        asyncio.run(agent._wait_for_rendered_visual_content(page, step, step['assertions']))
+        page.wait_for_timeout.assert_not_awaited()
+
+    def test_render_wait_records_time_spent_per_step(self) -> None:
+        source = inspect.getsource(PyUICompatAgent._wait_for_rendered_visual_content)
+        self.assertIn('RENDER_WAIT_BUDGET_PER_STEP_MS - spent_ms', source)
+        self.assertIn('self._render_wait_spent_ms[step_key] = spent_ms +', source)
+        self.assertIn('card_deadline = None', source)
+
     def test_binding_pass_waits_for_unrendered_image_assertions_first(self) -> None:
         source = inspect.getsource(PyUICompatAgent._bind_required_assertions_after_action)
         self.assertIn("assertion['target'].get('visual_content') == 'image'", source)
@@ -1626,7 +1669,7 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         step = {'assertions': [{'assert_kind': 'element_state', 'operator': 'exists', 'target': {'intent': 'detail status control'}}]}
         click = {'action': 'click', 'selector': '#row-1'}
 
-        self.assertIsNone(asyncio.run(agent._recover_by_rebinding(page, step, 3, [click], None, history, None)))
+        asyncio.run(agent._retry_swallowed_action(page, step, 3, click, None, history))
 
         agent._execute_step.assert_awaited_once()
         inner.click.assert_awaited_once()
@@ -1635,7 +1678,8 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         self.assertEqual(history.artifacts[-1]['methods'], ['same_target', 'inner_activator'])
         self.assertIn('no visible change', agent._last_action_effect_note)
 
-        asyncio.run(agent._recover_by_rebinding(page, step, 3, [click], None, history, None))
+        # 同一步骤只重试一次
+        asyncio.run(agent._retry_swallowed_action(page, step, 3, click, None, history))
         agent._execute_step.assert_awaited_once()
 
     def test_action_effect_detection_uses_pre_action_baselines(self) -> None:
@@ -2807,6 +2851,31 @@ class PyUICompatRuntimeTests(SimpleTestCase):
         ])
         self.assertFalse(asyncio.run(agent._action_had_visible_effect(page)))
 
+    def test_scrolling_alone_is_not_counted_as_revealed_controls(self) -> None:
+        """rect 是精确像素坐标，滚动会让所有控件换位置；若按位置判新增，任何点击都会被判为有效果。"""
+        agent = PyUICompatAgent(case_name='Scroll_Not_Effect')
+        agent._pre_action_control_names = {((10, 100, 40, 20), 'Alpha'), ((10, 140, 40, 20), 'Beta'), ((10, 180, 40, 20), 'Gamma')}
+        agent._observable_baseline = {'#a'}
+        agent._build_observable_elements = AsyncMock(return_value=[{'selector': '#a'}])
+        agent._rendered_visual_baseline = None
+        page = SimpleNamespace(url='')
+
+        # 整体上移 7 像素，文字完全相同：不应判为有可见效果。
+        agent._build_actionable_controls = AsyncMock(return_value=[
+            {'name': 'Alpha', 'rect': {'x': 10, 'y': 93, 'width': 40, 'height': 20}},
+            {'name': 'Beta', 'rect': {'x': 10, 'y': 133, 'width': 40, 'height': 20}},
+            {'name': 'Gamma', 'rect': {'x': 10, 'y': 173, 'width': 40, 'height': 20}},
+        ])
+        self.assertFalse(asyncio.run(agent._action_had_visible_effect(page)))
+
+    def test_swallowed_retry_runs_before_the_assertion_kind_gate(self) -> None:
+        source = inspect.getsource(PyUICompatAgent._retry_assertion_failure)
+        self.assertIn('await self._retry_swallowed_action(page, step, step_index, actions[-1]', source)
+        self.assertLess(source.index('_retry_swallowed_action'), source.index('_recover_by_rebinding'))
+        # 该方法自身不看断言种类
+        retry_source = inspect.getsource(PyUICompatAgent._retry_swallowed_action)
+        self.assertNotIn('assert_kind', retry_source)
+
     def test_action_effect_detection_counts_a_row_of_revealed_controls(self) -> None:
         agent = PyUICompatAgent(case_name='Revealed_Controls_Effect')
         agent._pre_action_control_names = {((120, 160, 40, 40), 'Toggle collapse'), ((10, 10, 40, 40), 'Home')}
@@ -3516,6 +3585,28 @@ class ActionCacheDatabaseTests(TestCase):
         self.assertEqual(AIActionCacheEntry.objects.count(), 2)
         self.assertIsNone(self._load(self.step, {**self.context, 'fingerprint': 'fp-0'}))
         self.assertEqual(self._load(self.step, {**self.context, 'fingerprint': 'fp-3'}), self.actions)
+
+    def test_store_reports_whether_it_persisted_and_says_why_not(self):
+        from apps.ai_testing.models import AIActionCacheEntry
+
+        # 正常写入返回 True
+        self.assertTrue(asyncio.run(self.agent._store_cached_ai_actions(self.step, self.actions, self.context)) is not False
+                        or AIActionCacheEntry.objects.exists())
+
+        # 只有 assert/wait 的序列不可回放，返回 False 且不写库
+        before = AIActionCacheEntry.objects.count()
+        self.assertFalse(asyncio.run(self.agent._store_cached_ai_actions(self.step, [{'action': 'assert'}], self.context)))
+        self.assertEqual(AIActionCacheEntry.objects.count(), before)
+
+        # 缺页面指纹同样返回 False
+        self.assertFalse(asyncio.run(self.agent._store_cached_ai_actions(
+            self.step, self.actions, {'url': 'https://example.test', 'fingerprint': ''},
+        )))
+
+    def test_caller_counts_skipped_writes_separately(self):
+        source = inspect.getsource(PyUICompatAgent.run_full_process)
+        self.assertIn('if await self._store_cached_ai_actions(step, ai_actions):', source)
+        self.assertIn("history.cache_stats['write_skipped']", source)
 
     def test_delete_removes_the_entry(self):
         from apps.ai_testing.models import AIActionCacheEntry
