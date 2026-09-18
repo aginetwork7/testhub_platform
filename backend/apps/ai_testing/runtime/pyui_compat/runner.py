@@ -19,6 +19,7 @@ from apps.ai_testing.execution.environment_preflight import (
     describe_environment_problems,
 )
 from apps.ai_testing.execution.intent_text import (
+    subject_tokens,
     continuing_collection_locator,
     display_value_from_target,
     exact_text_locator,
@@ -2546,6 +2547,12 @@ class PyUICompatAgent:
         }
         if not target_text and not intent_tokens:
             return []
+        # Match on what the intent says the control *is*, not on how it spells the control's kind. Requiring
+        # every word meant "site name search input" missed a control named "Search site name..." over the
+        # single word "input", and the step had no binder at all. Candidate uniqueness below still guards
+        # against the opposite failure: loosening this may only ever turn a refusal into a refusal, never
+        # into a wrong pick.
+        required_tokens = subject_tokens(intent_tokens)
 
         controls = [control for control in await self._build_actionable_controls(page) if isinstance(control, dict)]
         # Dialog content first: while a layer is open it owns the screen, and a background control with a
@@ -2567,7 +2574,7 @@ class PyUICompatAgent:
                 or normalized_name.startswith(f'{target_text} ')
                 or normalized_name.startswith(f'{target_text}(')
                 or normalized_name.startswith(f'{target_text}（')
-            ) if target_text else intent_tokens.issubset(name_tokens)
+            ) if target_text else required_tokens.issubset(name_tokens)
             if not name or not selector or not target_matches:
                 continue
             candidate = candidates_by_name.setdefault(

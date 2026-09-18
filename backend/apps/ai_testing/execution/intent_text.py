@@ -168,6 +168,28 @@ def expects_true(value: Any) -> bool:
     return str(value or '').strip().casefold() in {'true', '1', 'yes'}
 
 
+# Words that name the kind of control rather than which control. An intent says "site name search input"
+# while the control calls itself "Search site name..." — the subject words agree and only the type word
+# differs, yet requiring every word to match refused the binding and left the step unbindable. These are
+# dropped before matching so the subject has to agree and the type word does not.
+CONTROL_TYPE_WORDS = frozenset({
+    'input', 'box', 'field', 'textbox', 'searchbox', 'combobox', 'textarea',
+    'button', 'btn', 'icon', 'control', 'controls', 'toggle', 'switch', 'checkbox', 'radio',
+    'label', 'header', 'heading', 'title', 'tab', 'link', 'bar', 'widget', 'component',
+    'container', 'wrapper', 'block', 'region', 'pane', 'column', 'cell', 'group',
+})
+
+
+def subject_tokens(tokens: set[str]) -> set[str]:
+    """The words that say *which* thing, with layout and control-type words removed.
+
+    Returns the original set when nothing distinctive is left: an intent made only of type words carries no
+    subject, and matching on an empty set would match every control on the page.
+    """
+    subject = {token for token in tokens if token not in CONTROL_TYPE_WORDS and token not in _GENERIC_COLLECTION_WORDS}
+    return subject or set(tokens)
+
+
 _GENERIC_COLLECTION_WORDS = frozenset({
     'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'onto', 'after', 'before', 'under', 'over',
     'all', 'any', 'each', 'its', 'their', 'are', 'was', 'were', 'been', 'being', 'has', 'have', 'not',
