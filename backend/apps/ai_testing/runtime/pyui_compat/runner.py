@@ -14,6 +14,10 @@ from asgiref.sync import sync_to_async
 from django.db import DatabaseError, models, transaction
 from django.utils import timezone
 
+from apps.ai_testing.execution.environment_preflight import (
+    collect_environment_problems,
+    describe_environment_problems,
+)
 from apps.ai_testing.execution.intent_text import (
     continuing_collection_locator,
     display_value_from_target,
@@ -450,6 +454,17 @@ class PyUICompatAgent:
             )
 
         step_index_start = 1
+
+        # Before spending a browser on it: an environment with no AI-testing configuration used to skip the
+        # login in silence and run every step against about:blank, failing minutes later with nothing in the
+        # logs naming the cause. Say what is missing, in seconds, without launching Chromium.
+        environment_problems = collect_environment_problems(
+            self.environment_configuration, normalized_steps, task_description,
+        )
+        if environment_problems:
+            message = describe_environment_problems(self.environment_configuration, environment_problems)
+            await self._emit(step_callback, {'type': 'log', 'content': f'{message}\n'})
+            raise EnvironmentBootstrapError(message)
 
         try:
             from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
