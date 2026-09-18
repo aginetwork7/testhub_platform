@@ -2804,7 +2804,10 @@ class PyUICompatAgent:
 
         if len(unresolved) != 1:
             return refuse(f'{len(unresolved)} assertions in one call')
-        if action.get('action') not in {'click', 'select', 'press', 'navigate', 'scroll', 'wait'}:
+        # 'fill' belongs here as much as 'click' does: typing into a search box is the canonical way to make
+        # new content appear. Every other content binder already accepted it, and leaving it out meant a
+        # filtered result list had no binder at all.
+        if action.get('action') not in {'click', 'select', 'press', 'fill', 'navigate', 'scroll', 'wait'}:
             return refuse(f"last action was {action.get('action')}")
         assertion = unresolved[0]
         if assertion not in self._media_bindable_assertions(step):

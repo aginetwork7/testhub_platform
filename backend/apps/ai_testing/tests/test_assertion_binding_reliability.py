@@ -339,3 +339,31 @@ class NamedControlGuardTests(SimpleTestCase):
         source = inspect.getsource(PyUICompatAgent._fresh_content_binding_from_completed_action)
         self.assertIn('NAMED_CONTROL_INTENT_PATTERN', source)
         self.assertIn('leave it to a name-matching binder', source)
+
+
+class BinderActionCoverageTests(SimpleTestCase):
+    """在搜索框输入是最典型的「引入新内容」，内容类绑定器都应当接受 fill。"""
+
+    @staticmethod
+    def _accepted_actions(method):
+        import inspect
+        import re
+
+        source = inspect.getsource(method)
+        match = re.search(r"action\.get\('action'\) not in \{([^}]*)\}", source)
+        assert match, f'没有找到 {method.__name__} 的动作集合'
+        return {token.strip().strip("\'") for token in match.group(1).split(',') if token.strip()}
+
+    def test_fresh_content_accepts_fill(self) -> None:
+        # TC_006 冷跑第 1 步：动作是 fill，此前 fresh_content 直接跳过，筛选后的列表无人可绑。
+        self.assertIn('fill', self._accepted_actions(PyUICompatAgent._fresh_content_binding_from_completed_action))
+
+    def test_the_content_binders_agree_on_fill(self) -> None:
+        for method in (
+            PyUICompatAgent._fresh_content_binding_from_completed_action,
+            PyUICompatAgent._rendered_visual_binding_from_completed_action,
+            PyUICompatAgent._collection_binding_from_completed_action,
+            PyUICompatAgent._intent_value_binding_from_completed_action,
+        ):
+            with self.subTest(binder=method.__name__):
+                self.assertIn('fill', self._accepted_actions(method))
