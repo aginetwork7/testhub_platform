@@ -404,7 +404,9 @@ class PyUICompatAgent:
                 'stale_skip': 0,
                 'write_skipped': 0,
                 'plan_source': plan_source,
-                'plan_cache_hit': 1 if plan_source == 'cache' else 0,
+                # A plan reused from the proven-plan table is as much a cache hit as one reused from a
+                # previous execution record; counting only the latter understated the hit rate.
+                'plan_cache_hit': 1 if plan_source in {'cache', 'verified'} else 0,
             },
             case_report={
                 'case_id': self.case_name,

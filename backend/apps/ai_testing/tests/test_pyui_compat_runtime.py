@@ -1547,7 +1547,8 @@ class PyUICompatRuntimeTests(SimpleTestCase):
     def test_force_replan_bypasses_only_the_plan_cache(self) -> None:
         source = inspect.getsource(PyUICompatAgent.run_full_process)
         self.assertIn('use_cache=self.use_cache and not self.force_replan', source)
-        self.assertIn("'plan_cache_hit': 1 if plan_source == 'cache' else 0", source)
+        # 复用已验证计划与复用执行记录里的计划，同样都是命中，都不应算作重新规划。
+        self.assertIn("'plan_cache_hit': 1 if plan_source in {'cache', 'verified'} else 0", source)
         self.assertTrue(PyUICompatAgent(case_name='x', force_replan=True).force_replan)
         self.assertFalse(PyUICompatAgent(case_name='x').force_replan)
 

@@ -24,6 +24,7 @@ from apps.ai_testing.execution.intent_text import (
 from apps.ai_testing.execution.environment_resources import default_device_camera_names, default_device_site, environment_device_resources, is_text_input, refers_to_target_device
 from apps.ai_testing.execution.model_errors import is_transient_llm_error
 from apps.ai_testing.execution.plan_contract_examples import retry_guidance
+from apps.ai_testing.execution.verified_plan_persistence import load_verified_plan_steps
 
 from apps.core.llm import LLMCallContext, OpenAICompatibleClient
 
@@ -1583,12 +1584,23 @@ class GlobalTestPlanner:
         self.last_context_fingerprint = context_fingerprint
         self.last_plan_source = 'model'
         if use_cache:
-            cached_steps = await sync_to_async(self._load_cached_plan_steps)(
+            # Proven plans first: they outlive report truncation, so clearing the execution records no longer
+            # forces every case to re-plan from scratch. Plan revisions remain the fallback for goals that
+            # passed before this table existed.
+            cached_steps = await sync_to_async(load_verified_plan_steps)(
                 task_description,
                 environment_configuration_id,
                 context_fingerprint,
                 allow_legacy=not device_goal,
             )
+            plan_source = 'verified' if cached_steps else 'cache'
+            if not cached_steps:
+                cached_steps = await sync_to_async(self._load_cached_plan_steps)(
+                    task_description,
+                    environment_configuration_id,
+                    context_fingerprint,
+                    allow_legacy=not device_goal,
+                )
             if cached_steps:
                 cached_response = {
                     'choices': [{'message': {'tool_calls': [{'function': {
@@ -1606,7 +1618,7 @@ class GlobalTestPlanner:
                 except GlobalPlanError:
                     pass
                 else:
-                    self.last_plan_source = 'cache'
+                    self.last_plan_source = plan_source
                     return normalized
 
         configs = await self._get_active_model_configs()

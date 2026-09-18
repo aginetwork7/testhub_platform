@@ -34,6 +34,32 @@ EXECUTION_BACKENDS = ('thread', 'django_q')
 TASK_PATH = 'apps.ai_testing.execution.dispatch.execute_ai_record_task'
 
 
+def _remember_verified_plan(execution_record, payload: dict[str, Any]) -> None:
+    """Keep the plan a passing run used, in a table that clearing the reports does not touch.
+
+    Never lets a bookkeeping problem fail a run that already passed: the plan is an optimisation, and the
+    verdict is the thing the user asked for.
+    """
+    from apps.ai_testing.execution.verified_plan_persistence import record_verified_plan
+
+    try:
+        revision = (
+            execution_record.plan_revisions.filter(reason='initial').order_by('revision_number').first()
+        )
+        if revision is None or not isinstance(revision.plan, dict):
+            return
+        record_verified_plan(
+            revision.source_goal or execution_record.task_description or '',
+            revision.plan,
+            execution_record.environment_configuration_id,
+            execution_record_id=execution_record.id,
+            ai_case_id=payload.get('ai_case_id') or execution_record.ai_case_id,
+            case_name=execution_record.case_name or '',
+        )
+    except Exception as error:  # noqa: BLE001 - bookkeeping must not change the run's verdict
+        logger.warning('Could not record the verified plan for record %s: %s', execution_record.id, error)
+
+
 def execution_backend() -> str:
     """Resolve the configured backend; unknown values fall back to the in-process thread."""
     value = str(
@@ -289,6 +315,7 @@ def execute_ai_record(execution_record_id: int, payload: dict[str, Any]) -> None
                 task_summary = summarize_planned_tasks(execution_record.planned_tasks)
             if execution_record.status == 'passed':
                 execution_record.logs += '\n执行完成。'
+                _remember_verified_plan(execution_record, payload)
             elif execution_record.status == 'inconclusive':
                 execution_record.logs += '\n执行结束，但计划为空或仍有未完成子任务，无法证明通过。'
             else:

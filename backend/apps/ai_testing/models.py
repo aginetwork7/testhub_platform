@@ -699,3 +699,46 @@ class AlphaRound(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['run', 'sequence'], name='alpha_unique_run_round'),
         ]
+
+
+class AIVerifiedPlan(models.Model):
+    """A global execution plan that a passing run has proven, kept independently of execution records.
+
+    Plan revisions hang off an execution record, so clearing the report tables also clears every proven
+    plan: a cold start then has to re-plan all seven acceptance cases, and the pass rate measured that way
+    says more about the planner's luck that morning than about the framework. This table survives report
+    truncation. Case and environment ids are plain integers on purpose, the same way the action cache
+    stores them: a proven plan must never be the reason a case or an environment cannot be deleted.
+    """
+
+    goal_hash = models.CharField(max_length=64, db_index=True, verbose_name='目标哈希')
+    source_goal = models.TextField(verbose_name='用例目标')
+    ai_case_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name='用例 id')
+    case_name = models.CharField(max_length=255, blank=True, default='', verbose_name='用例名')
+    environment_configuration_id = models.IntegerField(null=True, blank=True, db_index=True, verbose_name='运行环境 id')
+    context_fingerprint = models.CharField(max_length=64, blank=True, default='', verbose_name='规划上下文指纹')
+    plan = models.JSONField(default=dict, verbose_name='计划内容')
+    plan_hash = models.CharField(max_length=64, verbose_name='计划哈希')
+    verified_count = models.PositiveIntegerField(default=0, verbose_name='验证通过次数')
+    last_passed_record_id = models.IntegerField(null=True, blank=True, verbose_name='最近通过的执行记录 id')
+    last_verified_at = models.DateTimeField(null=True, blank=True, verbose_name='最近验证时间')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
+    updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
+
+    class Meta:
+        db_table = 'ai_testing_verified_plans'
+        verbose_name = 'AI已验证执行计划'
+        verbose_name_plural = 'AI已验证执行计划'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['goal_hash', 'environment_configuration_id', 'context_fingerprint', 'plan_hash'],
+                name='ai_verified_plan_unique',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['goal_hash', 'environment_configuration_id'], name='ai_verified_plan_lookup_idx'),
+        ]
+        ordering = ['-verified_count', '-last_verified_at']
+
+    def __str__(self):
+        return f'{self.case_name or self.goal_hash[:12]} x{self.verified_count}'
