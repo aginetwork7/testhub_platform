@@ -4532,7 +4532,16 @@ class PyUICompatAgent:
                         || semanticClass
                         || ''
                     ) : '';
-                    const name = (element.getAttribute('aria-label') || title || element.innerText || element.value || href || semanticName || '').trim().slice(0, 120);
+                    // A form control carries no innerText and an empty field carries no value, so an input
+                    // labelled only by a placeholder used to come through with no name at all — and a
+                    // control with no name cannot be found by any binder that matches on names. Ask the
+                    // label and the placeholder before giving up. The user's typed value stays last: it is
+                    // what the field contains, not what the field is.
+                    const labelled = element.labels && element.labels.length ? element.labels[0].textContent : '';
+                    const wrappingLabel = element.closest('label');
+                    const labelText = (labelled || (wrappingLabel ? wrappingLabel.textContent : '') || '').trim();
+                    const placeholder = (element.getAttribute('placeholder') || '').trim();
+                    const name = (element.getAttribute('aria-label') || title || element.innerText || labelText || placeholder || element.value || href || semanticName || '').trim().slice(0, 120);
                     const uniqueId = element.id && document.querySelectorAll(`#${CSS.escape(element.id)}`).length === 1;
                     const attributeSelector = (attribute, value) => `[${attribute}=${JSON.stringify(value)}]`;
                     const structuralSelector = (target = element) => {
