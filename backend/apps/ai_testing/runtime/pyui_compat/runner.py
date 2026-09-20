@@ -2307,6 +2307,9 @@ class PyUICompatAgent:
         """
         deterministic_bindings = []
         still_unresolved = []
+        # Fetched once, on the first decline, and shared by the rest: a failing step pays one DOM walk, a
+        # passing step pays none.
+        page_snapshot: dict | None = None
         for assertion in unresolved:
             declined = []
             bound = []
@@ -2327,17 +2330,73 @@ class PyUICompatAgent:
             else:
                 still_unresolved.append(assertion)
                 if history is not None:
+                    if page_snapshot is None:
+                        page_snapshot = await self._binding_failure_snapshot(page)
+                    intent = str((assertion.get('target') or {}).get('intent') or '')
                     history.artifacts.append({
                         'type': 'binders_declined',
                         'step': step_index,
                         'binders': declined,
-                        'unresolved': [{'assert_kind': assertion.get('assert_kind'), 'intent': (assertion.get('target') or {}).get('intent')}],
+                        'unresolved': [{'assert_kind': assertion.get('assert_kind'), 'intent': intent}],
                         'had_observable_baseline': self._observable_baseline is not None,
                         'had_visual_baseline': self._rendered_visual_baseline is not None,
+                        # What the page actually offered at the moment the chain gave up. Without it, the
+                        # only record of a binding failure is the half that did not match, and every later
+                        # decision about how to match has to be taken on judgement instead of evidence.
+                        'candidates': self._rank_candidates(intent, page_snapshot['controls']),
+                        'media_inventory': page_snapshot['media'],
                         'notes': list(self._runtime_events),
                     })
                     self._runtime_events = []
         return deterministic_bindings, still_unresolved
+
+    # How many candidate controls to keep per failed assertion. Enough to show what the page offered,
+    # few enough that the artifact stays a diagnostic record rather than a DOM dump.
+    BINDING_FAILURE_CANDIDATES = 12
+
+    async def _binding_failure_snapshot(self, page) -> dict:
+        """What the page offered when the binder chain gave up: named controls, and a media tag census."""
+        try:
+            controls = [
+                control for control in await self._build_actionable_controls(page)
+                if isinstance(control, dict) and str(control.get('name') or '').strip()
+            ]
+        except Exception as error:
+            logger.info('planner_v2 binding failure snapshot unavailable: %s', error)
+            controls = []
+        media: dict[str, int] = {}
+        try:
+            for element in await self._rendered_visual_elements(page):
+                tag = str(element.get('tag') or '').strip().lower() or 'unknown'
+                media[tag] = media.get(tag, 0) + 1
+        except Exception:
+            pass
+        return {'controls': controls, 'media': media}
+
+    @classmethod
+    def _rank_candidates(cls, intent: str, controls: list[dict]) -> list[dict]:
+        """The controls closest to the intent, most similar first, trimmed to what binders actually read."""
+        wanted = subject_tokens({token for token in re.findall(r'\w+', str(intent or '').casefold())})
+
+        def overlap(control: dict) -> int:
+            name_tokens = set(re.findall(r'\w+', str(control.get('name') or '').casefold()))
+            return len(wanted & name_tokens)
+
+        ordered = sorted(controls, key=lambda control: (-overlap(control), len(str(control.get('name') or ''))))
+        summary = []
+        for control in ordered[:cls.BINDING_FAILURE_CANDIDATES]:
+            rect = control.get('rect') if isinstance(control.get('rect'), dict) else {}
+            summary.append({
+                'name': str(control.get('name') or '')[:120],
+                'role': str(control.get('role') or ''),
+                'tag': str(control.get('tag') or ''),
+                'selector': str(control.get('selector') or '')[:180],
+                'top_layer': bool(control.get('top_layer')),
+                'aria_expanded': str(control.get('aria_expanded') or ''),
+                'size': [int(rect.get('width') or 0), int(rect.get('height') or 0)],
+                'matched_tokens': overlap(control),
+            })
+        return summary
 
     async def _binding_state_key(self, page, step_index: int, unresolved: list[dict]) -> str:
         """Identify "this step, these assertions, this page structure" so a hopeless round is asked only once."""
@@ -4473,7 +4532,16 @@ class PyUICompatAgent:
                         || semanticClass
                         || ''
                     ) : '';
-                    const name = (element.getAttribute('aria-label') || title || element.innerText || element.value || href || semanticName || '').trim().slice(0, 120);
+                    // A form control carries no innerText and an empty field carries no value, so an input
+                    // labelled only by a placeholder used to come through with no name at all — and a
+                    // control with no name cannot be found by any binder that matches on names. Ask the
+                    // label and the placeholder before giving up. The user's typed value stays last: it is
+                    // what the field contains, not what the field is.
+                    const labelled = element.labels && element.labels.length ? element.labels[0].textContent : '';
+                    const wrappingLabel = element.closest('label');
+                    const labelText = (labelled || (wrappingLabel ? wrappingLabel.textContent : '') || '').trim();
+                    const placeholder = (element.getAttribute('placeholder') || '').trim();
+                    const name = (element.getAttribute('aria-label') || title || element.innerText || labelText || placeholder || element.value || href || semanticName || '').trim().slice(0, 120);
                     const uniqueId = element.id && document.querySelectorAll(`#${CSS.escape(element.id)}`).length === 1;
                     const attributeSelector = (attribute, value) => `[${attribute}=${JSON.stringify(value)}]`;
                     const structuralSelector = (target = element) => {
