@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import Counter
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
@@ -30,6 +31,11 @@ class Command(BaseCommand):
         parser.add_argument('--timeout', type=int, default=2400, help='单用例最长等待秒数')
         parser.add_argument('--poll', type=float, default=5.0, help='轮询间隔秒数')
         parser.add_argument('--json', default='', help='将结果写入该 JSON 文件')
+        parser.add_argument(
+            '--assert-cold', action='store_true',
+            help='断言每次运行都没有复用已验证计划；与 --no-cache --force-replan 同用，'
+                 '防止开关未生效时跑出一份看起来通过、实则是热运行的报告',
+        )
 
     def handle(self, *args, **options):
         cases = self._select_cases(options)
@@ -59,12 +65,29 @@ class Command(BaseCommand):
                     f"ROUND{round_number} case={case.id} {case.case_number or case.name}: "
                     f"{outcome['status']} dur={outcome['duration']:.1f}s record={outcome['record_id']}"
                 )
+        # Only a passing run can hand back a green report that was secretly warm. A run that failed before
+        # it ever produced a plan reports plan_source=unknown, and failing the whole command over that threw
+        # away the report for an unrelated planner timeout.
+        warm = [
+            item for item in results
+            if item['status'] == 'passed' and item.get('plan_source') not in {'model', None, ''}
+        ]
         passed = sum(1 for item in results if item['status'] == 'passed')
-        summary = {'rounds': rounds, 'cases': len(cases), 'runs': len(results), 'passed': passed, 'env_retries': env_retries, 'results': results}
+        summary = {
+            'rounds': rounds, 'cases': len(cases), 'runs': len(results), 'passed': passed,
+            'env_retries': env_retries,
+            'plan_sources': Counter(str(item.get('plan_source') or 'unknown') for item in results),
+            'results': results,
+        }
         self.stdout.write(f'SUMMARY passed={passed}/{len(results)}')
         if options['json']:
             with open(options['json'], 'w', encoding='utf-8') as handle:
                 json.dump(summary, handle, ensure_ascii=False, indent=2, default=str)
+        if options['assert_cold'] and warm:
+            # A cold run that quietly reused a proven plan measures nothing, and it looks exactly like a real
+            # pass. Raised only after the summary and the JSON are written, so the evidence survives.
+            detail = ', '.join(f"record={item['record_id']} plan_source={item['plan_source']}" for item in warm[:10])
+            raise CommandError(f'声明了冷跑，但 {len(warm)} 次通过的运行复用了已有计划：{detail}')
         if passed != len(results):
             raise CommandError(f'{len(results) - passed} 次运行未通过。')
 
@@ -113,8 +136,26 @@ class Command(BaseCommand):
         )
         deadline = time.time() + max(30, int(options['timeout']))
         while time.time() < deadline:
-            current = AIExecutionRecord.objects.filter(pk=record.id).values('status', 'duration').first()
+            current = AIExecutionRecord.objects.filter(pk=record.id).values(
+                'status', 'duration', 'planner_trace',
+            ).first()
             if current and current['status'] in TERMINAL_STATUSES:
-                return {'case_id': case.id, 'case_number': case.case_number, 'record_id': record.id, 'status': current['status'], 'duration': float(current['duration'] or 0.0)}
+                return {'case_id': case.id, 'case_number': case.case_number, 'record_id': record.id, 'status': current['status'], 'duration': float(current['duration'] or 0.0), 'plan_source': self._plan_source(current)}
             time.sleep(max(0.5, float(options['poll'])))
-        return {'case_id': case.id, 'case_number': case.case_number, 'record_id': record.id, 'status': 'timeout', 'duration': 0.0}
+        return {
+            'case_id': case.id, 'case_number': case.case_number, 'record_id': record.id,
+            'status': 'timeout', 'duration': 0.0, 'plan_source': 'unknown',
+        }
+
+    @staticmethod
+    def _plan_source(current):
+        """Where this run's global plan came from: model (freshly planned), verified, cache or persisted."""
+        trace = (current or {}).get('planner_trace')
+        if isinstance(trace, str):
+            try:
+                trace = json.loads(trace)
+            except json.JSONDecodeError:
+                return 'unknown'
+        if not isinstance(trace, dict):
+            return 'unknown'
+        return str(trace.get('plan_source') or 'unknown')
