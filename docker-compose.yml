@@ -228,7 +228,8 @@ services:
     expose:
       - "80"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # 目录挂载：单文件挂载绑定 inode，部署替换文件后容器仍读旧内容且 reload 无效。
+      - ./deploy/nginx/conf.d/:/etc/nginx/conf.d/:ro
     depends_on:
       - frontend
       - backend
