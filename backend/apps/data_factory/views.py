@@ -14,6 +14,8 @@ from django.http import FileResponse
 from django.core.cache import cache
 
 from pathlib import Path
+
+from apps.data_factory import asset_roots
 import re
 import mimetypes
 import shutil
@@ -298,8 +300,7 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
         if not camera_mac or not camera_name:
             return {'error': '所选摄像头缺少 MAC 地址或名称。'}
 
-        media_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
-        media_groups = BusinessTools.collect_event_media(media_root, media_path) if media_path else []
+        media_groups = BusinessTools.collect_event_media_multi(asset_roots.read_roots(), media_path) if media_path else []
         if media_groups:
             input_data['count'] = len(media_groups)
         from apps.data_factory.resource_service import create_resource
@@ -338,20 +339,18 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def warehouse(self, request):
-        events_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
         categories = []
         event_paths = []
         labels = {'person': '人员事件素材', 'vehicle': '车辆事件素材'}
-        for directory in sorted(path for path in events_root.iterdir() if path.is_dir()):
-            category = directory.name
+        for category in asset_roots.categories():
             label = labels.get(category, f'自定义素材 / {category}')
             try:
-                groups = BusinessTools.collect_event_media(events_root, category)
+                groups = BusinessTools.collect_event_media_multi(asset_roots.read_roots(), category)
             except ValueError:
                 groups = []
             group_items = [
                 {
-                    'path': str(group['image_0'].relative_to(events_root)),
+                    'path': f"{category}/{group['image_0'].name}",
                     'name': group['image_0'].name,
                     'image_1': group['image_1'].name if group['image_1'] else None,
                     'video_0': group['video_0'].name if group['video_0'] else None,
@@ -388,9 +387,8 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             return Response({'error': '同一次上传的素材必须属于同一个事件前缀。'}, status=status.HTTP_400_BAD_REQUEST)
         if len(validated_files) > 1 and not any(item[3].startswith('snap_image_0.') for item in validated_files):
             return Response({'error': '批量上传必须包含 <名称>_snap_image_0.jpeg 主素材。'}, status=status.HTTP_400_BAD_REQUEST)
-        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
-        target_directory = (warehouse_root / category).resolve()
-        target_directory.mkdir(parents=True, exist_ok=True)
+        # 只写上传根：写进受版本管理的基准集会让 git 工作区变脏，正式环境下一次 git pull 会冲突。
+        target_directory = asset_roots.ensure_upload_root(category)
         uploaded_paths = []
         for media_file, filename, _, _ in validated_files:
             target = (target_directory / filename).resolve()
@@ -411,10 +409,8 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
         if not media_path.startswith(f'{category}/'):
             return Response({'error': '素材路径与所选分类不匹配。'}, status=status.HTTP_400_BAD_REQUEST)
-        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
-        media_file = (warehouse_root / media_path).resolve()
-        category_root = (warehouse_root / category).resolve()
-        if category_root not in media_file.parents or not media_file.is_file():
+        media_file = asset_roots.locate(media_path)
+        if media_file is None or not media_file.is_file():
             return Response({'error': '素材文件不存在。'}, status=status.HTTP_404_NOT_FOUND)
         content_type = mimetypes.guess_type(media_file.name)[0] or 'application/octet-stream'
         return FileResponse(media_file.open('rb'), content_type=content_type)
@@ -427,19 +423,24 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
         if not media_path.startswith(f'{category}/'):
             return Response({'error': '素材路径与所选分类不匹配。'}, status=status.HTTP_400_BAD_REQUEST)
-        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
-        primary_path = (warehouse_root / media_path).resolve()
-        category_root = (warehouse_root / category).resolve()
-        if category_root not in primary_path.parents or '_snap_image_0.' not in primary_path.name:
+        primary_path = asset_roots.locate(media_path)
+        if primary_path is None or '_snap_image_0.' not in primary_path.name:
             return Response({'error': '只能通过主素材删除完整事件组。'}, status=status.HTTP_400_BAD_REQUEST)
         if not primary_path.is_file():
             return Response({'error': '事件主素材不存在。'}, status=status.HTTP_404_NOT_FOUND)
+        if asset_roots.is_baseline(primary_path):
+            # 基准素材随代码分发。界面上删掉它会让 git 工作区出现删除态改动，正式环境下一次
+            # git pull 因此冲突。要改动基准素材，走代码提交。
+            return Response(
+                {'error': '这是随代码分发的基准素材，不能从界面删除；如需调整请通过代码提交。'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         media_group = BusinessTools._media_group(primary_path)
         deleted_paths = []
-        for media_path in media_group.values():
-            if media_path is not None and media_path.is_file():
-                media_path.unlink()
-                deleted_paths.append(str(media_path.relative_to(warehouse_root)))
+        for resolved in media_group.values():
+            if resolved is not None and resolved.is_file():
+                resolved.unlink()
+                deleted_paths.append(f'{category}/{resolved.name}')
         cache.delete('data_factory_categories')
         return Response({'deleted_paths': deleted_paths, 'count': len(deleted_paths)})
 
@@ -450,9 +451,14 @@ class DataFactoryViewSet(viewsets.ModelViewSet):
             return Response({'error': '素材分类无效。'}, status=status.HTTP_400_BAD_REQUEST)
         if category in {'person', 'vehicle'}:
             return Response({'error': '内置素材目录不能删除。'}, status=status.HTTP_400_BAD_REQUEST)
-        warehouse_root = Path(__file__).resolve().parent / 'data_warehouse' / 'events'
-        directory = (warehouse_root / category).resolve()
-        if warehouse_root not in directory.parents or not directory.is_dir():
+        if asset_roots.resolve_within(asset_roots.BASELINE_ROOT, category) is not None and (
+            asset_roots.BASELINE_ROOT / category).is_dir():
+            return Response(
+                {'error': '该目录属于随代码分发的基准素材，不能从界面删除。'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        directory = asset_roots.resolve_within(asset_roots.upload_root(), category)
+        if directory is None or not directory.is_dir():
             return Response({'error': '自定义素材目录不存在。'}, status=status.HTTP_404_NOT_FOUND)
         shutil.rmtree(directory)
         cache.delete('data_factory_categories')

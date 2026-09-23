@@ -225,6 +225,34 @@ class BusinessTools:
         return [BusinessTools._media_group(image_path) for image_path in image_paths]
 
     @staticmethod
+    def collect_event_media_multi(media_roots: list[Path], relative_path: str) -> list[dict[str, Path | None]]:
+        """在多个素材根里查找事件素材；靠前的根优先，同名的只取一次。
+
+        素材分成两个根：随代码分发的基准集与用户上传集。上传集排在前面，因此用户可以用同名文件
+        覆盖基准素材，而不必改动代码库。
+        """
+        collected: list[dict[str, Path | None]] = []
+        seen: set[str] = set()
+        last_error: ValueError | None = None
+        for media_root in media_roots:
+            if not media_root.exists():
+                continue
+            try:
+                groups = BusinessTools.collect_event_media(media_root, relative_path)
+            except ValueError as error:
+                last_error = error
+                continue
+            for group in groups:
+                name = group['image_0'].name
+                if name in seen:
+                    continue
+                seen.add(name)
+                collected.append(group)
+        if not collected:
+            raise last_error or ValueError('素材路径不存在或不包含可用的 _image_0.jpeg 文件。')
+        return collected
+
+    @staticmethod
     def _media_group(image_0: Path) -> dict[str, Path | None]:
         marker = '_snap_image_0.'
         if marker not in image_0.name:
